@@ -385,17 +385,14 @@ class DesktopDisplayCoordinator(
         if (!isDisplayLocal) return
         val displayId = activity.window.decorView.display?.displayId ?: return
         applyActivityOrientation(activity, displayId)
-        if (isStopped && !sessionRestarting) return
-        if (displays().none { it.id == displayId && it.eligible }) return
-        val target = startupTarget(displayId)
-        restartForEnvironmentIfNeeded(target, expectedEpoch) { result ->
-            result.exceptionOrNull()?.let {
-                android.util.Log.w("DesktopDisplay", "Environment restart failed", it)
-                if ((it as? DesktopDisplayException)?.code != "SESSION_STOPPED") {
-                    android.widget.Toast.makeText(activity, it.message, android.widget.Toast.LENGTH_LONG).show()
-                }
-            }
-        }
+        observePassiveActivityEnvironment(displayId, expectedEpoch)
+    }
+
+    internal fun observePassiveActivityEnvironment(displayId: Int, expectedEpoch: Long) {
+        assertMainThread()
+        if (!isDisplayLocal || !isSessionCurrent(expectedEpoch)) return
+        // OEM disconnect/layout callbacks are passive; only explicit open paths may restart Linux.
+        if (sessionTarget?.displayId != displayId) publish()
     }
 
     fun subscribe(listener: (Map<String, Any?>) -> Unit): () -> Unit {
@@ -419,6 +416,7 @@ class DesktopDisplayCoordinator(
         val running = (!isStopped || stopFailed) && checkNotNull(host).sessionRunning()
         val headless = isDisplayLocal && running && sessionTarget != null &&
             displays.none { it.id == sessionTarget?.displayId && it.key == sessionTarget?.displayKey && it.eligible }
+        val exposedActive = active.takeUnless { headless }
         return mapOf(
             "schemaVersion" to 1,
             "autoOpenOnMonitor" to automaticOpeningEnabled(),
@@ -435,8 +433,8 @@ class DesktopDisplayCoordinator(
             "sessionEnvironment" to sessionTarget?.environment?.wireName,
             "sessionDisplayId" to sessionTarget?.displayId,
             "sessionHeadless" to headless,
-            "activeDisplayId" to active?.id, "activeDisplayKey" to active?.key,
-            "profileKind" to active?.let { kindFor(it).wireName },
+            "activeDisplayId" to exposedActive?.id, "activeDisplayKey" to exposedActive?.key,
+            "profileKind" to exposedActive?.let { kindFor(it).wireName },
             "renderWidth" to renderSize?.width, "renderHeight" to renderSize?.height,
             "displays" to displays.map(DesktopDisplay::toMap),
             "error" to error?.let { mapOf("code" to it.code, "message" to it.message) },

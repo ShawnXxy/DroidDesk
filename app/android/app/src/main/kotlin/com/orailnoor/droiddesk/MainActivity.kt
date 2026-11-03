@@ -26,6 +26,7 @@ import android.util.Log
 import android.widget.Toast
 import com.orailnoor.droiddesk.display.DesktopDisplayCoordinator
 import com.orailnoor.droiddesk.display.DesktopDisplayException
+import com.orailnoor.droiddesk.display.DesktopItemReadinessGate
 import com.orailnoor.droiddesk.display.DesktopLaunchReply
 import com.orailnoor.droiddesk.display.DisplaySettings
 import com.orailnoor.droiddesk.display.RenderPolicy
@@ -1181,25 +1182,48 @@ class MainActivity : FlutterActivity() {
         val coordinator = DesktopDisplayCoordinator.shared
         val rooted = chrootRuntime.hasRoot()
         val mode = if (rooted) "chroot" else "termux"
-        requestDesktop(mode, if (rooted) "xfce4" else linuxRuntime.getInstalledDE(),
+        val desktop = if (rooted) "xfce4" else linuxRuntime.getInstalledDE()
+        requestDesktop(mode, desktop,
             !(if (rooted) chrootRuntime.isRunning() else linuxRuntime.isRunning()),
             object : MethodChannel.Result {
                 override fun success(value: Any?) {
                     val epoch = coordinator.sessionGeneration
-                    DroidDeskService.executeSession {
-                        if (!coordinator.isSessionCurrent(epoch)) {
-                            mainHandler.post { result.error("SESSION_STOPPED", "Desktop launch was cancelled", null) }
-                            return@executeSession
+                    thread(name = "local-desktop-item-ready") {
+                        val readiness = DesktopItemReadinessGate(
+                            isSessionCurrent = { coordinator.isSessionCurrent(epoch) },
+                            waitUntilReady = {
+                                if (rooted) chrootRuntime.waitForDesktopReady(desktop)
+                                else linuxRuntime.waitForDesktopReady(desktop)
+                            },
+                        ).await {
+                            DroidDeskService.executeSession {
+                                if (!coordinator.isSessionCurrent(epoch)) {
+                                    mainHandler.post {
+                                        result.error("SESSION_STOPPED", "Desktop launch was cancelled", null)
+                                    }
+                                    return@executeSession
+                                }
+                                val command = desktopItemCommand(kind, id, rooted)
+                                val launched = if (rooted) chrootRuntime.executeDesktopCommand(command)
+                                    else linuxRuntime.executeDesktopCommand(command)
+                                mainHandler.post {
+                                    if (!coordinator.isSessionCurrent(epoch)) {
+                                        result.error("SESSION_STOPPED", "Desktop launch was cancelled", null)
+                                    } else if (launched.isFailure) {
+                                        result.error("DESKTOP_LAUNCH_FAILED", launched.exceptionOrNull()?.message, null)
+                                    } else result.success(true)
+                                }
+                            }
                         }
-                        val command = desktopItemCommand(kind, id, rooted)
-                        val launched = if (rooted) chrootRuntime.executeDesktopCommand(command)
-                            else linuxRuntime.executeDesktopCommand(command)
-                        mainHandler.post {
-                            if (!coordinator.isSessionCurrent(epoch)) {
-                                result.error("SESSION_STOPPED", "Desktop launch was cancelled", null)
-                            } else if (launched.isFailure) {
-                                result.error("DESKTOP_LAUNCH_FAILED", launched.exceptionOrNull()?.message, null)
-                            } else result.success(true)
+                        readiness.exceptionOrNull()?.let { failure ->
+                            mainHandler.post {
+                                val displayFailure = failure as? DesktopDisplayException
+                                result.error(
+                                    displayFailure?.code ?: "DESKTOP_LAUNCH_FAILED",
+                                    failure.message ?: "The Linux desktop did not become ready",
+                                    null,
+                                )
+                            }
                         }
                     }
                 }
