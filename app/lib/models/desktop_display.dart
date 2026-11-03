@@ -1,4 +1,14 @@
-enum DesktopDisplayPhase { hidden, attached, moving, stopped, error }
+enum DesktopDisplayPhase {
+  hidden,
+  attached,
+  moving,
+  starting,
+  restarting,
+  stopped,
+  error,
+}
+
+enum DesktopDisplayEnvironment { phone, tnt, otherExternal }
 
 enum DesktopProfileKind { phone, wide, monitor }
 
@@ -61,6 +71,13 @@ class DesktopDisplayState {
   DesktopDisplayState({
     this.phase = DesktopDisplayPhase.hidden,
     this.autoOpenOnMonitor = true,
+    this.displayLocalMode = false,
+    this.crossDisplayMovesAllowed = true,
+    this.sessionRunning = false,
+    this.sessionRestarting = false,
+    this.sessionEnvironment,
+    this.sessionDisplayId,
+    this.sessionHeadless = false,
     this.activeDisplayId,
     this.activeDisplayKey,
     this.profileKind,
@@ -86,6 +103,25 @@ class DesktopDisplayState {
     final activeKey = _nullable<String>(map, 'activeDisplayKey');
     final profile = _nullable<String>(map, 'profileKind');
     final error = _nullable<Object>(map, 'error');
+    final local = _required<bool>(map, 'displayLocalMode');
+    final crossDisplay = _required<bool>(map, 'crossDisplayMovesAllowed');
+    final running = _required<bool>(map, 'sessionRunning');
+    final restarting = _required<bool>(map, 'sessionRestarting');
+    final environment = _nullable<String>(map, 'sessionEnvironment');
+    final sessionId = _nullable<int>(map, 'sessionDisplayId');
+    final headless = _required<bool>(map, 'sessionHeadless');
+    if ((sessionId != null && sessionId < 0) ||
+        (sessionId == null) != (environment == null) ||
+        (restarting != (phase == DesktopDisplayPhase.restarting)) ||
+        (headless &&
+            (!local ||
+                !running ||
+                sessionId == null ||
+                activeId != null ||
+                (phase != DesktopDisplayPhase.hidden &&
+                    phase != DesktopDisplayPhase.restarting)))) {
+      throw const FormatException('Invalid desktop session identity');
+    }
     if ((activeId != null && activeId < 0) ||
         (activeId == null) != (activeKey == null) ||
         (phase == DesktopDisplayPhase.attached && activeId == null)) {
@@ -104,6 +140,19 @@ class DesktopDisplayState {
     return DesktopDisplayState(
       phase: phase,
       autoOpenOnMonitor: _required<bool>(map, 'autoOpenOnMonitor'),
+      displayLocalMode: local,
+      crossDisplayMovesAllowed: crossDisplay,
+      sessionRunning: running,
+      sessionRestarting: restarting,
+      sessionEnvironment: environment == null
+          ? null
+          : _enum(
+              DesktopDisplayEnvironment.values,
+              environment,
+              'sessionEnvironment',
+            ),
+      sessionDisplayId: sessionId,
+      sessionHeadless: headless,
       activeDisplayId: activeId,
       activeDisplayKey: activeKey,
       profileKind: profile == null
@@ -120,6 +169,13 @@ class DesktopDisplayState {
 
   final DesktopDisplayPhase phase;
   final bool autoOpenOnMonitor;
+  final bool displayLocalMode;
+  final bool crossDisplayMovesAllowed;
+  final bool sessionRunning;
+  final bool sessionRestarting;
+  final DesktopDisplayEnvironment? sessionEnvironment;
+  final int? sessionDisplayId;
+  final bool sessionHeadless;
   final int? activeDisplayId;
   final String? activeDisplayKey;
   final DesktopProfileKind? profileKind;
@@ -128,7 +184,14 @@ class DesktopDisplayState {
   final List<DesktopDisplayInfo> displays;
   final DesktopDisplayFailure? error;
 
-  bool get isMoving => phase == DesktopDisplayPhase.moving;
+  static const environmentRestartWarning =
+      'Opening DroidDesk in another display restarts Linux/XFCE. Save unsaved work first.';
+
+  bool get showEnvironmentWarning => displayLocalMode && sessionRunning;
+  bool get isMoving =>
+      phase == DesktopDisplayPhase.moving ||
+      phase == DesktopDisplayPhase.starting ||
+      sessionRestarting;
   Iterable<DesktopDisplayInfo> get monitors =>
       displays.where((display) => !display.isDefault && display.eligible);
 }

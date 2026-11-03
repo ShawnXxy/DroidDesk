@@ -12,6 +12,7 @@ import 'package:droiddesk/screens/setup/de_install_screen.dart';
 import 'package:droiddesk/screens/apps/app_catalog_screen.dart';
 import 'package:droiddesk/screens/desktop_tools_screen.dart';
 import 'package:droiddesk/screens/display_settings_screen.dart';
+import 'package:droiddesk/models/desktop_display.dart';
 
 /// Home dashboard — shown after setup is complete.
 /// Central hub for launching the desktop, terminal, and managing the environment.
@@ -22,6 +23,7 @@ class HomeScreen extends StatelessWidget {
   Widget build(BuildContext context) {
     final state = context.watch<AppState>();
     final isDark = state.isDarkMode;
+    final desktopActive = state.isRunning || state.desktopDisplayBusy;
 
     promptForUpdateIfAvailable(context, state);
 
@@ -130,6 +132,24 @@ class HomeScreen extends StatelessWidget {
                 ),
               ),
 
+              if (state.desktopDisplays.showEnvironmentWarning) SliverToBoxAdapter(
+                child: Padding(
+                  padding: const EdgeInsets.fromLTRB(24, 12, 24, 0),
+                  child: Card(child: ListTile(
+                    leading: const Icon(Icons.info_outline),
+                    title: const Text(DesktopDisplayState.environmentRestartWarning),
+                  )),
+                ),
+              ),
+              if (state.desktopDisplays.isMoving) SliverToBoxAdapter(
+                child: Padding(
+                  padding: const EdgeInsets.fromLTRB(24, 12, 24, 0),
+                  child: Text(state.desktopDisplays.sessionRestarting
+                      ? 'Restarting Linux/XFCE on this display...'
+                      : 'Opening Linux desktop...'),
+                ),
+              ),
+
               // ── Running / finished App Store install, pinned ──
               if (state.desktopDisplayError != null) SliverToBoxAdapter(
                 child: Padding(
@@ -205,30 +225,30 @@ class HomeScreen extends StatelessWidget {
                                         'Your session is waiting in the background',
                                     color: DroidTheme.primary,
                                     gradient: DroidTheme.primaryGradient,
-                                    onTap: () {
+                                    onTap: state.desktopDisplayBusy ? null : () {
                                       state.launchDesktopActivity();
                                     },
                                   ),
                                 ),
 
                               _ActionCard(
-                                icon: state.isRunning
+                                icon: desktopActive
                                     ? Icons.stop_circle_rounded
                                     : Icons.desktop_mac_rounded,
-                                title: state.isRunning
+                                title: desktopActive
                                     ? 'Stop Server'
                                     : 'Launch Desktop',
-                                subtitle: state.isRunning
+                                subtitle: desktopActive
                                     ? 'Shutdown Linux environment'
                                     : 'Open your Desktop Environment',
-                                color: state.isRunning
+                                color: desktopActive
                                     ? DroidTheme.error
                                     : DroidTheme.primary,
-                                gradient: state.isRunning
+                                gradient: desktopActive
                                     ? null
                                     : DroidTheme.primaryGradient,
                                 onTap: () async {
-                                  if (state.isRunning) {
+                                  if (desktopActive) {
                                     state.stopLinux();
                                   } else {
                                     if (!state.isDEInstalled) {
@@ -255,7 +275,9 @@ class HomeScreen extends StatelessWidget {
                               _ActionCard(
                                 icon: Icons.monitor_rounded,
                                 title: 'Displays and scaling',
-                                subtitle: 'Open on monitor and adjust independent UI scale',
+                                subtitle: state.desktopDisplays.displayLocalMode
+                                    ? 'Adjust this environment and its UI scale'
+                                    : 'Open on monitor and adjust independent UI scale',
                                 color: DroidTheme.secondary,
                                 onTap: () => Navigator.of(context).push(MaterialPageRoute(
                                   builder: (_) => const DisplaySettingsScreen(),
@@ -426,7 +448,9 @@ class HomeScreen extends StatelessWidget {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Text(
-                  state.isRunning ? 'Desktop active' : 'Ready when you are',
+                  state.desktopDisplays.sessionRestarting ? 'Restarting desktop'
+                      : state.desktopDisplays.isMoving ? 'Opening desktop'
+                      : state.isRunning ? 'Desktop active' : 'Ready when you are',
                   style: DroidTheme.headingSm.copyWith(
                     color: state.isRunning
                         ? activeTitleColor
@@ -584,7 +608,9 @@ class HomeScreen extends StatelessWidget {
                         icon: Icons.bolt_rounded,
                         color: DroidTheme.primary,
                         title: 'Open automatically',
-                        subtitle: 'Start the desktop on launch',
+                        subtitle: state.desktopDisplays.displayLocalMode
+                            ? 'Always opens ready Linux on R2; this preference applies to other devices'
+                            : 'Start the desktop on launch',
                         trailing: Switch.adaptive(
                           value: state.autoStartDesktop,
                           activeThumbColor: Colors.white,
@@ -593,10 +619,13 @@ class HomeScreen extends StatelessWidget {
                           inactiveTrackColor: DroidTheme.surfaceBorder,
                           trackOutlineColor:
                               const WidgetStatePropertyAll(Colors.transparent),
-                          onChanged: state.setAutoStartDesktop,
+                          onChanged: state.desktopDisplays.displayLocalMode ? null : state.setAutoStartDesktop,
                         ),
-                        onTap: () =>
-                            state.setAutoStartDesktop(!state.autoStartDesktop),
+                        onTap: () {
+                          if (!state.desktopDisplays.displayLocalMode) {
+                            state.setAutoStartDesktop(!state.autoStartDesktop);
+                          }
+                        },
                       ),
                       _SettingsRow(
                         icon: Icons.auto_awesome_rounded,
@@ -1250,7 +1279,7 @@ class _ActionCard extends StatelessWidget {
   final String subtitle;
   final Color color;
   final Gradient? gradient;
-  final VoidCallback onTap;
+  final VoidCallback? onTap;
 
   const _ActionCard({
     required this.icon,

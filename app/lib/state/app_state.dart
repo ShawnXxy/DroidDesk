@@ -14,9 +14,11 @@ class AppState extends ChangeNotifier {
   bool _desktopOperationBusy = false;
   String? _desktopOperationError;
   int _desktopEventRevision = 0;
+  int _sessionControlRevision = 0;
+  bool _sessionControlBusy = false;
 
   DesktopDisplayState get desktopDisplays => _desktopDisplays;
-  bool get desktopDisplayBusy => _desktopOperationBusy || _desktopDisplays.isMoving;
+  bool get desktopDisplayBusy => _desktopOperationBusy || _sessionControlBusy || _desktopDisplays.isMoving;
   String? get desktopOperationError => _desktopOperationError;
   String? get desktopDisplayError =>
       _desktopOperationError ?? _desktopDisplays.error?.toString();
@@ -31,6 +33,7 @@ class AppState extends ChangeNotifier {
     if (_disposed) return;
     _desktopEventRevision++;
     _desktopDisplays = state;
+    _isRunning = state.sessionRunning;
     notifyListeners();
     if (state.phase == DesktopDisplayPhase.stopped ||
         state.error?.code == 'SESSION_STOPPED') {
@@ -67,6 +70,7 @@ class AppState extends ChangeNotifier {
       final state = await DroidDeskPlatform.getDesktopDisplays();
       if (_disposed || revision != _desktopEventRevision) return;
       _desktopDisplays = state;
+      _isRunning = state.sessionRunning;
       notifyListeners();
     } on PlatformException catch (error) {
       _recordDisplayError(error);
@@ -78,16 +82,29 @@ class AppState extends ChangeNotifier {
   Future<DesktopDisplaySettings> getDesktopDisplaySettings(String key) =>
       DroidDeskPlatform.getDesktopDisplaySettings(key);
 
-  Future<void> setAutoOpenOnMonitor(bool enabled) =>
-      _runDesktopOperation(() => DroidDeskPlatform.setAutoOpenOnMonitor(enabled));
+  Future<void> setAutoOpenOnMonitor(bool enabled) async {
+    if (!_allowDisplayRouting()) return;
+    await _runDesktopOperation(() => DroidDeskPlatform.setAutoOpenOnMonitor(enabled));
+  }
 
-  Future<void> openDesktopOnDisplay(DesktopDisplayInfo display) =>
-      _runDesktopOperation(() => DroidDeskPlatform.openDesktopOnDisplay(
+  Future<void> openDesktopOnDisplay(DesktopDisplayInfo display) async {
+    if (!_allowDisplayRouting()) return;
+    await _runDesktopOperation(() => DroidDeskPlatform.openDesktopOnDisplay(
         displayId: display.id, displayKey: display.key,
       ));
+  }
 
-  Future<void> moveDesktopToPhone() =>
-      _runDesktopOperation(DroidDeskPlatform.moveDesktopToPhone);
+  Future<void> moveDesktopToPhone() async {
+    if (!_allowDisplayRouting()) return;
+    await _runDesktopOperation(DroidDeskPlatform.moveDesktopToPhone);
+  }
+
+  bool _allowDisplayRouting() {
+    if (_disposed) return false;
+    if (_desktopDisplays.crossDisplayMovesAllowed) return true;
+    _recordDisplayError(StateError('The phone or TNT launcher selects the display environment'));
+    return false;
+  }
 
   Future<void> saveDesktopDisplaySettings(DesktopDisplaySettings settings) =>
       _runDesktopOperation(() => DroidDeskPlatform.saveDesktopDisplaySettings(settings));
@@ -373,11 +390,12 @@ class AppState extends ChangeNotifier {
   }
 
   Future<void> refreshStatus() async {
+    final revision = _desktopEventRevision;
     try {
       final status = await DroidDeskPlatform.getRuntimeStatus();
       if (_disposed) return;
       _isBootstrapped = status['isBootstrapped'] == true;
-      _isRunning = status['isRunning'] == true;
+      if (revision == _desktopEventRevision) _isRunning = status['isRunning'] == true;
       _hasRoot = status['hasRoot'] == true;
       _installedDistro = status['distro']?.toString() ?? '';
       _installedDE = status['installedDE']?.toString() ?? '';
@@ -870,6 +888,15 @@ class AppState extends ChangeNotifier {
   Future<void> startLinux({
     String mode = 'x11',
   }) async {
+    if (_disposed) return;
+    if (desktopDisplayBusy) {
+      _recordDisplayError(StateError('Another desktop action is in progress'));
+      return;
+    }
+    final operation = ++_sessionControlRevision;
+    final revision = _desktopEventRevision;
+    _sessionControlBusy = true;
+    notifyListeners();
     try {
       _errorMessage = null;
       final started = await DroidDeskPlatform.startLinux(
@@ -879,31 +906,65 @@ class AppState extends ChangeNotifier {
       if (!started) {
         throw StateError('Linux runtime is not ready');
       }
-      _isRunning = true;
+      if (_disposed || operation != _sessionControlRevision) return;
+      if (revision == _desktopEventRevision) _isRunning = true;
       notifyListeners();
     } catch (e) {
+      if (_disposed || operation != _sessionControlRevision) return;
       _errorMessage = 'Failed to start: $e';
       notifyListeners();
+    } finally {
+      if (!_disposed && operation == _sessionControlRevision) {
+        _sessionControlBusy = false;
+        notifyListeners();
+      }
     }
   }
 
   Future<void> launchDesktopActivity() async {
+    if (_disposed) return;
+    if (desktopDisplayBusy) {
+      _recordDisplayError(StateError('Another desktop action is in progress'));
+      return;
+    }
+    final operation = ++_sessionControlRevision;
+    _sessionControlBusy = true;
+    notifyListeners();
     try {
       await DroidDeskPlatform.launchDesktopActivity();
     } catch (e) {
+      if (_disposed || operation != _sessionControlRevision) return;
       _errorMessage = 'Failed to launch desktop activity: $e';
       notifyListeners();
+    } finally {
+      if (!_disposed && operation == _sessionControlRevision) {
+        _sessionControlBusy = false;
+        notifyListeners();
+      }
     }
   }
 
   Future<void> stopLinux() async {
+    if (_disposed) return;
+    final operation = ++_sessionControlRevision;
+    final revision = _desktopEventRevision;
+    _sessionControlBusy = true;
+    notifyListeners();
     try {
       await DroidDeskPlatform.stopLinux();
-      _isRunning = false;
+      if (_disposed || operation != _sessionControlRevision) return;
+      if (revision == _desktopEventRevision) _isRunning = false;
       notifyListeners();
     } catch (e) {
+      if (_disposed || operation != _sessionControlRevision) return;
       _errorMessage = 'Failed to stop: $e';
       notifyListeners();
+    } finally {
+      if (!_disposed && operation == _sessionControlRevision) {
+        _sessionControlBusy = false;
+        notifyListeners();
+        await refreshDesktopDisplays();
+      }
     }
   }
 

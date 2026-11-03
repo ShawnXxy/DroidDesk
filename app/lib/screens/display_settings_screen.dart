@@ -181,8 +181,10 @@ class _DisplaySettingsScreenState extends State<DisplaySettingsScreen> {
             style: Theme.of(context).textTheme.titleMedium,
           ),
           const SizedBox(height: 8),
-          const Text(
-            'Automatic mode moves a running desktop to one available monitor. Manual display controls remain available.',
+          Text(
+            snapshot.displayLocalMode
+                ? 'The phone or TNT launcher selects the display environment. Changing environments restarts Linux/XFCE; scaling settings remain available.'
+                : 'Automatic mode moves a running desktop to one available monitor. Manual display controls remain available.',
           ),
           SwitchListTile.adaptive(
             key: const Key('desktop-auto-open-monitor'),
@@ -192,7 +194,7 @@ class _DisplaySettingsScreenState extends State<DisplaySettingsScreen> {
               'Linux is not started automatically. Multiple monitors require selection.',
             ),
             value: snapshot.autoOpenOnMonitor,
-            onChanged: state.desktopDisplayBusy
+            onChanged: state.desktopDisplayBusy || !snapshot.crossDisplayMovesAllowed
                 ? null
                 : state.setAutoOpenOnMonitor,
           ),
@@ -344,7 +346,8 @@ class _DisplaySettingsScreenState extends State<DisplaySettingsScreen> {
           FilledButton.icon(
             key: const Key('desktop-open-monitor'),
             onPressed:
-                !state.desktopDisplayBusy &&
+                snapshot.crossDisplayMovesAllowed &&
+                    !state.desktopDisplayBusy &&
                     state.isRunning &&
                     selected != null &&
                     !selected.isDefault &&
@@ -356,7 +359,7 @@ class _DisplaySettingsScreenState extends State<DisplaySettingsScreen> {
           ),
           const SizedBox(height: 8),
           OutlinedButton.icon(
-            onPressed: !state.desktopDisplayBusy && state.isRunning
+            onPressed: snapshot.crossDisplayMovesAllowed && !state.desktopDisplayBusy && state.isRunning
                 ? state.moveDesktopToPhone
                 : null,
             icon: const Icon(Icons.phone_android),
