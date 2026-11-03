@@ -4,6 +4,7 @@ import android.content.Context
 import android.content.Intent
 import android.app.ActivityOptions
 import android.app.ActivityManager
+import android.app.Activity
 import android.content.ActivityNotFoundException
 import android.content.res.Configuration
 import android.os.Handler
@@ -14,9 +15,20 @@ import com.orailnoor.droiddesk.view.DesktopActivity
 import com.orailnoor.droiddesk.runtime.ChrootRuntime
 import com.orailnoor.droiddesk.runtime.LinuxRuntime
 import com.orailnoor.droiddesk.service.DroidDeskService
+import java.lang.ref.WeakReference
 
 class DesktopDisplayLauncher {
     companion object {
+        fun localIntent(activity: Activity, request: DesktopLaunchRequest): Intent =
+            Intent(activity, DesktopActivity::class.java).apply {
+                putExtra("displayId", request.display.id)
+                putExtra("displayKey", request.display.key)
+                putExtra("displayRequestId", request.requestId)
+                putExtra("sessionGeneration", request.sessionGeneration)
+                putExtra("mode", request.mode)
+                putExtra("de", request.desktopEnv)
+            }
+
         fun intent(context: Context, displayId: Int, displayKey: String, requestId: Long): Intent =
             Intent(context, DesktopActivity::class.java).apply {
                 flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_MULTIPLE_TASK
@@ -31,9 +43,25 @@ class DesktopDisplayLauncher {
 internal class AndroidDesktopDisplayHost(
     private val context: Context,
     private val repository: DisplayRepository,
+    private val environmentPolicy: DisplayEnvironmentPolicy,
 ) : DesktopDisplayHost {
     private val handler = Handler(Looper.getMainLooper())
     private val activities = context.getSystemService(ActivityManager::class.java)
+    private var boundActivity: WeakReference<Activity>? = null
+    private var localDesktop: WeakReference<DesktopActivity>? = null
+
+    override fun bindActivity(activity: Activity) {
+        boundActivity = WeakReference(activity)
+        if (activity is DesktopActivity) localDesktop = WeakReference(activity)
+    }
+
+    override fun unbindActivity(activity: Activity) {
+        if (boundActivity?.get() === activity) boundActivity = null
+        if (localDesktop?.get() === activity) localDesktop = null
+    }
+
+    override fun currentDisplayId(): Int? =
+        boundActivity?.get()?.takeUnless { it.isDestroyed || it.isFinishing }?.window?.decorView?.display?.displayId
 
     override fun displays() = repository.snapshot()
 
@@ -52,13 +80,22 @@ internal class AndroidDesktopDisplayHost(
         if (current.id != request.display.id || !current.eligible) {
             throw DesktopDisplayException("DISPLAY_UNAVAILABLE", "The selected display is no longer launchable")
         }
-        val intent = DesktopDisplayLauncher.intent(context, current.id, current.key, request.requestId).apply {
-            putExtra("sessionGeneration", request.sessionGeneration)
-            putExtra("mode", request.mode)
-            putExtra("de", request.desktopEnv)
-        }
         try {
-            context.startActivity(intent, ActivityOptions.makeBasic().setLaunchDisplayId(current.id).toBundle())
+            if (environmentPolicy.displayLocalMode) {
+                val activity = boundActivity?.get()?.takeUnless { it.isDestroyed || it.isFinishing }
+                    ?: throw DesktopDisplayException("DISPLAY_UNAVAILABLE", "The app's current window is unavailable")
+                if (activity.window.decorView.display?.displayId != current.id) {
+                    throw DesktopDisplayException("DISPLAY_UNAVAILABLE", "The app moved before desktop startup")
+                }
+                activity.startActivity(DesktopDisplayLauncher.localIntent(activity, request))
+            } else {
+                val intent = DesktopDisplayLauncher.intent(context, current.id, current.key, request.requestId).apply {
+                    putExtra("sessionGeneration", request.sessionGeneration)
+                    putExtra("mode", request.mode)
+                    putExtra("de", request.desktopEnv)
+                }
+                context.startActivity(intent, ActivityOptions.makeBasic().setLaunchDisplayId(current.id).toBundle())
+            }
             Log.i("DesktopDisplay", "Launch request=${request.requestId} display=${current.id}")
         } catch (error: SecurityException) {
             Log.w("DesktopDisplay", "Android denied desktop placement", error)
@@ -73,6 +110,25 @@ internal class AndroidDesktopDisplayHost(
     }
 
     override fun focus(requestId: Long): Boolean {
+        if (environmentPolicy.displayLocalMode) {
+            val desktop = localDesktop?.get()?.takeUnless { it.isDestroyed || it.isFinishing } ?: return false
+            if (desktop.intent.getLongExtra("displayRequestId", -1) != requestId) return false
+            val activity = boundActivity?.get()?.takeUnless { it.isDestroyed || it.isFinishing } ?: return false
+            if (activity !== desktop) {
+                try {
+                    activity.startActivity(Intent(desktop.intent).apply {
+                        flags = Intent.FLAG_ACTIVITY_REORDER_TO_FRONT
+                    })
+                } catch (error: SecurityException) {
+                    Log.w("DesktopDisplay", "Android denied focusing the local desktop", error)
+                    return false
+                } catch (error: ActivityNotFoundException) {
+                    Log.e("DesktopDisplay", "The local desktop activity is unavailable", error)
+                    return false
+                }
+            }
+            return true
+        }
         val task = activities.appTasks.firstOrNull {
             it.taskInfo.baseIntent?.data == Uri.parse("droiddesk://desktop/$requestId")
         } ?: return false
@@ -81,6 +137,12 @@ internal class AndroidDesktopDisplayHost(
     }
 
     override fun cancelLaunch(requestId: Long) {
+        if (environmentPolicy.displayLocalMode) {
+            localDesktop?.get()?.takeIf {
+                it.intent.getLongExtra("displayRequestId", -1) == requestId
+            }?.finish()
+            return
+        }
         activities.appTasks.filter {
             it.taskInfo.baseIntent?.data == Uri.parse("droiddesk://desktop/$requestId")
         }.forEach { it.finishAndRemoveTask() }
@@ -93,7 +155,7 @@ internal class AndroidDesktopDisplayHost(
     }
 
     override fun notifyReturnRequired(error: DesktopDisplayException) {
-        Log.e("DesktopDisplay", "Phone return requires user action: ${error.code}: ${error.message}")
+        Log.e("DesktopDisplay", "Desktop recovery requires user action: ${error.code}: ${error.message}")
         DroidDeskService.notifyReturnRequired(context, error.message ?: "Phone placement was not confirmed")
     }
 }

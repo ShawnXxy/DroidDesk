@@ -46,6 +46,14 @@ DroidDesk is also available as a standalone Android application that completely 
 
 Download the latest release APK from the Releases tab and sideload it to begin.
 
+### Smartisan R2 / TNT
+
+R2/TNT display-local support is under qualification. On Smartisan R2 (`darwin`), the phone or TNT launcher selects the app's display. Once setup is ready, opening DroidDesk opens XFCE there without requiring the optional automatic-start preference. The management screen and desktop share one task; no companion APK is needed.
+
+Opening DroidDesk in another display restarts Linux/XFCE. Save unsaved work first. Installed packages and home files persist, but application memory does not. Unplugging TNT or backgrounding the app leaves the existing session in place until a launcher opening changes its display environment. TNT windows request landscape automatically; phone orientation is unchanged. Resizing the current window does not restart Linux.
+
+Automatic monitor placement and manual cross-display moves are disabled on R2; live rendering, scaling and input settings remain available. Other devices retain their existing session-preserving monitor behavior.
+
 ## Requirements
 
 - Any Android phone (ARM64)

@@ -13,6 +13,8 @@
 **/.dart_tool/
 .gradle/
 **/.gradle/
+.kotlin/
+**/.kotlin/
 .cxx/
 **/.cxx/
 build/

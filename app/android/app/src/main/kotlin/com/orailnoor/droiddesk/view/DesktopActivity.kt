@@ -177,6 +177,10 @@ class DesktopActivity : Activity() {
             return
         }
         current = java.lang.ref.WeakReference(this)
+        displayCoordinator.bindActivity(this)
+        window.decorView.post {
+            if (!isDestroyed && !isFinishing) displayCoordinator.observeActivityEnvironment(this, sessionEpoch)
+        }
         sessionMode = intent.getStringExtra("mode") ?: displayCoordinator.sessionMode
         desktopEnv = intent.getStringExtra("de") ?: displayCoordinator.desktopEnv
         estimatedLoadingSeconds = if (shouldStartSession) 30 else 10
@@ -214,6 +218,10 @@ class DesktopActivity : Activity() {
         if (displayCoordinator.isStopped) {
             finish()
             return
+        }
+        displayCoordinator.bindActivity(this)
+        window.decorView.post {
+            if (!isDestroyed && !isFinishing) displayCoordinator.observeActivityEnvironment(this, sessionEpoch)
         }
         enableImmersiveMode()
         scheduleGeometry()
@@ -289,7 +297,7 @@ class DesktopActivity : Activity() {
         displayCoordinator.registerActivity(
             lease, displayRequestId,
             actualDisplay = { lorieView?.display?.displayId ?: windowManager.defaultDisplay.displayId },
-        ) { finishAndRemoveTask() }
+        ) { if (displayCoordinator.isDisplayLocal) finish() else finishAndRemoveTask() }
         displayCoordinator.setProfileRefresher(lease) { completion ->
             failedUiProfile = null
             explicitProfileRetry = true
@@ -467,7 +475,11 @@ class DesktopActivity : Activity() {
         val lease = rendererLease ?: return
         val actualDisplay = view.display?.displayId ?: return
         if (actualDisplay != lease.displayId) {
-            displayCoordinator.onActivityMoved(lease, actualDisplay)
+            if (displayCoordinator.isDisplayLocal) {
+                displayCoordinator.observeActivityEnvironment(this, sessionEpoch)
+            } else {
+                displayCoordinator.onActivityMoved(lease, actualDisplay)
+            }
             return
         }
         val remaining = remainingWindowInsets(view) ?: return
@@ -1161,6 +1173,7 @@ class DesktopActivity : Activity() {
     }
 
     override fun onDestroy() {
+        displayCoordinator.unbindActivity(this)
         rendererLease?.let(displayCoordinator::release)
         detachRenderer()
         if (current?.get() === this) current = null

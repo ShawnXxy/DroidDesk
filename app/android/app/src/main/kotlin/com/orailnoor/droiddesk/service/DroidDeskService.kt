@@ -30,6 +30,8 @@ import java.util.concurrent.Executors
 import java.lang.ref.WeakReference
 import java.io.IOException
 
+enum class DesktopStopReason { USER, ENVIRONMENT_CHANGE }
+
 /**
  * Foreground service that keeps the Linux runtime alive.
  *
@@ -54,10 +56,15 @@ class DroidDeskService : Service() {
             sessionExecutor.execute(operation)
         }
 
-        fun stopDesktop(context: Context, completion: (Result<Unit>) -> Unit) {
+        fun stopDesktop(
+            context: Context,
+            reason: DesktopStopReason = DesktopStopReason.USER,
+            completion: (Result<Unit>) -> Unit,
+        ) {
             val app = context.applicationContext
             val coordinator = DesktopDisplayCoordinator.shared
-            coordinator.startStopping()
+            if (reason == DesktopStopReason.USER) coordinator.cancelPendingRestart()
+            coordinator.startStopping(preserveRestart = reason == DesktopStopReason.ENVIRONMENT_CHANGE)
             executeSession {
                 var failure: Exception? = null
                 val operations: List<() -> Unit> = listOf(
@@ -75,8 +82,8 @@ class DroidDeskService : Service() {
                     }
                 }
                 mainHandler.post {
-                    coordinator.finishStopping()
                     val error = failure
+                    coordinator.finishStopping(error)
                     if (error == null) {
                         activeService?.get()?.let {
                             ServiceCompat.stopForeground(it, ServiceCompat.STOP_FOREGROUND_REMOVE)
@@ -145,12 +152,13 @@ class DroidDeskService : Service() {
 
         fun notifyReturnRequired(context: Context, message: String) {
             val manager = context.getSystemService(NotificationManager::class.java)
+            val displayLocal = DesktopDisplayCoordinator.shared.isDisplayLocal
             manager.createNotificationChannel(NotificationChannel(
                 CHANNEL_ID, "DroidDesk Linux Service", NotificationManager.IMPORTANCE_LOW,
             ))
             val returnIntent = PendingIntent.getActivity(
                 context, 2, Intent(context, MainActivity::class.java)
-                    .setAction(MainActivity.ACTION_RETURN_TO_PHONE)
+                    .setAction(if (displayLocal) MainActivity.ACTION_OPEN_DESKTOP else MainActivity.ACTION_RETURN_TO_PHONE)
                     .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP),
                 PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
             )
@@ -160,11 +168,11 @@ class DroidDeskService : Service() {
             )
             val running = ChrootRuntime(context).isRunning() || LinuxRuntime(context).isRunning()
             manager.notify(NOTIFICATION_ID, NotificationCompat.Builder(context, CHANNEL_ID)
-                .setContentTitle(if (running) "Linux session preserved" else "Desktop placement needs attention")
+                .setContentTitle(if (running && !displayLocal) "Linux session preserved" else "Desktop placement needs attention")
                 .setContentText(message)
                 .setSmallIcon(android.R.drawable.ic_menu_compass)
                 .setContentIntent(returnIntent)
-                .addAction(0, "Return to phone", returnIntent)
+                .addAction(0, if (displayLocal) "Open" else "Return to phone", returnIntent)
                 .addAction(0, "Stop", stopIntent)
                 .setOngoing(true)
                 .setOnlyAlertOnce(true)
@@ -265,6 +273,7 @@ class DroidDeskService : Service() {
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("DroidDesk")
             .setContentText(contentText)
+            .setStyle(NotificationCompat.BigTextStyle().bigText(contentText))
             .setSmallIcon(android.R.drawable.ic_menu_compass)
             .setContentIntent(openIntent)
             .addAction(0, "Open", openIntent)

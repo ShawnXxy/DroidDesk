@@ -2,6 +2,12 @@ package com.orailnoor.droiddesk.display
 
 import android.os.Looper
 import android.content.Context
+import android.os.Build
+import android.app.Activity
+import android.content.Intent
+import com.orailnoor.droiddesk.service.DesktopStopReason
+import com.orailnoor.droiddesk.service.DroidDeskService
+import java.util.WeakHashMap
 import java.util.concurrent.atomic.AtomicBoolean
 
 data class RendererLease(val generation: Long, val displayId: Int)
@@ -15,6 +21,9 @@ data class DesktopLaunchRequest(
 )
 
 interface DesktopDisplayHost {
+    fun currentDisplayId(): Int? = null
+    fun bindActivity(activity: Activity) {}
+    fun unbindActivity(activity: Activity) {}
     fun displays(): List<DesktopDisplay>
     fun defaultProfileKind(): ProfileKind
     fun sessionRunning(): Boolean
@@ -29,6 +38,7 @@ class DesktopDisplayCoordinator(
     private val assertMainThread: () -> Unit = {},
     private var host: DesktopDisplayHost? = null,
     private var settingsStore: DisplaySettingsStore? = null,
+    private var environmentPolicy: DisplayEnvironmentPolicy = DisplayEnvironmentPolicy.forDevice(""),
 ) {
     private data class Owner(
         val lease: RendererLease,
@@ -48,6 +58,7 @@ class DesktopDisplayCoordinator(
     private var owner: Owner? = null
     private var generation = 0L
     private var repository: DisplayRepository? = null
+    private val originalActivityOrientations = WeakHashMap<Activity, Int>()
     private val listeners = mutableSetOf<(Map<String, Any?>) -> Unit>()
     private val sessionStartListeners = mutableSetOf<(Result<Unit>) -> Unit>()
     private var appliedKind: ProfileKind? = null
@@ -56,10 +67,15 @@ class DesktopDisplayCoordinator(
     private var move: Move? = null
     private var requestSequence = 0L
     private var lastTarget: DesktopDisplay? = null
+    private var sessionTarget: DesktopStartupTarget? = null
+    private var restartController: DisplayLocalSessionController? = null
+    private var sessionRestarting = false
     private var acceptedRequest: Long? = null
     private var phase = "hidden"
     private var error: DesktopDisplayException? = null
     private var pendingStops = 0
+    private var stoppingTarget: DesktopStartupTarget? = null
+    private var stopFailed = false
     private var needsSessionStart = false
     private var sessionStarting = false
     private var cancelAutomaticTimer: (() -> Unit)? = null
@@ -69,6 +85,10 @@ class DesktopDisplayCoordinator(
     private val automaticAttempts = mutableSetOf<String>()
     private val automaticSuppressed = mutableSetOf<String>()
     val isStarting: Boolean get() = sessionStarting
+    val isRestarting: Boolean get() = sessionRestarting
+    val sessionFailure: DesktopDisplayException? get() = error
+    val hasRunningSession: Boolean get() = (!isStopped || stopFailed) && host?.sessionRunning() == true
+    val isDisplayLocal: Boolean get() = environmentPolicy.displayLocalMode
     var sessionMode = "termux"
         private set
     var desktopEnv = "xfce4"
@@ -107,7 +127,39 @@ class DesktopDisplayCoordinator(
             sessionStarting = true
             profileRefresher?.invoke {}
         }
+        publish()
         return epoch
+    }
+
+    fun awaitSessionReady(epoch: Long, completion: (Result<Unit>) -> Unit) {
+        assertMainThread()
+        if (!isSessionCurrent(epoch)) {
+            completion(Result.failure(DesktopDisplayException("SESSION_STOPPED", "The Linux session was stopped")))
+            return
+        }
+        if (!isStarting) {
+            completion(if (hasRunningSession) Result.success(Unit) else Result.failure(
+                sessionFailure ?: DesktopDisplayException("SESSION_STOPPED", "Linux is not running"),
+            ))
+            return
+        }
+        var unsubscribeState: () -> Unit = {}
+        var unsubscribeStart: () -> Unit = {}
+        var completed = false
+        val finish: (Result<Unit>) -> Unit = {
+            if (!completed) {
+                completed = true
+                unsubscribeState()
+                unsubscribeStart()
+                completion(it)
+            }
+        }
+        unsubscribeState = subscribe {
+            if (!isSessionCurrent(epoch)) {
+                finish(Result.failure(DesktopDisplayException("SESSION_STOPPED", "The Linux session was stopped")))
+            }
+        }
+        unsubscribeStart = subscribeSessionStart { finish(it) }
     }
 
     fun consumeSessionStart(lease: RendererLease): Boolean {
@@ -129,16 +181,28 @@ class DesktopDisplayCoordinator(
         if (result.isSuccess && isSessionCurrent(epoch)) refreshAutomaticOpening()
     }
 
-    fun startStopping() {
+    fun startStopping(preserveRestart: Boolean = false) {
         assertMainThread()
+        if (pendingStops == 0) stoppingTarget = sessionTarget
         pendingStops++
-        stop()
+        stop(preserveRestart)
     }
 
-    fun finishStopping() {
+    fun finishStopping(failure: Throwable? = null) {
         assertMainThread()
         check(pendingStops > 0)
         pendingStops--
+        stopFailed = failure != null
+        if (failure != null) {
+            sessionTarget = stoppingTarget
+            phase = "error"
+            reportError(DesktopDisplayException("STOP_FAILED", failure.message ?: "Linux teardown failed"))
+        } else if (pendingStops == 0) {
+            stoppingTarget = null
+            sessionTarget = null
+            phase = "stopped"
+            error = null
+        }
         publish()
     }
 
@@ -189,8 +253,9 @@ class DesktopDisplayCoordinator(
         publish()
     }
 
-    fun stop() {
+    fun stop(preserveRestart: Boolean = false) {
         assertMainThread()
+        if (!preserveRestart) cancelPendingRestart()
         if (isStopped) return
         cancelAutomaticOpening()
         isStopped = true
@@ -198,6 +263,7 @@ class DesktopDisplayCoordinator(
         generation++
         needsSessionStart = false
         sessionStarting = false
+        stopFailed = false
         val pending = move
         move = null
         pending?.cancelTimeout?.invoke()
@@ -211,6 +277,7 @@ class DesktopDisplayCoordinator(
         appliedKind = null
         renderSize = null
         lastTarget = null
+        sessionTarget = null
         acceptedRequest = null
         phase = "stopped"
         error = null
@@ -221,12 +288,114 @@ class DesktopDisplayCoordinator(
     fun initialize(context: Context) {
         assertMainThread()
         if (host != null) return
+        environmentPolicy = DisplayEnvironmentPolicy.forDevice(Build.DEVICE)
         settingsStore = DisplaySettingsStore(context)
         val discovery = DisplayRepository(context)
         repository = discovery
-        host = AndroidDesktopDisplayHost(context.applicationContext, discovery)
+        host = AndroidDesktopDisplayHost(context.applicationContext, discovery, environmentPolicy)
+        if (isDisplayLocal) {
+            val app = context.applicationContext
+            restartController = DisplayLocalSessionController(object : DisplayLocalSessionHost {
+                override fun sessionEpoch() = sessionGeneration
+                override fun isSessionCurrent(epoch: Long) = this@DesktopDisplayCoordinator.isSessionCurrent(epoch)
+                override fun validateTarget(target: DesktopStartupTarget) {
+                    val actual = host?.currentDisplayId()
+                    if (actual != target.displayId || startupTarget(actual) != target) {
+                        throw DesktopDisplayException("DISPLAY_UNAVAILABLE", "The app moved before Linux could restart")
+                    }
+                }
+                override fun restartingChanged(restarting: Boolean) {
+                    sessionRestarting = restarting
+                    publish()
+                }
+                override fun stopForEnvironmentChange(completion: (Result<Unit>) -> Unit) {
+                    DroidDeskService.stopDesktop(app, DesktopStopReason.ENVIRONMENT_CHANGE, completion)
+                }
+                override fun startOnTarget(target: DesktopStartupTarget, completion: (Result<Unit>) -> Unit) {
+                    try {
+                        val epoch = prepareSession(sessionMode, desktopEnv, true)
+                        app.startForegroundService(Intent(app, DroidDeskService::class.java))
+                        openActive(target) { result ->
+                            if (result.isFailure) completion(result) else awaitSessionReady(epoch, completion)
+                        }
+                    } catch (failure: DesktopDisplayException) {
+                        completion(Result.failure(failure))
+                    } catch (failure: SecurityException) {
+                        android.util.Log.e("DesktopDisplay", "Android denied the restarted Linux service", failure)
+                        completion(Result.failure(DesktopDisplayException(
+                            "DISPLAY_NOT_ALLOWED", "Android denied restarting the Linux service",
+                        )))
+                    }
+                }
+            }, assertMainThread)
+        }
         discovery.start { onDisplaysChanged() }
         refreshAutomaticOpening()
+    }
+
+    fun bindActivity(activity: Activity) {
+        assertMainThread()
+        host?.bindActivity(activity)
+        if (isDisplayLocal) applyActivityOrientation(activity, activity.windowManager.defaultDisplay.displayId)
+    }
+
+    fun unbindActivity(activity: Activity) {
+        assertMainThread()
+        host?.unbindActivity(activity)
+        originalActivityOrientations.remove(activity)
+    }
+
+    private fun applyActivityOrientation(activity: Activity, displayId: Int) {
+        val original = originalActivityOrientations.getOrPut(activity) { activity.requestedOrientation }
+        val requested = environmentPolicy.requestedOrientationFor(displayId, original)
+        if (activity.requestedOrientation != requested) {
+            android.util.Log.i("DesktopDisplay", "Window orientation=$requested display=$displayId")
+            activity.requestedOrientation = requested
+        }
+    }
+
+    fun cancelPendingRestart() {
+        assertMainThread()
+        restartController?.cancelPendingRestart()
+    }
+
+    fun restartForEnvironmentIfNeeded(
+        target: DesktopStartupTarget,
+        expectedEpoch: Long,
+        completion: (Result<Unit>) -> Unit,
+    ): Boolean {
+        assertMainThread()
+        if (!isDisplayLocal || (!sessionRestarting && (sessionTarget == null || sessionTarget == target))) return false
+        val epoch = if (stopFailed && expectedEpoch == sessionGeneration) beginSession() else expectedEpoch
+        checkNotNull(restartController).requestEnvironmentRestart(target, epoch) { result ->
+            result.exceptionOrNull()?.let {
+                if ((it as? DesktopDisplayException)?.code != "SESSION_STOPPED") {
+                    reportError(it as? DesktopDisplayException ?: DesktopDisplayException(
+                        "SESSION_RESTART_FAILED", it.message ?: "Linux could not restart on this display",
+                    ))
+                }
+            }
+            completion(result)
+        }
+        return true
+    }
+
+    fun observeActivityEnvironment(activity: Activity, expectedEpoch: Long) {
+        assertMainThread()
+        if (!isDisplayLocal) return
+        val displayId = activity.window.decorView.display?.displayId ?: return
+        applyActivityOrientation(activity, displayId)
+        if (isStopped && !sessionRestarting) return
+        if (displays().none { it.id == displayId && it.eligible }) return
+        val target = startupTarget(displayId)
+        restartForEnvironmentIfNeeded(target, expectedEpoch) { result ->
+            result.exceptionOrNull()?.let {
+                android.util.Log.w("DesktopDisplay", "Environment restart failed", it)
+                if ((it as? DesktopDisplayException)?.code != "SESSION_STOPPED") {
+                    android.widget.Toast.makeText(activity, it.message, android.widget.Toast.LENGTH_LONG).show()
+                }
+            }
+        }
     }
 
     fun subscribe(listener: (Map<String, Any?>) -> Unit): () -> Unit {
@@ -247,10 +416,25 @@ class DesktopDisplayCoordinator(
         assertMainThread()
         val displays = displays()
         val active = owner?.actualDisplay?.invoke()?.let { id -> displays.firstOrNull { it.id == id } }
+        val running = (!isStopped || stopFailed) && checkNotNull(host).sessionRunning()
+        val headless = isDisplayLocal && running && sessionTarget != null &&
+            displays.none { it.id == sessionTarget?.displayId && it.key == sessionTarget?.displayKey && it.eligible }
         return mapOf(
             "schemaVersion" to 1,
             "autoOpenOnMonitor" to automaticOpeningEnabled(),
-            "phase" to phase,
+            "phase" to when {
+                sessionRestarting -> "restarting"
+                headless -> "hidden"
+                isDisplayLocal && sessionStarting && error == null -> "starting"
+                else -> phase
+            },
+            "displayLocalMode" to isDisplayLocal,
+            "crossDisplayMovesAllowed" to environmentPolicy.allowCrossDisplayMoves,
+            "sessionRunning" to running,
+            "sessionRestarting" to sessionRestarting,
+            "sessionEnvironment" to sessionTarget?.environment?.wireName,
+            "sessionDisplayId" to sessionTarget?.displayId,
+            "sessionHeadless" to headless,
             "activeDisplayId" to active?.id, "activeDisplayKey" to active?.key,
             "profileKind" to active?.let { kindFor(it).wireName },
             "renderWidth" to renderSize?.width, "renderHeight" to renderSize?.height,
@@ -274,6 +458,11 @@ class DesktopDisplayCoordinator(
 
     fun setAutoOpenOnMonitor(enabled: Boolean) {
         assertMainThread()
+        if (isDisplayLocal) {
+            val failure = DesktopDisplayException("DISPLAY_NOT_ALLOWED", "The phone or TNT launcher selects the display environment")
+            reportError(failure)
+            throw failure
+        }
         checkNotNull(settingsStore).saveAutoOpenOnMonitor(enabled)
         cancelAutomaticOpening()
         if (enabled) {
@@ -363,6 +552,10 @@ class DesktopDisplayCoordinator(
 
     fun open(displayId: Int, displayKey: String, completion: (Result<Unit>) -> Unit) {
         assertMainThread()
+        if (!environmentPolicy.allowCrossDisplayMoves) {
+            rejectCrossDisplayMove(completion)
+            return
+        }
         val target = displays().firstOrNull { it.id == displayId && it.key == displayKey }
         if (target == null) {
             val failure = DesktopDisplayException("DISPLAY_UNAVAILABLE", "The selected display connection changed")
@@ -375,9 +568,33 @@ class DesktopDisplayCoordinator(
         openTarget(target, completion, recovery = false)
     }
 
-    fun openActive(completion: (Result<Unit>) -> Unit) {
+    fun openActive(completion: (Result<Unit>) -> Unit) = openActive(null, completion)
+
+    fun startupTarget(displayId: Int): DesktopStartupTarget {
+        assertMainThread()
+        val display = displays().firstOrNull { it.id == displayId && it.eligible }
+            ?: throw DesktopDisplayException("DISPLAY_UNAVAILABLE", "The app's current display is not available")
+        return DesktopStartupTarget(display.id, display.key, environmentPolicy.environmentFor(display.id))
+    }
+
+    fun openActive(preferredTarget: DesktopStartupTarget?, completion: (Result<Unit>) -> Unit) {
         assertMainThread()
         val current = displays()
+        if (isDisplayLocal) {
+            val target = preferredTarget?.let { preferred ->
+                current.firstOrNull {
+                    it.id == preferred.displayId && it.key == preferred.displayKey && it.eligible
+                }
+            }
+            if (target == null) {
+                val failure = DesktopDisplayException("DISPLAY_UNAVAILABLE", "The app's current display changed or is unavailable")
+                reportError(failure)
+                completion(Result.failure(failure))
+            } else {
+                openTarget(target, completion, recovery = false)
+            }
+            return
+        }
         val actual = owner?.actualDisplay?.invoke()
         val target = current.firstOrNull { it.id == actual }
             ?: current.firstOrNull { it.key == lastTarget?.key }
@@ -391,6 +608,10 @@ class DesktopDisplayCoordinator(
 
     fun moveToPhone(completion: (Result<Unit>) -> Unit) {
         assertMainThread()
+        if (!environmentPolicy.allowCrossDisplayMoves) {
+            rejectCrossDisplayMove(completion)
+            return
+        }
         suppressAutomaticOpening()
         val phone = displays().firstOrNull { it.isDefault }
         if (phone == null) {
@@ -398,6 +619,14 @@ class DesktopDisplayCoordinator(
         } else {
             openTarget(phone, completion, recovery = false)
         }
+    }
+
+    private fun rejectCrossDisplayMove(completion: (Result<Unit>) -> Unit) {
+        val failure = DesktopDisplayException(
+            "DISPLAY_NOT_ALLOWED", "Open DroidDesk from the phone or TNT launcher to select its display",
+        )
+        reportError(failure)
+        completion(Result.failure(failure))
     }
 
     private fun openTarget(target: DesktopDisplay, completion: (Result<Unit>) -> Unit, recovery: Boolean) {
@@ -422,6 +651,9 @@ class DesktopDisplayCoordinator(
             return
         }
         val request = DesktopLaunchRequest(target, ++requestSequence, sessionGeneration, sessionMode, desktopEnv)
+        if (isDisplayLocal && sessionTarget == null) {
+            sessionTarget = DesktopStartupTarget(target.id, target.key, environmentPolicy.environmentFor(target.id))
+        }
         val pending = Move(request, completion, currentOwner, lastTarget, recovery)
         move = pending
         phase = "moving"
@@ -478,6 +710,7 @@ class DesktopDisplayCoordinator(
         move = null
         pending.cancelTimeout()
         lastTarget = target
+        sessionTarget = DesktopStartupTarget(target.id, target.key, environmentPolicy.environmentFor(target.id))
         acceptedRequest = requestId
         phase = "attached"
         if (!pending.recovery) error = null
@@ -489,6 +722,13 @@ class DesktopDisplayCoordinator(
 
     fun onDisplayRemoved(displayId: Int) {
         assertMainThread()
+        if (isDisplayLocal) {
+            if (move?.request?.display?.id == displayId) {
+                failMove(DesktopDisplayException("DISPLAY_UNAVAILABLE", "The startup display disconnected"), false)
+            }
+            publish()
+            return
+        }
         if (move?.request?.display?.id == displayId) {
             failMove(DesktopDisplayException("DISPLAY_UNAVAILABLE", "The selected monitor disconnected"), true)
         } else if (!isStopped && move == null && lastTarget?.id == displayId) {
@@ -501,6 +741,15 @@ class DesktopDisplayCoordinator(
         assertMainThread()
         val current = displays()
         val pending = move
+        if (isDisplayLocal) {
+            if (pending != null && current.none {
+                    it.id == pending.request.display.id && it.key == pending.request.display.key && it.eligible
+                }) {
+                failMove(DesktopDisplayException("DISPLAY_UNAVAILABLE", "The startup display changed or is unavailable"), false)
+            }
+            publish()
+            return
+        }
         if (pending != null && current.none { it.key == pending.request.display.key }) {
             onDisplayRemoved(pending.request.display.id)
         } else if (pending != null && current.any { it.key == pending.request.display.key && !it.eligible }) {
@@ -513,7 +762,8 @@ class DesktopDisplayCoordinator(
         refreshAutomaticOpening()
     }
 
-    private fun automaticOpeningEnabled(): Boolean = settingsStore?.loadAutoOpenOnMonitor() ?: true
+    private fun automaticOpeningEnabled(): Boolean =
+        environmentPolicy.allowCrossDisplayMoves && (settingsStore?.loadAutoOpenOnMonitor() ?: true)
 
     private fun cancelAutomaticOpening() {
         automaticSequence++
@@ -575,6 +825,7 @@ class DesktopDisplayCoordinator(
 
     fun onActivityMoved(lease: RendererLease, displayId: Int) {
         assertMainThread()
+        if (!environmentPolicy.allowCrossDisplayMoves) return
         if (!isCurrent(lease) || lease.displayId == displayId || move != null) return
         val target = displays().firstOrNull { it.id == displayId && it.eligible } ?: return
         openTarget(target, {}, recovery = true)
@@ -608,7 +859,8 @@ class DesktopDisplayCoordinator(
         }
         val fallback = available.firstOrNull { it.key == pending.previousTarget?.key && it.eligible }
             ?: available.firstOrNull { it.isDefault && it.eligible }
-        if (recover && !pending.recovery && fallback != null && fallback.key != pending.request.display.key) {
+        if (environmentPolicy.allowCrossDisplayMoves && recover && !pending.recovery &&
+            fallback != null && fallback.key != pending.request.display.key) {
             openTarget(fallback, {}, recovery = true)
         } else {
             checkNotNull(host).notifyReturnRequired(failure)
