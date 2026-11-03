@@ -32,7 +32,8 @@ import com.orailnoor.droiddesk.display.DisplaySettings
 import com.orailnoor.droiddesk.display.RenderPolicy
 
 internal object MainActivityLaunchPolicy {
-    fun shouldHandleInitialIntent(restored: Boolean): Boolean = !restored
+    fun shouldHandleInitialIntent(restored: Boolean, firstActivityInProcess: Boolean): Boolean =
+        !restored || firstActivityInProcess
 }
 
 class MainActivity : FlutterActivity() {
@@ -43,6 +44,7 @@ class MainActivity : FlutterActivity() {
         /** Sent by the "Open" notification action: show the desktop, resuming a running session. */
         const val ACTION_OPEN_DESKTOP = "com.orailnoor.droiddesk.action.OPEN_DESKTOP"
         const val ACTION_RETURN_TO_PHONE = "com.orailnoor.droiddesk.action.RETURN_TO_PHONE"
+        private val activityCreatedInProcess = java.util.concurrent.atomic.AtomicBoolean(false)
         private val packageOperationRunning = java.util.concurrent.atomic.AtomicBoolean(false)
     }
 
@@ -103,7 +105,11 @@ class MainActivity : FlutterActivity() {
             }
         }
 
-        if (MainActivityLaunchPolicy.shouldHandleInitialIntent(savedInstanceState != null)) {
+        val firstActivityInProcess = !activityCreatedInProcess.getAndSet(true)
+        if (MainActivityLaunchPolicy.shouldHandleInitialIntent(
+                restored = savedInstanceState != null,
+                firstActivityInProcess = firstActivityInProcess,
+            )) {
             if (intent.getBooleanExtra("autoSetup", false)) {
                 runAutoChrootSetup()
             }
