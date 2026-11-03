@@ -31,6 +31,10 @@ import com.orailnoor.droiddesk.display.DesktopLaunchReply
 import com.orailnoor.droiddesk.display.DisplaySettings
 import com.orailnoor.droiddesk.display.RenderPolicy
 
+internal object MainActivityLaunchPolicy {
+    fun shouldHandleInitialIntent(restored: Boolean): Boolean = !restored
+}
+
 class MainActivity : FlutterActivity() {
 
     companion object {
@@ -99,11 +103,13 @@ class MainActivity : FlutterActivity() {
             }
         }
 
-        if (intent.getBooleanExtra("autoSetup", false)) {
-            runAutoChrootSetup()
+        if (MainActivityLaunchPolicy.shouldHandleInitialIntent(savedInstanceState != null)) {
+            if (intent.getBooleanExtra("autoSetup", false)) {
+                runAutoChrootSetup()
+            }
+            handleHomeLaunch(intent)
+            if (!intent.getBooleanExtra("autoSetup", false)) maybeAutoStartDesktop(intent)
         }
-        handleHomeLaunch(intent)
-        if (savedInstanceState == null && !intent.getBooleanExtra("autoSetup", false)) maybeAutoStartDesktop(intent)
     }
 
     /** Optional "Auto-Start Linux Desktop" setting: open the chroot desktop whenever the app starts. */
