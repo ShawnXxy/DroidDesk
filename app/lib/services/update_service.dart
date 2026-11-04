@@ -26,7 +26,7 @@ class AppRelease {
 
 /// Checks GitHub Releases for a newer DroidDesk build.
 class UpdateService {
-  static const repo = 'orailnoor/DroidDesk';
+  static const repo = 'ShawnXxy/DroidDesk';
   // Test builds can point at a local mock: --dart-define=DROIDDESK_UPDATE_URL=http://...
   static const _latestUrl = String.fromEnvironment(
     'DROIDDESK_UPDATE_URL',

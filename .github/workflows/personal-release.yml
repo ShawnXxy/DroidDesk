@@ -1,0 +1,159 @@
+name: Personal APK release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "New version and Android build number, for example 1.3.2+7"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: personal-apk-release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Build and publish from xixia
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: write
+    env:
+      EXPECTED_SIGNER_SHA256: ee1bb74cf921797ce317d84955cc087db7cd32644c6d28d58d247fb284b04aa5
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Require the personal repository and branch
+        run: |
+          if [[ "$GITHUB_REPOSITORY" != "ShawnXxy/DroidDesk" || "$GITHUB_REF" != "refs/heads/xixia" ]]; then
+            echo "::error::Select the xixia branch in ShawnXxy/DroidDesk."
+            exit 1
+          fi
+
+      - name: Check out the selected commit
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Validate version and release availability
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: python3 .github/scripts/prepare_personal_release.py --version "$RELEASE_VERSION"
+
+      - name: Set up Java 17
+        uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: gradle
+          cache-dependency-path: |
+            app/android/**/*.gradle.kts
+            app/android/gradle/wrapper/gradle-wrapper.properties
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
+        with:
+          flutter-version: "3.44.0"
+          channel: stable
+          cache: true
+
+      - name: Prepare Android build tools and dependencies
+        working-directory: app
+        run: |
+          flutter config --jdk-dir "$JAVA_HOME"
+          sdkmanager "platforms;android-36" "build-tools;36.0.0" "cmake;3.22.1" "ndk;28.2.13676358"
+          chmod +x android/gradlew
+          flutter pub get --enforce-lockfile
+
+      - name: Restore personal signing key
+        env:
+          DROIDDESK_KEYSTORE_BASE64: ${{ secrets.DROIDDESK_KEYSTORE_BASE64 }}
+          DROIDDESK_KEYSTORE_PASSWORD: ${{ secrets.DROIDDESK_KEYSTORE_PASSWORD }}
+          DROIDDESK_KEY_ALIAS: ${{ secrets.DROIDDESK_KEY_ALIAS }}
+          DROIDDESK_KEY_PASSWORD: ${{ secrets.DROIDDESK_KEY_PASSWORD }}
+        run: |
+          for name in DROIDDESK_KEYSTORE_BASE64 DROIDDESK_KEYSTORE_PASSWORD DROIDDESK_KEY_ALIAS DROIDDESK_KEY_PASSWORD; do
+            if [[ -z "${!name}" ]]; then
+              echo "::error::Missing personal signing secret: $name. Refusing debug-key fallback."
+              exit 1
+            fi
+          done
+          umask 077
+          printf '%s' "$DROIDDESK_KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/droiddesk-personal-release.jks"
+          echo "DROIDDESK_KEYSTORE=$RUNNER_TEMP/droiddesk-personal-release.jks" >> "$GITHUB_ENV"
+
+      - name: Build signed ARM64 release
+        working-directory: app
+        env:
+          DROIDDESK_KEYSTORE_PASSWORD: ${{ secrets.DROIDDESK_KEYSTORE_PASSWORD }}
+          DROIDDESK_KEY_ALIAS: ${{ secrets.DROIDDESK_KEY_ALIAS }}
+          DROIDDESK_KEY_PASSWORD: ${{ secrets.DROIDDESK_KEY_PASSWORD }}
+        run: |
+          flutter build apk --release --no-pub --target-platform android-arm64 \
+            --build-name "$RELEASE_NAME" --build-number "$RELEASE_CODE"
+
+      - name: Verify and package release
+        run: |
+          apk="app/build/app/outputs/flutter-apk/app-release.apk"
+          tools="$ANDROID_HOME/build-tools/36.0.0"
+          "$tools/apksigner" verify --verbose --print-certs "$apk" > "$RUNNER_TEMP/apk-signature.txt"
+          cat "$RUNNER_TEMP/apk-signature.txt"
+          grep -Fx "Signer #1 certificate SHA-256 digest: $EXPECTED_SIGNER_SHA256" "$RUNNER_TEMP/apk-signature.txt"
+          "$tools/aapt" dump badging "$apk" > "$RUNNER_TEMP/apk-badging.txt"
+          grep -F "package: name='com.orailnoor.droiddesk' versionCode='$RELEASE_CODE' versionName='$RELEASE_NAME'" "$RUNNER_TEMP/apk-badging.txt"
+          grep -Fx "native-code: 'arm64-v8a'" "$RUNNER_TEMP/apk-badging.txt"
+          if grep -q '^application-debuggable' "$RUNNER_TEMP/apk-badging.txt"; then
+            echo "::error::Refusing to publish a debuggable APK."
+            exit 1
+          fi
+          mkdir -p dist
+          cp "$apk" "dist/DroidDesk-${RELEASE_TAG}-personal.apk"
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+
+          apk = next(Path("dist").glob("*.apk"))
+          digest = hashlib.sha256(apk.read_bytes()).hexdigest()
+          manifest = {
+              "repository": os.environ["GITHUB_REPOSITORY"],
+              "branch": "xixia",
+              "sourceCommit": os.environ["GITHUB_SHA"],
+              "versionName": os.environ["RELEASE_NAME"],
+              "versionCode": int(os.environ["RELEASE_CODE"]),
+              "packageName": "com.orailnoor.droiddesk",
+              "buildType": "release",
+              "apk": apk.name,
+              "sha256": digest,
+              "signerCertificateSha256": os.environ["EXPECTED_SIGNER_SHA256"],
+          }
+          Path("dist/release-manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
+          Path("dist/SHA256SUMS").write_text(f"{digest}  {apk.name}\n")
+          PY
+
+      - name: Create immutable tag and publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs" \
+            -f "ref=refs/tags/$RELEASE_TAG" -f "sha=$GITHUB_SHA"
+          printf 'Personal release built from the xixia branch.\n\nSource commit: %s\n\nAndroid build: %s\n\nSigned with the DroidDesk Personal key; compatible with the personal release installed on nubia.\n' \
+            "$GITHUB_SHA" "$RELEASE_CODE" > "$RUNNER_TEMP/release-notes.md"
+          gh release create "$RELEASE_TAG" dist/*.apk dist/release-manifest.json dist/SHA256SUMS \
+            --repo "$GITHUB_REPOSITORY" --verify-tag --draft \
+            --title "DroidDesk ${RELEASE_TAG} - Personal" \
+            --notes-file "$RUNNER_TEMP/release-notes.md"
+          gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --draft=false --latest
+          gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json url --jq '.url' >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Remove temporary signing key
+        if: always()
+        run: rm -f -- "$RUNNER_TEMP/droiddesk-personal-release.jks"

@@ -49,6 +49,7 @@ android {
 
         ndk {
             // ARM64 only — all modern Android phones
+            abiFilters.clear()
             abiFilters += listOf("arm64-v8a")
         }
     }
