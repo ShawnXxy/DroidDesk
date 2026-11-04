@@ -151,6 +151,9 @@ internal fun createLinuxEnvironmentManager(
     return LinuxEnvironmentManager(
         adapters = listOf(
             TermuxNativeEnvironment(context.applicationContext, linuxRuntime),
+            ProotDebianEnvironment(
+                AndroidProotDebianHost(context.applicationContext, linuxRuntime),
+            ),
             ChrootUbuntuEnvironment(context.applicationContext, chrootRuntime),
         ),
         capabilities = probe::probe,

@@ -36,6 +36,18 @@ class LinuxRuntime(context: Context) {
         private const val ELF_PATCH_MARKER = ".elf_runpaths_patched"
         private const val DE_MARKER = ".de_installed"
         private const val PROBE_PROCESS_TIMEOUT_MILLIS = 750L
+        private const val PINNED_PROOT_VERSION = "5.1.107.102"
+        private const val PINNED_PROOT_DISTRO_VERSION = "5.10.3"
+        private const val PINNED_PROOT_SHA256 =
+            "10a394b585c2fc2b2c8502544f4e5f1be581dc8bfff79e8ba62f16207423e030"
+        private const val PINNED_PROOT_DISTRO_SHA256 =
+            "049dbfd7cb6701925002133b19785213bda59f912784f885fc339ab092afc1e1"
+        private const val PINNED_PROOT_URL =
+            "https://packages.termux.dev/apt/termux-main/pool/main/p/proot/" +
+                "proot_5.1.107.102_aarch64.deb"
+        private const val PINNED_PROOT_DISTRO_URL =
+            "https://packages.termux.dev/apt/termux-main/pool/main/p/proot-distro/" +
+                "proot-distro_5.10.3_all.deb"
 
         // ELF64 constants
         private const val ELFMAG0: Byte = 0x7f
@@ -1617,6 +1629,108 @@ class LinuxRuntime(context: Context) {
         clearProotDownloadCache()
         onProgress?.invoke(1.0, "Minimal Debian compatibility is ready")
         return isMinimalDebianInstalled()
+    }
+
+    fun ensureProotToolchain(
+        onProgress: (Double, String) -> Unit,
+        onLog: (String) -> Unit,
+    ): Result<ProotToolchainVersions> = runCatching {
+        extractBootstrapIfNeeded(context)
+        setInstallLogSink(onLog)
+        try {
+            onProgress(0.08, "Installing PRoot toolchain")
+            val downloadDir = File(prefixDir, "tmp/droiddesk-proot-toolchain").apply { mkdirs() }
+            val prootDeb = File(downloadDir, "proot_$PINNED_PROOT_VERSION.aarch64.deb")
+            val distroDeb = File(
+                downloadDir,
+                "proot-distro_$PINNED_PROOT_DISTRO_VERSION.all.deb",
+            )
+            val download = executeCommand(
+                """
+                set -e
+                curl -L --fail --retry 3 -o '${prootDeb.absolutePath}' '$PINNED_PROOT_URL'
+                curl -L --fail --retry 3 -o '${distroDeb.absolutePath}' '$PINNED_PROOT_DISTRO_URL'
+                printf '%s  %s\n' '$PINNED_PROOT_SHA256' '${prootDeb.absolutePath}' | sha256sum -c -
+                printf '%s  %s\n' '$PINNED_PROOT_DISTRO_SHA256' '${distroDeb.absolutePath}' | sha256sum -c -
+                dpkg --unpack '${prootDeb.absolutePath}' '${distroDeb.absolutePath}'
+                """.trimIndent(),
+            )
+            patchShebangs(force = true)
+            check(!download.startsWith("Error:")) { "Pinned PRoot download or checksum failed" }
+            val repaired = executeCommand(
+                "DEBIAN_FRONTEND=noninteractive apt-get install -f -y && dpkg --configure -a",
+            )
+            check(!repaired.startsWith("Error:")) {
+                "PRoot package configuration failed"
+            }
+            patchShebangs(force = true)
+            relocateProotExecutable()
+            val prootRun = executeCommand("proot --version")
+            check(!prootRun.startsWith("Error:")) { prootRun }
+            val distroRun = executeCommand("proot-distro --version")
+            check(!distroRun.startsWith("Error:")) { distroRun }
+            val prootVersion = executeCommand(
+                "dpkg-query -W -f='${'$'}{Version}' proot",
+            ).trim()
+            val distroVersion = executeCommand(
+                "dpkg-query -W -f='${'$'}{Version}' proot-distro",
+            ).trim()
+            ProotToolchainVersions(
+                proot = prootVersion,
+                prootDistro = distroVersion,
+            ).also {
+                check(it.proot == PINNED_PROOT_VERSION) {
+                    "Unexpected PRoot version: ${it.proot}"
+                }
+                check(it.prootDistro == PINNED_PROOT_DISTRO_VERSION) {
+                    "Unexpected PRoot-Distro version: ${it.prootDistro}"
+                }
+            }
+        } finally {
+            setInstallLogSink(null)
+        }
+    }
+
+    fun executeCommandArgs(
+        command: List<String>,
+        onOutput: ((String) -> Unit)? = null,
+    ): ExecutionResult {
+        if (packageOperationCancelled) {
+            return ExecutionResult(1, "Error: Package operation cancelled")
+        }
+        if (!isBootstrapped()) {
+            return ExecutionResult(1, "Error: Runtime not bootstrapped")
+        }
+        if (activeCommandProcess?.isAlive == true) {
+            return ExecutionResult(1, "Error: Another command is already running")
+        }
+        return try {
+            val process = ProcessBuilder(command)
+                .directory(prefixDir)
+                .redirectErrorStream(true)
+                .also { builder ->
+                    builder.environment().clear()
+                    builder.environment().putAll(getTermuxEnv())
+                }
+                .start()
+            activeCommandProcess = process
+            val output = StringBuilder()
+            val reader = InputStreamReader(process.inputStream)
+            val buffer = CharArray(1024)
+            var charsRead: Int
+            while (reader.read(buffer).also { charsRead = it } != -1) {
+                val chunk = String(buffer, 0, charsRead)
+                output.append(chunk)
+                installLogSink?.invoke(chunk)
+                onOutput?.invoke(chunk)
+            }
+            process.waitFor()
+            ExecutionResult(process.exitValue(), output.toString())
+        } catch (error: Exception) {
+            ExecutionResult(1, "Error: ${error.message}")
+        } finally {
+            activeCommandProcess = null
+        }
     }
 
     fun installDesktopEnvironmentNative(
