@@ -12,6 +12,7 @@ import java.util.zip.ZipEntry
 import java.util.zip.ZipInputStream
 import java.util.UUID
 import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 import com.orailnoor.droiddesk.display.DisplayProfile
 import com.orailnoor.droiddesk.display.DisplayProfilePolicy
 
@@ -34,6 +35,7 @@ class LinuxRuntime(context: Context) {
         private const val SHEBANG_MARKER = ".relocated_text_paths_v4"
         private const val ELF_PATCH_MARKER = ".elf_runpaths_patched"
         private const val DE_MARKER = ".de_installed"
+        private const val PROBE_PROCESS_TIMEOUT_MILLIS = 750L
 
         // ELF64 constants
         private const val ELFMAG0: Byte = 0x7f
@@ -154,6 +156,154 @@ class LinuxRuntime(context: Context) {
         } else {
             "Software (llvmpipe)"
         }
+    }
+
+    fun probeAppPrivateExecution(): CapabilityEvidence {
+        val bash = File(binDir, "bash")
+        if (!bash.canExecute()) {
+            return CapabilityEvidence(
+                EvidenceState.PRESENT_UNVERIFIED,
+                "The native bootstrap is not installed",
+            )
+        }
+        return probeProcess(listOf(bash.absolutePath, "-c", "exit 0"))
+            .toEvidence("App-private bash")
+    }
+
+    fun probeProot(): CapabilityEvidence {
+        val proot = File(binDir, "proot")
+        if (!proot.canExecute()) {
+            return CapabilityEvidence(
+                EvidenceState.PRESENT_UNVERIFIED,
+                "PRoot is not installed",
+            )
+        }
+        return probeProcess(listOf(proot.absolutePath, "--version"))
+            .toEvidence("PRoot")
+    }
+
+    fun probeX11(): CapabilityEvidence {
+        val socket = File(tmpDir, ".X11-unix/X0")
+        val xdpyinfo = File(binDir, "xdpyinfo")
+        if (!socket.exists() || !xdpyinfo.canExecute()) {
+            return CapabilityEvidence(
+                EvidenceState.PRESENT_UNVERIFIED,
+                "The X11 session is not ready",
+            )
+        }
+        return probeProcess(
+            listOf(xdpyinfo.absolutePath),
+            mapOf("DISPLAY" to ":0"),
+        ).toEvidence("X11")
+    }
+
+    fun probeAudio(): CapabilityEvidence {
+        val pactl = File(binDir, "pactl")
+        if (!pactl.canExecute()) {
+            return CapabilityEvidence(
+                EvidenceState.PRESENT_UNVERIFIED,
+                "PulseAudio tools are not installed",
+            )
+        }
+        return probeProcess(listOf(pactl.absolutePath, "info"))
+            .toEvidence("PulseAudio")
+    }
+
+    fun probeClipboard(): CapabilityEvidence {
+        val xclip = File(binDir, "xclip")
+        val socket = File(tmpDir, ".X11-unix/X0")
+        return if (xclip.canExecute() && socket.exists()) {
+            CapabilityEvidence(
+                EvidenceState.PRESENT_UNVERIFIED,
+                "Foreground bidirectional clipboard needs an active desktop round-trip",
+            )
+        } else {
+            CapabilityEvidence(
+                EvidenceState.PRESENT_UNVERIFIED,
+                "Clipboard tools or the X11 session are not ready",
+            )
+        }
+    }
+
+    fun probeRenderer(): RendererProbe {
+        val socket = File(tmpDir, ".X11-unix/X0")
+        val glxinfo = File(binDir, "glxinfo")
+        if (!socket.exists() || !glxinfo.canExecute()) {
+            return RendererProbe(
+                CapabilityEvidence(
+                    EvidenceState.PRESENT_UNVERIFIED,
+                    "No active GL renderer can be queried",
+                ),
+                RendererBackend.UNKNOWN,
+            )
+        }
+        val result = probeProcess(
+            listOf(glxinfo.absolutePath, "-B"),
+            mapOf("DISPLAY" to ":0"),
+        )
+        if (result == null || result.exitCode != 0) {
+            return RendererProbe(
+                CapabilityEvidence(
+                    EvidenceState.FAILED_SELF_TEST,
+                    "Renderer probe failed${result?.output?.let { ": ${it.trim()}" }.orEmpty()}",
+                ),
+                RendererBackend.UNKNOWN,
+            )
+        }
+        val output = result.output.lowercase()
+        val backend = when {
+            "llvmpipe" in output -> RendererBackend.SOFTWARE_LLVMPIPE
+            "virgl" in output || "virpipe" in output -> RendererBackend.PROOT_VIRGL_VTEST
+            "turnip" in output || "zink" in output -> RendererBackend.NATIVE_TURNIP_KGSL
+            "freedreno" in output || "adreno" in output -> RendererBackend.PROOT_DRM_MSM
+            else -> RendererBackend.UNKNOWN
+        }
+        val evidence = if (backend == RendererBackend.UNKNOWN) {
+            CapabilityEvidence(
+                EvidenceState.PRESENT_UNVERIFIED,
+                "GL responded but its renderer was not recognized",
+            )
+        } else {
+            CapabilityEvidence(EvidenceState.SUPPORTED_AND_PROBED)
+        }
+        return RendererProbe(evidence, backend)
+    }
+
+    private data class ProbeProcessResult(val exitCode: Int, val output: String)
+
+    private fun probeProcess(
+        command: List<String>,
+        environment: Map<String, String> = emptyMap(),
+    ): ProbeProcessResult? = runCatching {
+        val process = ProcessBuilder(command)
+            .directory(prefixDir)
+            .redirectErrorStream(true)
+            .also { builder ->
+                builder.environment().putAll(getTermuxEnv())
+                builder.environment().putAll(environment)
+            }
+            .start()
+        if (!process.waitFor(PROBE_PROCESS_TIMEOUT_MILLIS, TimeUnit.MILLISECONDS)) {
+            process.destroy()
+            if (!process.waitFor(100, TimeUnit.MILLISECONDS)) process.destroyForcibly()
+            return null
+        }
+        ProbeProcessResult(
+            exitCode = process.exitValue(),
+            output = process.inputStream.bufferedReader().readText(),
+        )
+    }.getOrNull()
+
+    private fun ProbeProcessResult?.toEvidence(name: String): CapabilityEvidence = when {
+        this == null -> CapabilityEvidence(
+            EvidenceState.FAILED_SELF_TEST,
+            "$name probe timed out or could not start",
+        )
+        exitCode == 0 -> CapabilityEvidence(EvidenceState.SUPPORTED_AND_PROBED)
+        else -> CapabilityEvidence(
+            EvidenceState.FAILED_SELF_TEST,
+            "$name exited $exitCode${output.trim().takeIf(String::isNotEmpty)?.let { ": $it" }.orEmpty()}",
+        )
     }
 
     fun getOptionalAppsStatus(): Map<String, Boolean> = mapOf(

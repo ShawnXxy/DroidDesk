@@ -19,6 +19,8 @@ import com.orailnoor.droiddesk.runtime.RootShell
 import com.orailnoor.droiddesk.runtime.AndroidAppBridge
 import com.orailnoor.droiddesk.runtime.AppUpdater
 import com.orailnoor.droiddesk.runtime.DesktopIntegration
+import com.orailnoor.droiddesk.runtime.AndroidRuntimeCapabilitySource
+import com.orailnoor.droiddesk.runtime.RuntimeCapabilityProbe
 import com.orailnoor.droiddesk.view.AndroidSurfaceViewFactory
 import com.orailnoor.droiddesk.x11.X11ServerService
 import kotlin.concurrent.thread
@@ -54,6 +56,7 @@ class MainActivity : FlutterActivity() {
     private lateinit var linuxRuntime: LinuxRuntime
     private lateinit var chrootRuntime: ChrootRuntime
     private lateinit var desktopIntegration: DesktopIntegration
+    private lateinit var runtimeCapabilityProbe: RuntimeCapabilityProbe
     private var displayStateSubscription: (() -> Unit)? = null
 
     private val mainHandler = android.os.Handler(android.os.Looper.getMainLooper())
@@ -96,6 +99,9 @@ class MainActivity : FlutterActivity() {
         }
         linuxRuntime = LinuxRuntime(applicationContext)
         chrootRuntime = ChrootRuntime(applicationContext)
+        runtimeCapabilityProbe = RuntimeCapabilityProbe(
+            AndroidRuntimeCapabilitySource(applicationContext, linuxRuntime, chrootRuntime),
+        )
         desktopIntegration = DesktopIntegration(this)
         DesktopDisplayCoordinator.shared.initialize(applicationContext)
         DesktopDisplayCoordinator.shared.bindActivity(this)
@@ -425,7 +431,8 @@ class MainActivity : FlutterActivity() {
                             linuxRuntime.getInstalledDE()
                         },
                         "rootfsPath" to if (rooted) chrootRuntime.getRootfsPath() else "",
-                        "rootfsSizeMB" to if (rooted) chrootRuntime.getRootfsSizeMB() else 0L
+                        "rootfsSizeMB" to if (rooted) chrootRuntime.getRootfsSizeMB() else 0L,
+                        "capabilities" to runtimeCapabilityProbe.probe().toMap(),
                     ))
                 }
 
