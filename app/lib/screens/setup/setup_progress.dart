@@ -109,7 +109,10 @@ class _SetupProgressScreenState extends State<SetupProgressScreen> {
     }
 
     if (!mounted) return;
-    state.runSetup(useRoot: useRoot);
+    await state.runSetup(
+      useRoot: useRoot ? true : null,
+      environment: useRoot ? null : state.selectedEnvironment,
+    );
   }
 
   @override

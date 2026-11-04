@@ -44,8 +44,12 @@ data class EnvironmentStatus(
     fun toLegacyMap(): Map<String, Any?> = mapOf(
         "schemaVersion" to schemaVersion,
         "environmentKind" to kind.wireValue,
+        "installed" to installed,
         "isBootstrapped" to installed,
+        "running" to running,
         "isRunning" to running,
+        "provisioning" to provisioning,
+        "repairNeeded" to repairNeeded,
         "hasRoot" to (
             capabilities.chroot.state == EvidenceState.SUPPORTED_AND_PROBED ||
                 capabilities.chroot.state == EvidenceState.PRESENT_UNVERIFIED
@@ -53,6 +57,7 @@ data class EnvironmentStatus(
         "distro" to distro,
         "installedDE" to desktop,
         "rootfsPath" to rootfsPath,
+        "rootfsSizeBytes" to rootfsSizeBytes,
         "rootfsSizeMB" to rootfsSizeBytes / (1024L * 1024L),
         "capabilities" to capabilities.toMap(),
         "lastError" to lastError,

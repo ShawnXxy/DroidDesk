@@ -6,6 +6,7 @@ import 'package:droiddesk/services/platform_bridge.dart';
 import 'package:droiddesk/services/update_service.dart';
 import 'package:droiddesk/theme/droid_theme.dart';
 import 'package:droiddesk/models/desktop_display.dart';
+import 'package:droiddesk/models/linux_environment.dart';
 
 /// Central state management for the entire DroidDesk app.
 class AppState extends ChangeNotifier {
@@ -164,6 +165,9 @@ class AppState extends ChangeNotifier {
   String _optionalInstallStatus = '';
   String _optionalInstallLog = '';
   bool _isProotTerminal = false;
+  LinuxEnvironmentStatus? _environmentStatus;
+  LinuxEnvironmentKind _selectedEnvironment = LinuxEnvironmentKind.prootDebian;
+  bool _environmentSelectionExplicit = false;
 
   // Terminal history
   final List<String> _terminalOutput = [
@@ -214,6 +218,63 @@ class AppState extends ChangeNotifier {
   String get optionalInstallStatus => _optionalInstallStatus;
   String get optionalInstallLog => _optionalInstallLog;
   bool get isProotTerminal => _isProotTerminal;
+  LinuxEnvironmentStatus? get environmentStatus => _environmentStatus;
+  LinuxEnvironmentKind get selectedEnvironment => _selectedEnvironment;
+
+  bool get canProvisionSelectedEnvironment {
+    final status = _environmentStatus;
+    if (status == null) return false;
+    return switch (_selectedEnvironment) {
+      LinuxEnvironmentKind.prootDebian =>
+        status.capabilities.prootInstallable,
+      LinuxEnvironmentKind.termuxNative =>
+        !status.capabilities.host.state.blocksProvisioning &&
+            !status.capabilities.localExecution.state.blocksProvisioning,
+      LinuxEnvironmentKind.chrootUbuntu => status.hasRoot,
+    };
+  }
+
+  String? get environmentBlockingReason {
+    final status = _environmentStatus;
+    if (status == null) return 'Runtime capabilities have not been loaded';
+    return switch (_selectedEnvironment) {
+      LinuxEnvironmentKind.prootDebian =>
+        status.capabilities.prootBlockingReason,
+      LinuxEnvironmentKind.termuxNative =>
+        status.capabilities.host.reason ??
+            status.capabilities.localExecution.reason,
+      LinuxEnvironmentKind.chrootUbuntu =>
+        status.hasRoot ? null : 'Root access is required',
+    };
+  }
+
+  String? get environmentRecommendationReason {
+    final status = _environmentStatus;
+    if (status == null) return null;
+    if (_selectedEnvironment == LinuxEnvironmentKind.prootDebian) {
+      return 'Standard Debian packages and ARM64 .deb compatibility';
+    }
+    return status.capabilities.prootBlockingReason ??
+        'Native mode is selected for lower overhead';
+  }
+
+  bool get showEnvironmentStorageWarning {
+    final capabilities = _environmentStatus?.capabilities;
+    if (capabilities == null) return false;
+    return capabilities.availableBytes >= capabilities.requiredBytes &&
+        capabilities.availableBytes < 6 * 1024 * 1024 * 1024;
+  }
+
+  String? get avfDiagnostic {
+    final capabilities = _environmentStatus?.capabilities;
+    if (capabilities == null ||
+        capabilities.avfFeature.state ==
+            CapabilityEvidenceState.unavailable) {
+      return null;
+    }
+    return capabilities.avfPermission.reason ??
+        'Android system virtualization is not available to this app';
+  }
 
   bool get isSetupComplete => _isBootstrapped && _installedDE.isNotEmpty;
   bool get isDEInstalled => _installedDE.isNotEmpty;
@@ -392,13 +453,24 @@ class AppState extends ChangeNotifier {
   Future<void> refreshStatus() async {
     final revision = _desktopEventRevision;
     try {
-      final status = await DroidDeskPlatform.getRuntimeStatus();
+      final rawStatus = await DroidDeskPlatform.getRuntimeStatus();
+      final status = LinuxEnvironmentStatus.fromMap(rawStatus);
       if (_disposed) return;
-      _isBootstrapped = status['isBootstrapped'] == true;
-      if (revision == _desktopEventRevision) _isRunning = status['isRunning'] == true;
-      _hasRoot = status['hasRoot'] == true;
-      _installedDistro = status['distro']?.toString() ?? '';
-      _installedDE = status['installedDE']?.toString() ?? '';
+      _environmentStatus = status;
+      _isBootstrapped = status.installed;
+      if (revision == _desktopEventRevision) _isRunning = status.running;
+      _hasRoot = status.hasRoot;
+      _installedDistro = status.distro;
+      _installedDE = status.desktop;
+      if (status.installed) {
+        _selectedEnvironment = status.kind;
+      } else if (!_environmentSelectionExplicit) {
+        _selectedEnvironment = status.hasRoot
+            ? LinuxEnvironmentKind.chrootUbuntu
+            : status.capabilities.prootInstallable
+                ? LinuxEnvironmentKind.prootDebian
+                : LinuxEnvironmentKind.termuxNative;
+      }
 
       if (_installedDE.isNotEmpty) {
         await refreshOptionalApps();
@@ -428,6 +500,13 @@ class AppState extends ChangeNotifier {
     notifyListeners();
   }
 
+  void selectEnvironment(LinuxEnvironmentKind environment) {
+    _selectedEnvironment = environment;
+    _environmentSelectionExplicit = true;
+    _errorMessage = null;
+    notifyListeners();
+  }
+
   void setSetupStep(int step) {
     _setupStep = step;
     _errorMessage = null;
@@ -447,55 +526,65 @@ class AppState extends ChangeNotifier {
     return _hasRoot;
   }
 
-  /// Main setup entry point. [useRoot] records confirmation from the
-  /// rooted-device dialog.
-  Future<void> runSetup({bool? useRoot}) async {
+  /// Main setup entry point. [useRoot] is retained for the rooted-device
+  /// confirmation flow while [environment] selects a non-root runtime.
+  Future<bool> runSetup({
+    LinuxEnvironmentKind? environment,
+    bool? useRoot,
+  }) async {
     try {
       _errorMessage = null;
       _setupLog = '';
       _setupStep = 3;
       notifyListeners();
 
-      // Detect root and choose path
-      final rootAvailable = await DroidDeskPlatform.checkRoot();
-      _hasRoot = rootAvailable && (useRoot ?? true);
+      final chosen = useRoot == true
+          ? LinuxEnvironmentKind.chrootUbuntu
+          : environment ?? _selectedEnvironment;
+      final current = _environmentStatus;
+      if (current?.running == true && current?.kind != chosen) {
+        await DroidDeskPlatform.stopLinux();
+      }
+      _selectedEnvironment = chosen;
+      _environmentSelectionExplicit = true;
+      _hasRoot = chosen == LinuxEnvironmentKind.chrootUbuntu;
       notifyListeners();
 
-      if (_hasRoot) {
+      if (chosen == LinuxEnvironmentKind.chrootUbuntu) {
         await _runChrootSetup();
       } else {
-        await _runNativeSetup();
+        await _runManagedSetup(chosen);
       }
 
       _setupStep = 4;
       notifyListeners();
+      return true;
     } catch (e) {
       _errorMessage = 'Setup failed: $e';
       _isDownloading = false;
       _isExtracting = false;
       _isInstallingDE = false;
       notifyListeners();
+      return false;
     }
   }
 
-  Future<void> _runNativeSetup() async {
+  Future<void> _runManagedSetup(LinuxEnvironmentKind environment) async {
     _isExtracting = true;
     _extractProgress = 0.0;
-    _extractStatus = 'Extracting native Termux bootstrap...';
+    _extractStatus = environment == LinuxEnvironmentKind.prootDebian
+        ? 'Preparing Debian compatibility environment...'
+        : 'Preparing native Termux environment...';
     _statusMessage = _extractStatus;
     notifyListeners();
-    await DroidDeskPlatform.setupBootstrap();
-
-    _extractProgress = 0.08;
-    _extractStatus = 'Bootstrap environment ready';
-    _statusMessage = _extractStatus;
     _isInstallingDE = true;
     notifyListeners();
-    final installed = await DroidDeskPlatform.installDesktopNative(
+    final installed = await DroidDeskPlatform.provisionEnvironment(
+      kind: environment.wireValue,
       de: _selectedDE,
     );
     if (!installed) {
-      throw StateError('Native Termux package installation failed');
+      throw StateError('${environment.wireValue} provisioning failed');
     }
     _isExtracting = false;
     _isInstallingDE = false;
@@ -557,7 +646,8 @@ class AppState extends ChangeNotifier {
           throw StateError('Desktop Essentials package installation failed');
         }
       } else {
-        final installed = await DroidDeskPlatform.installDesktopNative(
+        final installed = await DroidDeskPlatform.provisionEnvironment(
+          kind: _selectedEnvironment.wireValue,
           de: _selectedDE,
         );
         if (!installed) {

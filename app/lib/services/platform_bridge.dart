@@ -169,6 +169,17 @@ class DroidDeskPlatform {
     return result as bool? ?? false;
   }
 
+  static Future<bool> provisionEnvironment({
+    required String kind,
+    String de = 'xfce4',
+  }) async {
+    return await _channel.invokeMethod<bool>('provisionEnvironment', {
+          'kind': kind,
+          'de': de,
+        }) ??
+        false;
+  }
+
   // ── Root / chroot support ──
 
   static Future<bool> checkRoot() async {

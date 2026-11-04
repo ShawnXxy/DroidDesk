@@ -553,6 +553,34 @@ class MainActivity : FlutterActivity() {
                 }
 
                 // ── Native Termux desktop install (non-root fallback) ──
+                "provisionEnvironment" -> {
+                    val kindValue = call.argument<String>("kind") ?: ""
+                    val environmentKind = EnvironmentKind.fromWire(kindValue)
+                    if (environmentKind == null) {
+                        result.error("INVALID_ARGUMENT", "Unknown Linux environment: $kindValue", null)
+                        return@setMethodCallHandler
+                    }
+                    val desktopEnv = call.argument<String>("de") ?: "xfce4"
+                    installThread("provision-linux-environment") {
+                        val outcome = environmentManager.provision(
+                            ProvisionRequest(environmentKind, desktopEnv),
+                            onProgress = { progress, status ->
+                                runOnUiThread {
+                                    MethodChannel(
+                                        flutterEngine.dartExecutor.binaryMessenger,
+                                        CHANNEL,
+                                    ).invokeMethod(
+                                        "onInstallProgress",
+                                        mapOf("progress" to progress, "status" to status),
+                                    )
+                                }
+                            },
+                            onLog = ::appendTerminalOutput,
+                        )
+                        runOnUiThread { result.success(outcome.isSuccess) }
+                    }
+                }
+
                 "installDesktopNative" -> {
                     val desktopEnv = call.argument<String>("de") ?: "xfce4"
                     installThread("install-desktop-native") {

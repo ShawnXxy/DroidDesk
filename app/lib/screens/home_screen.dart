@@ -513,6 +513,9 @@ class HomeScreen extends StatelessWidget {
         return 'Kali Linux';
       case 'termux-native':
         return 'Termux Native';
+      case 'debian':
+      case 'debian-bookworm':
+        return 'Debian Bookworm (PRoot)';
       default:
         return distro;
     }
@@ -1265,6 +1268,9 @@ class _TerminalSheetState extends State<_TerminalSheet> {
         return 'Ubuntu 24.04';
       case 'termux-native':
         return 'Termux';
+      case 'debian':
+      case 'debian-bookworm':
+        return 'Debian Bookworm';
       default:
         return distro;
     }

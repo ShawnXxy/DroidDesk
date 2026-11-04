@@ -2,7 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:flutter_animate/flutter_animate.dart';
 import 'package:droiddesk/theme/droid_theme.dart';
-import 'package:droiddesk/screens/setup/setup_progress.dart';
+import 'package:droiddesk/screens/setup/environment_selection_screen.dart';
 import 'package:droiddesk/state/app_state.dart';
 import 'package:droiddesk/widgets/update_sheet.dart';
 
@@ -102,7 +102,7 @@ class WelcomeScreen extends StatelessWidget {
                   child: ElevatedButton(
                     onPressed: () => Navigator.of(context).push(
                       MaterialPageRoute(
-                        builder: (_) => const SetupProgressScreen(),
+                        builder: (_) => const EnvironmentSelectionScreen(),
                       ),
                     ),
                     child: const Row(
