@@ -69,7 +69,7 @@ class DroidDeskService : Service() {
                 var failure: Exception? = null
                 val operations: List<() -> Unit> = listOf(
                     { stopLegacyIntentBridge() },
-                    { ChrootRuntime(app).let { if (it.isRunning()) it.stopSession() } },
+                    { ChrootRuntime(app).stopSession() },
                     { LinuxRuntime(app).stopSession() },
                     { app.stopService(Intent(app, X11ServerService::class.java)); Unit },
                 )
@@ -118,14 +118,11 @@ class DroidDeskService : Service() {
                         while (legacyIntentActive) {
                             val packageName = reader.readLine()?.trim() ?: break
                             if (packageName.isEmpty()) continue
-                            val intent = context.packageManager.getLaunchIntentForPackage(packageName)
-                            if (intent == null) {
-                                Log.w(TAG, "No Android launcher for $packageName")
-                            } else {
-                                mainHandler.post {
-                                    if (legacyIntentActive && legacyIntentProcess === process) {
-                                        context.startActivity(intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
-                                    }
+                            mainHandler.post {
+                                if (legacyIntentActive && legacyIntentProcess === process &&
+                                    !AndroidAppBridge.launchAndroidPackage(context, packageName)
+                                ) {
+                                    Log.w(TAG, "Could not launch Android package $packageName")
                                 }
                             }
                         }
