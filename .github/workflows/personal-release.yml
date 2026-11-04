@@ -64,11 +64,16 @@ jobs:
           channel: stable
           cache: true
 
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3
+        with:
+          cmdline-tools-version: "13114758"
+          packages: "platform-tools platforms;android-36 build-tools;36.0.0 cmake;3.22.1 ndk;28.2.13676358"
+
       - name: Prepare Android build tools and dependencies
         working-directory: app
         run: |
           flutter config --jdk-dir "$JAVA_HOME"
-          sdkmanager "platforms;android-36" "build-tools;36.0.0" "cmake;3.22.1" "ndk;28.2.13676358"
           chmod +x android/gradlew
           flutter pub get --enforce-lockfile
 
