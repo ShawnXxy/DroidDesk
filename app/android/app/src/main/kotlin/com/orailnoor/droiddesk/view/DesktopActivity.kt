@@ -40,6 +40,9 @@ import com.termux.x11.LorieView
 import com.orailnoor.droiddesk.runtime.LinuxRuntime
 import com.orailnoor.droiddesk.runtime.ChrootRuntime
 import com.orailnoor.droiddesk.runtime.ClipboardSync
+import com.orailnoor.droiddesk.runtime.EnvironmentKind
+import com.orailnoor.droiddesk.runtime.StartRequest
+import com.orailnoor.droiddesk.runtime.createLinuxEnvironmentManager
 import com.orailnoor.droiddesk.runtime.XfceMobileProfile
 import com.orailnoor.droiddesk.runtime.XfceDisplayProfile
 import com.orailnoor.droiddesk.x11.X11ServiceClient
@@ -62,6 +65,7 @@ class DesktopActivity : Activity() {
     private var desktopEnv = "xfce4"
     private lateinit var linuxRuntime: LinuxRuntime
     private lateinit var chrootRuntime: ChrootRuntime
+    private lateinit var environmentManager: com.orailnoor.droiddesk.runtime.LinuxEnvironmentManager
     private var clipboardSync: ClipboardSync? = null
     private lateinit var placeholder: FrameLayout
     private var x11ServiceClient: X11ServiceClient? = null
@@ -167,6 +171,11 @@ class DesktopActivity : Activity() {
         displayCoordinator.initialize(applicationContext)
         linuxRuntime = LinuxRuntime(applicationContext)
         chrootRuntime = ChrootRuntime(applicationContext)
+        environmentManager = createLinuxEnvironmentManager(
+            applicationContext,
+            linuxRuntime,
+            chrootRuntime,
+        )
         displayRequestId = intent.getLongExtra("displayRequestId", 0L)
         sessionEpoch = intent.getLongExtra("sessionGeneration", 0L)
         val displayKey = intent.getStringExtra("displayKey")
@@ -238,11 +247,12 @@ class DesktopActivity : Activity() {
 
     private fun startClipboardSync() {
         if (clipboardSync == null) {
-            clipboardSync = if (sessionMode == "chroot") {
-                ClipboardSync(this, chrootRuntime::readLinuxClipboard, chrootRuntime::writeLinuxClipboard)
-            } else {
-                ClipboardSync(this, linuxRuntime::readLinuxClipboard, linuxRuntime::writeLinuxClipboard)
-            }
+            val kind = EnvironmentKind.fromSessionMode(sessionMode)
+            clipboardSync = ClipboardSync(
+                this,
+                { environmentManager.readClipboard(kind) },
+                { value -> environmentManager.writeClipboard(value, kind) },
+            )
         }
         clipboardSync?.start()
     }
@@ -565,8 +575,11 @@ class DesktopActivity : Activity() {
                 completions.forEach { it(outcome) }
             }
         }
-        if (sessionMode == "chroot") chrootRuntime.applyDisplayProfile(profile, completion)
-        else linuxRuntime.applyDisplayProfile(profile, completion)
+        environmentManager.applyDisplayProfile(
+            profile,
+            kind = EnvironmentKind.fromSessionMode(sessionMode),
+            onComplete = completion,
+        )
     }
 
     private fun updateOverlayOffsets() {
@@ -901,9 +914,9 @@ class DesktopActivity : Activity() {
         }
         val epoch = sessionEpoch
         val coordinator = displayCoordinator
-        val native = linuxRuntime
         val rooted = chrootRuntime
         val mode = sessionMode
+        val environmentKind = EnvironmentKind.fromSessionMode(mode)
         val desktop = desktopEnv
         val initialProfile = currentProfile ?: DisplayProfilePolicy.phoneDefaultProfile()
         val app = applicationContext
@@ -912,8 +925,11 @@ class DesktopActivity : Activity() {
             if (!coordinator.isSessionCurrent(epoch)) return@executeSession
             Log.i(TAG, "Starting Linux desktop session after X server connection")
             try {
-                if (mode == "chroot") {
-                    if (!rooted.isRunning()) rooted.startSession(desktop, initialProfile)
+                val started = environmentManager.start(
+                    StartRequest(environmentKind, desktop, initialProfile),
+                )
+                if (started.isFailure) throw started.exceptionOrNull()!!
+                if (environmentKind == EnvironmentKind.CHROOT_UBUNTU) {
                     if (coordinator.isSessionCurrent(epoch) && rooted.isRunning()) {
                         try {
                             DroidDeskService.ensureLegacyIntentBridge(app, rooted)
@@ -926,10 +942,8 @@ class DesktopActivity : Activity() {
                             }
                         }
                     }
-                } else {
-                    if (!native.isRunning()) native.startSession(desktop, "x11", initialProfile)
                 }
-                val running = if (mode == "chroot") rooted.isRunning() else native.isRunning()
+                val running = environmentManager.status().running
                 val outcome = if (running) Result.success(Unit) else Result.failure(
                     IllegalStateException("Linux session did not start; check the setup log"),
                 )
@@ -951,11 +965,10 @@ class DesktopActivity : Activity() {
         if (readinessThread != null) return
         readinessThread = Thread({
             try {
-                val ready = if (sessionMode == "chroot") {
-                    chrootRuntime.waitForDesktopReady(desktopEnv)
-                } else {
-                    linuxRuntime.waitForDesktopReady(desktopEnv)
-                }
+                val ready = environmentManager.waitForDesktopReady(
+                    desktopEnv,
+                    kind = EnvironmentKind.fromSessionMode(sessionMode),
+                )
                 revealDesktop(ready)
             } catch (_: InterruptedException) {
                 Thread.currentThread().interrupt()
@@ -1130,7 +1143,7 @@ class DesktopActivity : Activity() {
         desktopReady = false
         val ownedLease = rendererLease
         if (ownedLease != null && TermuxMainActivity.getInstance().isLorieViewOwner(ownedLease.generation)) {
-            if (sessionMode == "chroot") chrootRuntime.cancelDisplayProfile() else linuxRuntime.cancelDisplayProfile()
+            environmentManager.cancelDisplayProfile(EnvironmentKind.fromSessionMode(sessionMode))
         }
         val pendingProfiles = profileCompletions.toList()
         profileCompletions.clear()

@@ -1,5 +1,7 @@
 package com.orailnoor.droiddesk.runtime
 
+import android.content.Context
+
 internal class LinuxEnvironmentManager(
     adapters: List<EnvironmentAdapter>,
     private val capabilities: () -> RuntimeCapabilities,
@@ -19,6 +21,9 @@ internal class LinuxEnvironmentManager(
         selectedKindOrNull()?.let { return it }
         val detected = capabilities()
         return when {
+            detected.chroot.state == EvidenceState.SUPPORTED_AND_PROBED &&
+                adaptersByKind.containsKey(EnvironmentKind.CHROOT_UBUNTU) ->
+                EnvironmentKind.CHROOT_UBUNTU
             detected.prootCandidate && adaptersByKind.containsKey(EnvironmentKind.PROOT_DEBIAN) ->
                 EnvironmentKind.PROOT_DEBIAN
             adaptersByKind.containsKey(EnvironmentKind.TERMUX_NATIVE) ->
@@ -69,6 +74,42 @@ internal class LinuxEnvironmentManager(
     fun execute(request: ExecutionRequest): ExecutionResult =
         adapter(request.kind).execute(request)
 
+    fun optionalAppsStatus(kind: EnvironmentKind = activeKind()): Map<String, Boolean> =
+        adapter(kind).optionalAppsStatus()
+
+    fun installOptionalApp(
+        appId: String,
+        kind: EnvironmentKind = activeKind(),
+        onProgress: (Double, String) -> Unit = { _, _ -> },
+        onLog: (String) -> Unit = {},
+    ): Result<Unit> = adapter(kind).installOptionalApp(appId, onProgress, onLog)
+
+    fun waitForDesktopReady(
+        desktop: String,
+        timeoutMs: Long = 45_000,
+        kind: EnvironmentKind = activeKind(),
+    ): Boolean = adapter(kind).waitForDesktopReady(desktop, timeoutMs)
+
+    fun applyDisplayProfile(
+        profile: com.orailnoor.droiddesk.display.DisplayProfile,
+        kind: EnvironmentKind = activeKind(),
+        onComplete: (Result<Unit>) -> Unit,
+    ) = adapter(kind).applyDisplayProfile(profile, onComplete)
+
+    fun cancelDisplayProfile(kind: EnvironmentKind = activeKind()) =
+        adapter(kind).cancelDisplayProfile()
+
+    fun readClipboard(kind: EnvironmentKind = activeKind()): String? =
+        adapter(kind).readClipboard()
+
+    fun writeClipboard(value: String, kind: EnvironmentKind = activeKind()): Boolean =
+        adapter(kind).writeClipboard(value)
+
+    fun paths(kind: EnvironmentKind = activeKind()): EnvironmentPaths =
+        adapter(kind).paths()
+
+    fun activeKind(): EnvironmentKind = selectedKindOrNull() ?: recommendedKind()
+
     private fun selectedKindOrNull(): EnvironmentKind? {
         val persisted = selectionStore.read() ?: return null
         return EnvironmentKind.fromWire(persisted)
@@ -78,4 +119,41 @@ internal class LinuxEnvironmentManager(
     private fun adapter(kind: EnvironmentKind): EnvironmentAdapter =
         adaptersByKind[kind]
             ?: throw IllegalStateException("Linux environment adapter is unavailable: ${kind.wireValue}")
+}
+
+internal class SharedPreferencesEnvironmentSelectionStore(
+    context: Context,
+) : EnvironmentSelectionStore {
+    private val preferences = context.applicationContext.getSharedPreferences(
+        "linux_environment",
+        Context.MODE_PRIVATE,
+    )
+
+    override fun read(): String? = preferences.getString(KEY_SELECTED, null)
+
+    override fun write(kind: EnvironmentKind) {
+        preferences.edit().putString(KEY_SELECTED, kind.wireValue).apply()
+    }
+
+    private companion object {
+        const val KEY_SELECTED = "selected_environment"
+    }
+}
+
+internal fun createLinuxEnvironmentManager(
+    context: Context,
+    linuxRuntime: LinuxRuntime = LinuxRuntime(context.applicationContext),
+    chrootRuntime: ChrootRuntime = ChrootRuntime(context.applicationContext),
+): LinuxEnvironmentManager {
+    val probe = RuntimeCapabilityProbe(
+        AndroidRuntimeCapabilitySource(context.applicationContext, linuxRuntime, chrootRuntime),
+    )
+    return LinuxEnvironmentManager(
+        adapters = listOf(
+            TermuxNativeEnvironment(context.applicationContext, linuxRuntime),
+            ChrootUbuntuEnvironment(context.applicationContext, chrootRuntime),
+        ),
+        capabilities = probe::probe,
+        selectionStore = SharedPreferencesEnvironmentSelectionStore(context.applicationContext),
+    )
 }

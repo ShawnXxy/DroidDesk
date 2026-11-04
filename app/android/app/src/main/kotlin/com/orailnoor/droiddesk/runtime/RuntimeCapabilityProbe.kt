@@ -219,9 +219,13 @@ class AndroidRuntimeCapabilitySource(
             EvidenceState.PRESENT_UNVERIFIED,
             "Root is available but the chroot rootfs is not installed",
         )
+        chrootRuntime.isDesktopInstalled() -> CapabilityEvidence(
+            EvidenceState.SUPPORTED_AND_PROBED,
+            "Root, rootfs, and the chroot desktop are available",
+        )
         else -> CapabilityEvidence(
             EvidenceState.PRESENT_UNVERIFIED,
-            "Root and rootfs are present; mount and X11 probes run during session preparation",
+            "Root and rootfs are present but the desktop is not installed",
         )
     }
 

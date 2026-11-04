@@ -1,6 +1,7 @@
 package com.orailnoor.droiddesk.runtime
 
 import com.orailnoor.droiddesk.display.DisplayProfile
+import java.io.File
 
 enum class EnvironmentKind(val wireValue: String) {
     TERMUX_NATIVE("termuxNative"),
@@ -10,7 +11,20 @@ enum class EnvironmentKind(val wireValue: String) {
     companion object {
         fun fromWire(value: String): EnvironmentKind? =
             entries.firstOrNull { it.wireValue == value }
+
+        fun fromSessionMode(value: String): EnvironmentKind = when (value) {
+            "chroot" -> CHROOT_UBUNTU
+            "proot" -> PROOT_DEBIAN
+            else -> TERMUX_NATIVE
+        }
     }
+
+    val sessionMode: String
+        get() = when (this) {
+            TERMUX_NATIVE -> "termux"
+            PROOT_DEBIAN -> "proot"
+            CHROOT_UBUNTU -> "chroot"
+        }
 }
 
 data class EnvironmentStatus(
@@ -25,6 +39,32 @@ data class EnvironmentStatus(
     val rootfsSizeBytes: Long,
     val capabilities: RuntimeCapabilities,
     val lastError: String?,
+    val rootfsPath: String = "",
+) {
+    fun toLegacyMap(): Map<String, Any?> = mapOf(
+        "schemaVersion" to schemaVersion,
+        "environmentKind" to kind.wireValue,
+        "isBootstrapped" to installed,
+        "isRunning" to running,
+        "hasRoot" to (
+            capabilities.chroot.state == EvidenceState.SUPPORTED_AND_PROBED ||
+                capabilities.chroot.state == EvidenceState.PRESENT_UNVERIFIED
+            ),
+        "distro" to distro,
+        "installedDE" to desktop,
+        "rootfsPath" to rootfsPath,
+        "rootfsSizeMB" to rootfsSizeBytes / (1024L * 1024L),
+        "capabilities" to capabilities.toMap(),
+        "lastError" to lastError,
+    )
+}
+
+data class EnvironmentPaths(
+    val home: File,
+    val applicationDirectories: List<File>,
+    val packageStatusFiles: List<File>,
+    val snapshotMode: String,
+    val guestHome: String = home.absolutePath,
 )
 
 data class ProvisionRequest(
@@ -79,4 +119,30 @@ internal interface EnvironmentAdapter {
     fun stop(): Result<Unit>
 
     fun execute(request: ExecutionRequest): ExecutionResult
+
+    fun optionalAppsStatus(): Map<String, Boolean> = emptyMap()
+
+    fun installOptionalApp(
+        appId: String,
+        onProgress: (Double, String) -> Unit,
+        onLog: (String) -> Unit,
+    ): Result<Unit> = Result.failure(UnsupportedOperationException("Optional apps are unavailable"))
+
+    fun waitForDesktopReady(desktop: String, timeoutMs: Long): Boolean = false
+
+    fun applyDisplayProfile(
+        profile: DisplayProfile,
+        onComplete: (Result<Unit>) -> Unit,
+    ) {
+        onComplete(Result.failure(UnsupportedOperationException("Display profiles are unavailable")))
+    }
+
+    fun cancelDisplayProfile() = Unit
+
+    fun readClipboard(): String? = null
+
+    fun writeClipboard(value: String): Boolean = false
+
+    fun paths(): EnvironmentPaths =
+        throw UnsupportedOperationException("Environment paths are unavailable")
 }

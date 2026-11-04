@@ -26,6 +26,7 @@ import kotlin.concurrent.thread
 import com.orailnoor.droiddesk.display.DesktopDisplayCoordinator
 import com.orailnoor.droiddesk.runtime.AndroidAppSync
 import com.orailnoor.droiddesk.runtime.RootShell
+import com.orailnoor.droiddesk.runtime.createLinuxEnvironmentManager
 import java.util.concurrent.Executors
 import java.lang.ref.WeakReference
 import java.io.IOException
@@ -67,10 +68,10 @@ class DroidDeskService : Service() {
             coordinator.startStopping(preserveRestart = reason == DesktopStopReason.ENVIRONMENT_CHANGE)
             executeSession {
                 var failure: Exception? = null
+                val environments = createLinuxEnvironmentManager(app)
                 val operations: List<() -> Unit> = listOf(
                     { stopLegacyIntentBridge() },
-                    { ChrootRuntime(app).stopSession() },
-                    { LinuxRuntime(app).stopSession() },
+                    { environments.stop().getOrThrow() },
                     { app.stopService(Intent(app, X11ServerService::class.java)); Unit },
                 )
                 for (operation in operations) {
@@ -163,7 +164,9 @@ class DroidDeskService : Service() {
                 context, 1, Intent(context, DroidDeskService::class.java).setAction(ACTION_STOP),
                 PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
             )
-            val running = ChrootRuntime(context).isRunning() || LinuxRuntime(context).isRunning()
+            val running = runCatching {
+                createLinuxEnvironmentManager(context.applicationContext).status().running
+            }.getOrDefault(false)
             manager.notify(NOTIFICATION_ID, NotificationCompat.Builder(context, CHANNEL_ID)
                 .setContentTitle(if (running && !displayLocal) "Linux session preserved" else "Desktop placement needs attention")
                 .setContentText(message)

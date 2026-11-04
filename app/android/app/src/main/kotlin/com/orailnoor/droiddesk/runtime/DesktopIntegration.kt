@@ -22,7 +22,11 @@ class DesktopIntegration(private val context: Context) {
 
     private val snapshotsDir = File(context.filesDir, "snapshots").apply { mkdirs() }
 
-    fun search(query: String, rooted: Boolean, limit: Int = 80): List<Map<String, String>> {
+    fun search(
+        query: String,
+        paths: EnvironmentPaths,
+        limit: Int = 80,
+    ): List<Map<String, String>> {
         val needle = query.trim().lowercase()
         val results = mutableListOf<Map<String, String>>()
         AndroidAppBridge.listApps(context).forEach { app ->
@@ -31,13 +35,7 @@ class DesktopIntegration(private val context: Context) {
             }
         }
 
-        val home = linuxHome(rooted)
-        val appDirs = if (rooted) {
-            listOf(File(context.filesDir, "rootfs/usr/share/applications"), File(home, ".local/share/applications"))
-        } else {
-            listOf(File(context.filesDir, "usr/share/applications"), File(home, ".local/share/applications"))
-        }
-        appDirs.filter(File::isDirectory).flatMap { directory ->
+        paths.applicationDirectories.filter(File::isDirectory).flatMap { directory ->
             directory.walkTopDown().maxDepth(2).filter { it.isFile && it.extension == "desktop" }.toList()
         }.filterNot { desktopFile ->
             desktopFile.parentFile?.name in setOf("droiddesk-android", "droiddesk-tools")
@@ -76,16 +74,19 @@ class DesktopIntegration(private val context: Context) {
             .take(limit)
     }
 
-    fun createSnapshot(rooted: Boolean): Map<String, Any> {
+    fun createSnapshot(paths: EnvironmentPaths): Map<String, Any> {
         val stamp = SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US).format(Date())
         val output = File(snapshotsDir, "DroidDesk-$stamp.zip")
-        val home = linuxHome(rooted)
+        val home = paths.home
         ZipOutputStream(BufferedOutputStream(FileOutputStream(output))).use { zip ->
             zip.putNextEntry(ZipEntry("snapshot.properties"))
-            zip.write("version=1\nmode=${if (rooted) "chroot" else "native"}\ncreated=${System.currentTimeMillis()}\n".toByteArray())
+            zip.write(
+                "version=1\nmode=${paths.snapshotMode}\ncreated=${System.currentTimeMillis()}\n"
+                    .toByteArray(),
+            )
             zip.closeEntry()
             zip.putNextEntry(ZipEntry("packages.txt"))
-            zip.write(installedPackages(rooted).joinToString("\n", postfix = "\n").toByteArray())
+            zip.write(installedPackages(paths).joinToString("\n", postfix = "\n").toByteArray())
             zip.closeEntry()
             if (home.isDirectory) addDirectory(zip, home, "home")
         }
@@ -97,9 +98,9 @@ class DesktopIntegration(private val context: Context) {
         ?.map(::snapshotInfo)
         .orEmpty()
 
-    fun restoreSnapshot(name: String, rooted: Boolean): List<String> {
+    fun restoreSnapshot(name: String, paths: EnvironmentPaths): List<String> {
         val archive = safeSnapshot(name)
-        val home = linuxHome(rooted)
+        val home = paths.home
         val rollback = File(home.parentFile, "${home.name}.before-restore")
         if (rollback.exists()) rollback.deleteRecursively()
         if (home.exists() && !home.renameTo(rollback)) error("Could not preserve the current Linux home")
@@ -136,8 +137,7 @@ class DesktopIntegration(private val context: Context) {
                     entry = zip.nextEntry
                 }
             }
-            val expectedMode = if (rooted) "chroot" else "native"
-            require(snapshotMode == expectedMode) {
+            require(snapshotMode == paths.snapshotMode) {
                 "This snapshot belongs to a different Linux runtime mode"
             }
             rollback.deleteRecursively()
@@ -151,26 +151,13 @@ class DesktopIntegration(private val context: Context) {
 
     fun deleteSnapshot(name: String): Boolean = safeSnapshot(name).delete()
 
-    fun missingPackages(packages: List<String>, rooted: Boolean): List<String> {
-        val installed = installedPackages(rooted).toSet()
+    fun missingPackages(packages: List<String>, paths: EnvironmentPaths): List<String> {
+        val installed = installedPackages(paths).toSet()
         return packages.filter(::safePackageName).distinct().filterNot(installed::contains)
     }
 
-    private fun linuxHome(rooted: Boolean): File = if (rooted) {
-        File(context.filesDir, "rootfs/root")
-    } else {
-        File(context.filesDir, "home")
-    }
-
-    private fun installedPackages(rooted: Boolean): List<String> {
-        val status = if (rooted) {
-            File(context.filesDir, "rootfs/var/lib/dpkg/status")
-        } else {
-            listOf(
-                File(context.filesDir, "usr/var/lib/dpkg/status"),
-                File(context.filesDir, "dpkgroot/var/lib/dpkg/status"),
-            ).firstOrNull(File::isFile) ?: return emptyList()
-        }
+    private fun installedPackages(paths: EnvironmentPaths): List<String> {
+        val status = paths.packageStatusFiles.firstOrNull(File::isFile) ?: return emptyList()
         if (!status.isFile) return emptyList()
         return status.readText().split("\n\n").mapNotNull { block ->
             val fields = block.lineSequence().mapNotNull { line ->

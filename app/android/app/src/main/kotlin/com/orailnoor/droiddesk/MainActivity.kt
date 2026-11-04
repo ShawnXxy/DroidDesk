@@ -21,6 +21,13 @@ import com.orailnoor.droiddesk.runtime.AppUpdater
 import com.orailnoor.droiddesk.runtime.DesktopIntegration
 import com.orailnoor.droiddesk.runtime.AndroidRuntimeCapabilitySource
 import com.orailnoor.droiddesk.runtime.RuntimeCapabilityProbe
+import com.orailnoor.droiddesk.runtime.ChrootUbuntuEnvironment
+import com.orailnoor.droiddesk.runtime.EnvironmentKind
+import com.orailnoor.droiddesk.runtime.ExecutionRequest
+import com.orailnoor.droiddesk.runtime.LinuxEnvironmentManager
+import com.orailnoor.droiddesk.runtime.ProvisionRequest
+import com.orailnoor.droiddesk.runtime.SharedPreferencesEnvironmentSelectionStore
+import com.orailnoor.droiddesk.runtime.TermuxNativeEnvironment
 import com.orailnoor.droiddesk.view.AndroidSurfaceViewFactory
 import com.orailnoor.droiddesk.x11.X11ServerService
 import kotlin.concurrent.thread
@@ -57,6 +64,7 @@ class MainActivity : FlutterActivity() {
     private lateinit var chrootRuntime: ChrootRuntime
     private lateinit var desktopIntegration: DesktopIntegration
     private lateinit var runtimeCapabilityProbe: RuntimeCapabilityProbe
+    private lateinit var environmentManager: LinuxEnvironmentManager
     private var displayStateSubscription: (() -> Unit)? = null
 
     private val mainHandler = android.os.Handler(android.os.Looper.getMainLooper())
@@ -102,6 +110,14 @@ class MainActivity : FlutterActivity() {
         runtimeCapabilityProbe = RuntimeCapabilityProbe(
             AndroidRuntimeCapabilitySource(applicationContext, linuxRuntime, chrootRuntime),
         )
+        environmentManager = LinuxEnvironmentManager(
+            adapters = listOf(
+                TermuxNativeEnvironment(applicationContext, linuxRuntime),
+                ChrootUbuntuEnvironment(applicationContext, chrootRuntime),
+            ),
+            capabilities = runtimeCapabilityProbe::probe,
+            selectionStore = SharedPreferencesEnvironmentSelectionStore(applicationContext),
+        )
         desktopIntegration = DesktopIntegration(this)
         DesktopDisplayCoordinator.shared.initialize(applicationContext)
         DesktopDisplayCoordinator.shared.bindActivity(this)
@@ -133,13 +149,11 @@ class MainActivity : FlutterActivity() {
         if (DesktopDisplayCoordinator.shared.isDisplayLocal) return
         val autoStart = prefs.getBoolean("flutter.autoStartDesktop", false)
         if (autoStart) {
-            val rooted = chrootRuntime.hasRoot()
-            val desktop = if (rooted) "xfce4" else linuxRuntime.getInstalledDE()
-            val ready = if (rooted) chrootRuntime.isRootfsReady() && chrootRuntime.isDesktopInstalled()
-                else linuxRuntime.isBootstrapped() && desktop.isNotEmpty()
-            if (ready) requestDesktop(
-                if (rooted) "chroot" else "termux", desktop,
-                !(if (rooted) chrootRuntime.isRunning() else linuxRuntime.isRunning()),
+            val status = environmentManager.status()
+            if (status.installed && status.desktop.isNotEmpty()) requestDesktop(
+                status.kind.sessionMode,
+                status.desktop,
+                !status.running,
             )
         }
     }
@@ -222,7 +236,7 @@ class MainActivity : FlutterActivity() {
             coordinator.moveToPhone { outcome -> outcome.exceptionOrNull()?.let { displayFailure(it) } }
             return
         }
-        if (chrootRuntime.isRunning() || linuxRuntime.isRunning() || coordinator.isStarting || coordinator.isRestarting) {
+        if (environmentManager.status().running || coordinator.isStarting || coordinator.isRestarting) {
             launchPreparedDesktop(coordinator.sessionGeneration, null)
             return
         }
@@ -234,21 +248,19 @@ class MainActivity : FlutterActivity() {
         }
 
         thread(name = "home-launch") {
-            val rooted = chrootRuntime.hasRoot()
-            val desktopEnv = if (rooted) "xfce4" else linuxRuntime.getInstalledDE()
-            val ready = if (rooted) {
-                chrootRuntime.isRootfsReady() && chrootRuntime.isDesktopInstalled()
-            } else {
-                linuxRuntime.isBootstrapped() && desktopEnv.isNotEmpty()
-            }
-            if (!ready) {
+            val status = environmentManager.status()
+            if (!status.installed || status.desktop.isEmpty()) {
                 Log.i(TAG, "Home launch opened setup because Linux is not ready")
                 return@thread
             }
 
-            val sessionRunning = if (rooted) chrootRuntime.isRunning() else linuxRuntime.isRunning()
             runOnUiThread {
-                requestDesktop(if (rooted) "chroot" else "termux", desktopEnv, !sessionRunning, expectedEpoch = epoch)
+                requestDesktop(
+                    status.kind.sessionMode,
+                    status.desktop,
+                    !status.running,
+                    expectedEpoch = epoch,
+                )
             }
         }
     }
@@ -419,25 +431,12 @@ class MainActivity : FlutterActivity() {
 
                 // ── Runtime Status ──
                 "getRuntimeStatus" -> {
-                    val rooted = chrootRuntime.hasRoot()
-                    result.success(mapOf(
-                        "isBootstrapped" to if (rooted) chrootRuntime.isRootfsReady() else linuxRuntime.isBootstrapped(),
-                        "isRunning" to if (rooted) chrootRuntime.isRunning() else linuxRuntime.isRunning(),
-                        "hasRoot" to rooted,
-                        "distro" to if (rooted) "ubuntu-chroot" else "termux-native",
-                        "installedDE" to if (rooted) {
-                            if (chrootRuntime.isDesktopInstalled()) "xfce4" else ""
-                        } else {
-                            linuxRuntime.getInstalledDE()
-                        },
-                        "rootfsPath" to if (rooted) chrootRuntime.getRootfsPath() else "",
-                        "rootfsSizeMB" to if (rooted) chrootRuntime.getRootfsSizeMB() else 0L,
-                        "capabilities" to runtimeCapabilityProbe.probe().toMap(),
-                    ))
+                    result.success(environmentManager.status().toLegacyMap())
                 }
 
                 // ── Device Info ──
                 "getDeviceInfo" -> {
+                    val capabilities = runtimeCapabilityProbe.probe()
                     result.success(mapOf(
                         "model" to Build.MODEL,
                         "brand" to Build.BRAND,
@@ -445,11 +444,7 @@ class MainActivity : FlutterActivity() {
                         "sdkVersion" to Build.VERSION.SDK_INT,
                         "cpuAbi" to Build.SUPPORTED_ABIS.firstOrNull(),
                         "gpuVendor" to getGpuVendor(),
-                        "graphicsMode" to if (chrootRuntime.hasRoot()) {
-                            "Software (llvmpipe)"
-                        } else {
-                            linuxRuntime.getGraphicsMode()
-                        },
+                        "graphicsMode" to capabilities.rendererBackend.wireValue,
                         "totalRamMB" to getTotalRam(),
                         "availableStorageMB" to getAvailableStorage()
                     ))
@@ -583,12 +578,7 @@ class MainActivity : FlutterActivity() {
                 }
 
                 "getOptionalApps" -> {
-                    val status = if (chrootRuntime.hasRoot()) {
-                        chrootRuntime.getOptionalAppsStatus()
-                    } else {
-                        linuxRuntime.getOptionalAppsStatus()
-                    }
-                    result.success(status)
+                    result.success(environmentManager.optionalAppsStatus())
                 }
 
                 "installOptionalApp" -> {
@@ -607,17 +597,12 @@ class MainActivity : FlutterActivity() {
                             }
                         }
 
-                        val ok = if (chrootRuntime.hasRoot()) {
-                            chrootRuntime.installOptionalApp(appId, progressSink, logSink)
-                        } else {
-                            linuxRuntime.setInstallLogSink(logSink)
-                            try {
-                                linuxRuntime.installOptionalApp(appId, progressSink)
-                            } finally {
-                                linuxRuntime.setInstallLogSink(null)
-                            }
-                        }
-                        runOnUiThread { result.success(ok) }
+                        val outcome = environmentManager.installOptionalApp(
+                            appId = appId,
+                            onProgress = progressSink,
+                            onLog = logSink,
+                        )
+                        runOnUiThread { result.success(outcome.isSuccess) }
                     }
                 }
 
@@ -684,7 +669,7 @@ class MainActivity : FlutterActivity() {
                 "searchDesktopItems" -> {
                     val query = call.argument<String>("query") ?: ""
                     thread(name = "desktop-search") {
-                        val items = desktopIntegration.search(query, chrootRuntime.hasRoot())
+                        val items = desktopIntegration.search(query, environmentManager.paths())
                         runOnUiThread { result.success(items) }
                     }
                 }
@@ -715,27 +700,34 @@ class MainActivity : FlutterActivity() {
                                     runOnUiThread { reply.error("SESSION_STOPPED", "Desktop launch was cancelled", null) }
                                     return@thread
                                 }
-                                val rooted = chrootRuntime.hasRoot()
-                                val running = if (rooted) chrootRuntime.isRunning() else linuxRuntime.isRunning()
-                                if (!running) {
+                                val status = environmentManager.status()
+                                val environmentKind = status.kind
+                                if (!status.running) {
                                     runOnUiThread { openDesktop(startSession = true, expectedEpoch = epoch) }
-                                    if (rooted) chrootRuntime.waitForDesktopReady("xfce4")
-                                    else linuxRuntime.waitForDesktopReady(linuxRuntime.getInstalledDE())
+                                    environmentManager.waitForDesktopReady(
+                                        status.desktop,
+                                        kind = environmentKind,
+                                    )
                                 }
-                                val command = desktopItemCommand(kind, id, rooted)
+                                val command = desktopItemCommand(
+                                    kind,
+                                    id,
+                                    environmentManager.paths(environmentKind),
+                                )
                                 if (!displays.isSessionCurrent(epoch)) {
                                     runOnUiThread { reply.error("SESSION_STOPPED", "Desktop launch was cancelled", null) }
                                     return@thread
                                 }
-                                val launched = if (rooted) chrootRuntime.executeDesktopCommand(command)
-                                    else linuxRuntime.executeDesktopCommand(command)
+                                val launched = environmentManager.execute(
+                                    ExecutionRequest.Desktop(environmentKind, command),
+                                )
                                 runOnUiThread {
                                     if (!displays.isSessionCurrent(epoch)) {
                                         reply.error("SESSION_STOPPED", "Desktop launch was cancelled", null)
-                                    } else if (launched.isFailure) {
-                                        reply.error("DESKTOP_LAUNCH_FAILED", launched.exceptionOrNull()?.message, null)
+                                    } else if (launched.exitCode != 0) {
+                                        reply.error("DESKTOP_LAUNCH_FAILED", launched.output, null)
                                     } else {
-                                        if (running) openDesktop(startSession = false, expectedEpoch = epoch)
+                                        if (status.running) openDesktop(startSession = false, expectedEpoch = epoch)
                                         reply.success(true)
                                     }
                                 }
@@ -845,7 +837,7 @@ class MainActivity : FlutterActivity() {
 
                 "listDesktopSnapshots" -> result.success(desktopIntegration.listSnapshots())
                 "createDesktopSnapshot" -> thread(name = "create-desktop-snapshot") {
-                    runCatching { desktopIntegration.createSnapshot(chrootRuntime.hasRoot()) }
+                    runCatching { desktopIntegration.createSnapshot(environmentManager.paths()) }
                         .onSuccess { value -> runOnUiThread { result.success(value) } }
                         .onFailure { error -> runOnUiThread { result.error("snapshot", error.message, null) } }
                 }
@@ -854,25 +846,21 @@ class MainActivity : FlutterActivity() {
                     displays.stop()
                     thread(name = "restore-desktop-snapshot") {
                         runCatching {
-                            val rooted = chrootRuntime.hasRoot()
-                            if (chrootRuntime.isRunning()) chrootRuntime.stopSession()
-                            if (linuxRuntime.isRunning()) linuxRuntime.stopSession()
-                            val savedPackages = desktopIntegration.restoreSnapshot(name, rooted)
-                            val missingPackages = desktopIntegration.missingPackages(savedPackages, rooted)
+                            val environmentKind = environmentManager.activeKind()
+                            val paths = environmentManager.paths(environmentKind)
+                            environmentManager.stop().getOrThrow()
+                            val savedPackages = desktopIntegration.restoreSnapshot(name, paths)
+                            val missingPackages = desktopIntegration.missingPackages(savedPackages, paths)
                             if (missingPackages.isNotEmpty()) {
                                 val command = "DEBIAN_FRONTEND=noninteractive apt-get " +
                                     "-o Dpkg::Options::=--force-confdef " +
                                     "-o Dpkg::Options::=--force-confold --no-upgrade install -y " +
                                     missingPackages.joinToString(" ")
-                                if (rooted) {
-                                    chrootRuntime.ensureMounts()
-                                    try {
-                                        chrootRuntime.executeCommand(command)
-                                    } finally {
-                                        chrootRuntime.unmountAll()
-                                    }
-                                } else {
-                                    linuxRuntime.executeCommand(command)
+                                val execution = environmentManager.execute(
+                                    ExecutionRequest.Shell(environmentKind, command),
+                                )
+                                if (execution.exitCode != 0) {
+                                    error(execution.output)
                                 }
                             }
                             true
@@ -893,78 +881,66 @@ class MainActivity : FlutterActivity() {
                 "startLinux" -> {
                     val startReply = DesktopLaunchReply(result, displays)
                     val desktopEnv = call.argument<String>("de") ?: "xfce4"
-                    val rooted = chrootRuntime.hasRoot()
-                    val ready = if (rooted) chrootRuntime.isRootfsReady() && chrootRuntime.isDesktopInstalled()
-                        else linuxRuntime.isBootstrapped() && linuxRuntime.getInstalledDE() == desktopEnv
+                    val status = environmentManager.status()
+                    val environmentKind = status.kind
+                    val ready = status.installed && status.desktop == desktopEnv
                     if (displays.isDisplayLocal && ready) {
                         requestDesktop(
-                            if (rooted) "chroot" else "termux", desktopEnv,
-                            !(if (rooted) chrootRuntime.isRunning() else linuxRuntime.isRunning()), startReply,
+                            environmentKind.sessionMode,
+                            desktopEnv,
+                            !status.running,
+                            startReply,
                         )
                         return@setMethodCallHandler
                     }
                     val epoch = try {
                         displays.prepareSession(
-                            if (rooted) "chroot" else "termux", desktopEnv,
-                            !(if (rooted) chrootRuntime.isRunning() else linuxRuntime.isRunning()),
+                            environmentKind.sessionMode,
+                            desktopEnv,
+                            !status.running,
                         )
                     } catch (error: DesktopDisplayException) {
                         displayFailure(error, startReply)
                         return@setMethodCallHandler
                     }
                     startForegroundService()
-                    if (rooted) {
-                        // Rooted fast path: chroot + LorieView
-                        thread {
-                            if (!chrootRuntime.isRootfsReady()) {
-                                Log.w(TAG, "Chroot rootfs not ready; cannot start session")
-                                runOnUiThread {
-                                    val failure = IllegalStateException("Rootfs is not ready; complete Linux setup first")
-                                    displays.sessionStarted(epoch, Result.failure(failure))
-                                    startReply.error("SESSION_STOPPED", failure.message, null)
-                                }
-                                return@thread
+                    installThread("prepare-linux-environment") {
+                        try {
+                            if (!ready) {
+                                environmentManager.provision(
+                                    ProvisionRequest(environmentKind, desktopEnv),
+                                    onProgress = { progress, message ->
+                                        runOnUiThread {
+                                            MethodChannel(
+                                                flutterEngine.dartExecutor.binaryMessenger,
+                                                CHANNEL,
+                                            ).invokeMethod(
+                                                "onInstallProgress",
+                                                mapOf("progress" to progress, "status" to message),
+                                            )
+                                        }
+                                    },
+                                    onLog = ::appendTerminalOutput,
+                                ).getOrThrow()
                             }
+                            runOnUiThread { launchPreparedDesktop(epoch, startReply) }
+                        } catch (error: Exception) {
+                            Log.e(TAG, "Linux environment preparation failed", error)
                             runOnUiThread {
-                                launchPreparedDesktop(epoch, startReply)
-                            }
-                        }
-                    } else {
-                        // Non-root fallback: native Termux path
-                        installThread("start-linux-native") {
-                            try {
-                                linuxRuntime.extractBootstrapIfNeeded(applicationContext)
-                                val installed = linuxRuntime.getInstalledDE()
-                                val ready = installed == desktopEnv ||
-                                    linuxRuntime.installDesktopEnvironmentNative(desktopEnv)
-                                if (!ready) {
-                                    Log.e(TAG, "Native Termux desktop setup failed; session was not launched")
-                                    runOnUiThread {
-                                        val failure = IllegalStateException("Native Linux setup failed. Check the setup log.")
-                                        displays.sessionStarted(epoch, Result.failure(failure))
-                                        startReply.error("SESSION_STOPPED", failure.message, null)
-                                    }
-                                    return@installThread
-                                }
-                                runOnUiThread { launchPreparedDesktop(epoch, startReply) }
-                            } catch (error: Exception) {
-                                Log.e(TAG, "Native desktop preparation failed", error)
-                                runOnUiThread {
-                                    displays.sessionStarted(epoch, Result.failure(error))
-                                    startReply.error("SESSION_STOPPED", error.message, null)
-                                }
+                                displays.sessionStarted(epoch, Result.failure(error))
+                                startReply.error("SESSION_STOPPED", error.message, null)
                             }
                         }
                     }
                 }
 
                 "launchDesktopActivity" -> {
-                    val rooted = chrootRuntime.hasRoot()
-                    // Flutter's "running" state can be stale (e.g. after Stop from the notification).
-                    val running = if (rooted) chrootRuntime.isRunning() else linuxRuntime.isRunning()
+                    val status = environmentManager.status()
                     requestDesktop(
-                        if (rooted) "chroot" else "termux",
-                        if (rooted) "xfce4" else linuxRuntime.getInstalledDE(), !running, result,
+                        status.kind.sessionMode,
+                        status.desktop,
+                        !status.running,
+                        result,
                     )
                 }
 
@@ -980,17 +956,15 @@ class MainActivity : FlutterActivity() {
                 "executeCommand" -> {
                     val command = call.argument<String>("command") ?: ""
                     Thread {
-                        val output = if (chrootRuntime.hasRoot()) {
-                            chrootRuntime.executeCommand(command) { chunk ->
-                                appendTerminalOutput(chunk)
-                            }
-                        } else {
-                            linuxRuntime.executeCommand(command) { chunk ->
-                                appendTerminalOutput(chunk)
-                            }
-                        }
+                        val execution = environmentManager.execute(
+                            ExecutionRequest.Shell(
+                                environmentManager.activeKind(),
+                                command,
+                                ::appendTerminalOutput,
+                            ),
+                        )
                         android.os.Handler(android.os.Looper.getMainLooper()).post {
-                            result.success(output)
+                            result.success(execution.output)
                         }
                     }.start()
                 }
@@ -1078,32 +1052,29 @@ class MainActivity : FlutterActivity() {
     }
 
     private fun syncAndroidDesktopIntegration() {
-        val rooted = chrootRuntime.hasRoot()
-        if (rooted) {
-            val rootfs = java.io.File(filesDir, "rootfs")
-            AndroidAppBridge.syncLaunchers(
-                context = this,
-                homeDir = java.io.File(rootfs, "root"),
-                python = java.io.File(rootfs, "usr/bin/python3"),
-                sessionRoot = rootfs,
-            )
-            if (chrootRuntime.isRunning()) {
-                chrootRuntime.executeDesktopCommand(
-                    AndroidAppBridge.xfceDockCommand(this) + " DISPLAY=:0 xfce4-panel -r",
-                ).getOrThrow()
-            }
+        val status = environmentManager.status()
+        val paths = environmentManager.paths(status.kind)
+        val sessionRoot = status.rootfsPath.takeIf(String::isNotEmpty)?.let { java.io.File(it) }
+        val python = if (sessionRoot != null) {
+            java.io.File(sessionRoot, "usr/bin/python3")
         } else {
-            AndroidAppBridge.syncLaunchers(
-                context = this,
-                homeDir = java.io.File(filesDir, "home"),
-                python = java.io.File(filesDir, "usr/bin/python3"),
-            )
-            if (linuxRuntime.isRunning()) {
-                linuxRuntime.executeDesktopCommand(
+            java.io.File(filesDir, "usr/bin/python3")
+        }
+        AndroidAppBridge.syncLaunchers(
+            context = this,
+            homeDir = paths.home,
+            python = python,
+            sessionRoot = sessionRoot,
+        )
+        if (status.running) {
+            val execution = environmentManager.execute(
+                ExecutionRequest.Desktop(
+                    status.kind,
                     AndroidAppBridge.xfceDockCommand(this) +
                         " DISPLAY=:0 xfce4-panel -r",
-                ).getOrThrow()
-            }
+                ),
+            )
+            check(execution.exitCode == 0) { execution.output }
         }
     }
 
@@ -1114,10 +1085,12 @@ class MainActivity : FlutterActivity() {
     }
 
     private fun openDesktop(startSession: Boolean, expectedEpoch: Long? = null) {
-        val rooted = chrootRuntime.hasRoot()
+        val status = environmentManager.status()
         requestDesktop(
-            if (rooted) "chroot" else "termux",
-            if (rooted) "xfce4" else linuxRuntime.getInstalledDE(), startSession, expectedEpoch = expectedEpoch,
+            status.kind.sessionMode,
+            status.desktop,
+            startSession,
+            expectedEpoch = expectedEpoch,
         )
     }
 
@@ -1199,11 +1172,10 @@ class MainActivity : FlutterActivity() {
 
     private fun launchLocalDesktopItem(kind: String, id: String, result: MethodChannel.Result) {
         val coordinator = DesktopDisplayCoordinator.shared
-        val rooted = chrootRuntime.hasRoot()
-        val mode = if (rooted) "chroot" else "termux"
-        val desktop = if (rooted) "xfce4" else linuxRuntime.getInstalledDE()
-        requestDesktop(mode, desktop,
-            !(if (rooted) chrootRuntime.isRunning() else linuxRuntime.isRunning()),
+        val status = environmentManager.status()
+        val environmentKind = status.kind
+        requestDesktop(status.kind.sessionMode, status.desktop,
+            !status.running,
             object : MethodChannel.Result {
                 override fun success(value: Any?) {
                     val epoch = coordinator.sessionGeneration
@@ -1211,8 +1183,10 @@ class MainActivity : FlutterActivity() {
                         val readiness = DesktopItemReadinessGate(
                             isSessionCurrent = { coordinator.isSessionCurrent(epoch) },
                             waitUntilReady = {
-                                if (rooted) chrootRuntime.waitForDesktopReady(desktop)
-                                else linuxRuntime.waitForDesktopReady(desktop)
+                                environmentManager.waitForDesktopReady(
+                                    status.desktop,
+                                    kind = environmentKind,
+                                )
                             },
                         ).await {
                             DroidDeskService.executeSession {
@@ -1222,14 +1196,19 @@ class MainActivity : FlutterActivity() {
                                     }
                                     return@executeSession
                                 }
-                                val command = desktopItemCommand(kind, id, rooted)
-                                val launched = if (rooted) chrootRuntime.executeDesktopCommand(command)
-                                    else linuxRuntime.executeDesktopCommand(command)
+                                val command = desktopItemCommand(
+                                    kind,
+                                    id,
+                                    environmentManager.paths(environmentKind),
+                                )
+                                val launched = environmentManager.execute(
+                                    ExecutionRequest.Desktop(environmentKind, command),
+                                )
                                 mainHandler.post {
                                     if (!coordinator.isSessionCurrent(epoch)) {
                                         result.error("SESSION_STOPPED", "Desktop launch was cancelled", null)
-                                    } else if (launched.isFailure) {
-                                        result.error("DESKTOP_LAUNCH_FAILED", launched.exceptionOrNull()?.message, null)
+                                    } else if (launched.exitCode != 0) {
+                                        result.error("DESKTOP_LAUNCH_FAILED", launched.output, null)
                                     } else result.success(true)
                                 }
                             }
@@ -1251,14 +1230,18 @@ class MainActivity : FlutterActivity() {
             })
     }
 
-    private fun desktopItemCommand(kind: String, id: String, rooted: Boolean): String {
+    private fun desktopItemCommand(
+        kind: String,
+        id: String,
+        paths: com.orailnoor.droiddesk.runtime.EnvironmentPaths,
+    ): String {
         val safeId = id.takeIf { it.matches(Regex("[A-Za-z0-9_.+-]+")) }
         if (kind == "linux" && safeId != null) return "DISPLAY=:0 gtk-launch '$safeId' >/dev/null 2>&1 &"
         val folder = when (id) {
             "Downloads", "Documents", "Pictures" -> "/$id"
             else -> ""
         }
-        val home = if (rooted) "/root" else filesDir.absolutePath + "/home"
+        val home = paths.guestHome
         return "DISPLAY=:0 thunar \"$home$folder\" >/dev/null 2>&1 &"
     }
 
