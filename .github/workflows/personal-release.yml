@@ -119,7 +119,7 @@ jobs:
             exit 1
           fi
           mkdir -p dist
-          cp "$apk" "dist/DroidDesk-${RELEASE_TAG}-personal.apk"
+          cp "$apk" "dist/DroidDesk-${RELEASE_TAG}-xixia.apk"
           python3 - <<'PY'
           import hashlib
           import json

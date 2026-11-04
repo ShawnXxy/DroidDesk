@@ -55,7 +55,8 @@ are never overwritten.
 The job builds an ARM64 Release APK using Flutter 3.44.0 and Java 17. Missing
 signing secrets, an unexpected signing certificate, a wrong package/version,
 or a debuggable APK blocks publication. It tags the exact dispatched `xixia`
-commit, uploads the APK, `SHA256SUMS`, and `release-manifest.json` into a draft,
+commit, uploads `DroidDesk-v<version>-xixia.apk`, `SHA256SUMS`, and
+`release-manifest.json` into a draft,
 then publishes it as the latest stable release only after uploads succeed.
 The manifest records the source commit, version, APK hash, and signing
 certificate; later runs use it to enforce increasing Android build numbers.
