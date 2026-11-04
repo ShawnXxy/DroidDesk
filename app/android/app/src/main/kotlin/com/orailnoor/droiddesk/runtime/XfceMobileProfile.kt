@@ -164,6 +164,7 @@ object XfceMobileProfile {
             <property name="wrap_windows" type="bool" value="false"/>
             <property name="easy_click" type="string" value="Alt"/>
             <property name="show_dock_shadow" type="bool" value="false"/>
+            <property name="use_compositing" type="bool" value="false"/>
           </property>
         </channel>
     """.trimIndent() + "\n"

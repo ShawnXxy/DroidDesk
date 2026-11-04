@@ -192,6 +192,11 @@ class DesktopActivity : Activity() {
         }
         sessionMode = intent.getStringExtra("mode") ?: displayCoordinator.sessionMode
         desktopEnv = intent.getStringExtra("de") ?: displayCoordinator.desktopEnv
+        if (sessionMode == "proot") {
+            window.attributes = window.attributes.apply {
+                preferredRefreshRate = 60f
+            }
+        }
         estimatedLoadingSeconds = if (shouldStartSession) 30 else 10
 
         requestWindowFeature(Window.FEATURE_NO_TITLE)

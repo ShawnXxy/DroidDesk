@@ -8,7 +8,7 @@ import java.io.FileOutputStream
 import java.security.MessageDigest
 import java.util.Properties
 
-interface ProotDebianHost : ProotProvisioningHost {
+interface ProotDebianHost : ProotProvisioningHost, ProotDesktopSessionHost {
     fun readReadyMarker(): ProotReadyMarker?
     fun isRunning(): Boolean
     fun rootfsPath(): File
@@ -19,13 +19,33 @@ interface ProotDebianHost : ProotProvisioningHost {
         command: String,
         onOutput: ((String) -> Unit)? = null,
     ): ExecutionResult
+
+    override fun isDesktopReady(): Boolean =
+        readReadyMarker() != null && rootfsPath().isDirectory
+
+    override fun launchCommand(profile: DisplayProfile): List<String> =
+        throw UnsupportedOperationException("PRoot desktop launch is unavailable")
+
+    override fun applyProfile(
+        profile: DisplayProfile,
+        guestHome: String,
+        policy: ProotDesktopPolicy,
+    ): Result<Unit> = Result.failure(
+        UnsupportedOperationException("PRoot display profiles are unavailable"),
+    )
+
+    override fun waitForDesktopReady(timeoutMs: Long): Boolean = false
+    override fun desktopProcessesAlive(): Boolean = false
 }
 
 internal class ProotDebianEnvironment(
     private val host: ProotDebianHost,
     private val provisioner: ProotDebianProvisioner = ProotDebianProvisioner(host),
+    processRunner: EnvironmentProcessRunner = UnavailableEnvironmentProcessRunner,
+    sessionController: ProotDebianSessionController? = null,
 ) : EnvironmentAdapter {
     override val kind = EnvironmentKind.PROOT_DEBIAN
+    private val session = sessionController ?: ProotDebianSessionController(host, processRunner)
 
     override fun status(capabilities: RuntimeCapabilities): EnvironmentStatus {
         val marker = host.readReadyMarker()
@@ -34,14 +54,14 @@ internal class ProotDebianEnvironment(
             schemaVersion = 1,
             kind = kind,
             installed = marker != null && rootfs.isDirectory,
-            running = host.isRunning(),
+            running = session.isRunning(),
             provisioning = false,
             repairNeeded = marker == null && rootfs.exists(),
             distro = marker?.let { "debian-${it.suite}" } ?: "debian",
             desktop = if (marker != null) "xfce4" else "",
             rootfsSizeBytes = host.rootfsSizeBytes(),
             capabilities = capabilities,
-            lastError = null,
+            lastError = session.lastError,
             rootfsPath = rootfs.absolutePath,
         )
     }
@@ -53,9 +73,11 @@ internal class ProotDebianEnvironment(
     ): Result<Unit> = provisioner.provision(onProgress, onLog)
 
     override fun start(request: StartRequest): Result<Unit> =
-        Result.failure(IllegalStateException("PRoot desktop session lifecycle is not configured"))
+        session.start(
+            request.displayProfile ?: com.orailnoor.droiddesk.display.DisplayProfilePolicy.phoneDefaultProfile(),
+        )
 
-    override fun stop(): Result<Unit> = Result.success(Unit)
+    override fun stop(): Result<Unit> = session.stop()
 
     override fun execute(request: ExecutionRequest): ExecutionResult = when (request) {
         is ExecutionRequest.Shell -> host.executeActive("root", request.command, request.onOutput)
@@ -63,6 +85,35 @@ internal class ProotDebianEnvironment(
     }
 
     override fun optionalAppsStatus(): Map<String, Boolean> = host.optionalAppsStatus()
+
+    override fun waitForDesktopReady(desktop: String, timeoutMs: Long): Boolean =
+        session.waitForDesktopReady(timeoutMs)
+
+    override fun applyDisplayProfile(
+        profile: DisplayProfile,
+        onComplete: (Result<Unit>) -> Unit,
+    ) {
+        onComplete(session.applyProfile(profile))
+    }
+
+    override fun readClipboard(): String? {
+        val result = host.executeActive(
+            "droiddesk",
+            "DISPLAY=:0 xclip -selection clipboard -o",
+        )
+        return result.output.takeIf { result.exitCode == 0 }
+    }
+
+    override fun writeClipboard(value: String): Boolean {
+        val encoded = android.util.Base64.encodeToString(
+            value.toByteArray(),
+            android.util.Base64.NO_WRAP,
+        )
+        return host.executeActive(
+            "droiddesk",
+            "printf '%s' '$encoded' | base64 -d | DISPLAY=:0 xclip -selection clipboard -in",
+        ).exitCode == 0
+    }
 
     override fun installOptionalApp(
         appId: String,
@@ -312,20 +363,86 @@ internal class AndroidProotDebianHost(
     ): ExecutionResult =
         executeContainer(ProotDebianProvisioner.ACTIVE_CONTAINER, user, command, onOutput)
 
+    override fun launchCommand(profile: DisplayProfile): List<String> {
+        val binds = sharedFolderBinds()
+        return commandBuilder.login(
+            container = ProotDebianProvisioner.ACTIVE_CONTAINER,
+            arguments = listOf(
+                "bash",
+                "-lc",
+                "install -d -m 0700 /tmp/runtime-droiddesk && " +
+                    "exec dbus-run-session -- startxfce4",
+            ),
+            environment = mapOf(
+                "DISPLAY" to ":0",
+                "PULSE_SERVER" to "127.0.0.1",
+                "XDG_RUNTIME_DIR" to "/tmp/runtime-droiddesk",
+                "LIBGL_ALWAYS_SOFTWARE" to "1",
+            ),
+            binds = binds,
+            user = "droiddesk",
+        )
+    }
+
+    override fun applyProfile(
+        profile: DisplayProfile,
+        guestHome: String,
+        policy: ProotDesktopPolicy,
+    ): Result<Unit> = runCatching {
+        val rootfs = rootfsPath()
+        val home = File(rootfs, guestHome.removePrefix("/"))
+        val wallpaper = File(home, ".local/share/backgrounds/droiddesk-sunset-wave.jpg")
+        check(
+            XfceMobileProfile.install(
+                context = appContext,
+                homeDir = home,
+                wallpaperFile = wallpaper,
+                wallpaperPathInSession = "$guestHome/.local/share/backgrounds/${wallpaper.name}",
+            ),
+        ) { "Could not install Debian XFCE profile" }
+        File(home, ".config/droiddesk/session-policy").apply {
+            parentFile?.mkdirs()
+            writeText(
+                "maxRefreshHz=${policy.maxRefreshHz}\n" +
+                    "compositorEnabled=${policy.compositorEnabled}\n",
+            )
+        }
+        val profileScript = if (desktopProcessesAlive()) {
+            XfceDisplayProfile.buildApplyScript(profile)
+        } else {
+            XfceDisplayProfile.buildStageScript(profile)
+        }
+        val staged = executeActive(
+            "droiddesk",
+            profileScript,
+        )
+        check(staged.exitCode == 0) { staged.output }
+    }
+
+    override fun waitForDesktopReady(timeoutMs: Long): Boolean {
+        val deadline = android.os.SystemClock.elapsedRealtime() + timeoutMs
+        do {
+            if (desktopProcessesAlive()) return true
+            Thread.sleep(100)
+        } while (android.os.SystemClock.elapsedRealtime() < deadline)
+        return false
+    }
+
+    override fun desktopProcessesAlive(): Boolean {
+        val result = executeActive(
+            "root",
+            "pgrep -x xfce4-session >/dev/null && pgrep -x xfce4-panel >/dev/null",
+        )
+        return result.exitCode == 0
+    }
+
     private fun executeContainer(
         container: String,
         user: String,
         command: String,
         onOutput: ((String) -> Unit)? = null,
     ): ExecutionResult {
-        val binds = listOf(
-            "Downloads",
-            "Documents",
-            "Pictures",
-        ).map { name ->
-            File(hostHome, name).mkdirs()
-            ProotBind(File(hostHome, name), "/home/droiddesk/$name")
-        }
+        val binds = sharedFolderBinds()
         val args = commandBuilder.login(
             container = container,
             arguments = listOf("bash", "-lc", command),
@@ -339,6 +456,15 @@ internal class AndroidProotDebianHost(
         )
         return linuxRuntime.executeCommandArgs(args, onOutput)
     }
+
+    private fun sharedFolderBinds(): List<ProotBind> = listOf(
+            "Downloads",
+            "Documents",
+            "Pictures",
+        ).map { name ->
+            File(hostHome, name).mkdirs()
+            ProotBind(File(hostHome, name), "/home/droiddesk/$name")
+        }
 
     private fun hostCommand(
         arguments: List<String>,

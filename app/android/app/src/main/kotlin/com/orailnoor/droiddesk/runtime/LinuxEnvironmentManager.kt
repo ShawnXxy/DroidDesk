@@ -151,12 +151,32 @@ internal fun createLinuxEnvironmentManager(
     return LinuxEnvironmentManager(
         adapters = listOf(
             TermuxNativeEnvironment(context.applicationContext, linuxRuntime),
-            ProotDebianEnvironment(
-                AndroidProotDebianHost(context.applicationContext, linuxRuntime),
-            ),
+            AndroidProotDebianHost(context.applicationContext, linuxRuntime).let { host ->
+                ProotDebianEnvironment(
+                    host = host,
+                    sessionController = ProotDebianSessionRegistry.getOrCreate(
+                        host,
+                        AndroidEnvironmentProcessRunner(context.applicationContext),
+                    ),
+                )
+            },
             ChrootUbuntuEnvironment(context.applicationContext, chrootRuntime),
         ),
         capabilities = probe::probe,
         selectionStore = SharedPreferencesEnvironmentSelectionStore(context.applicationContext),
     )
+}
+
+internal object ProotDebianSessionRegistry {
+    @Volatile private var controller: ProotDebianSessionController? = null
+
+    fun getOrCreate(
+        host: ProotDesktopSessionHost,
+        runner: EnvironmentProcessRunner,
+    ): ProotDebianSessionController =
+        controller ?: synchronized(this) {
+            controller ?: ProotDebianSessionController(host, runner).also {
+                controller = it
+            }
+        }
 }
