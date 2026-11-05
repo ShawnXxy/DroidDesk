@@ -1,6 +1,9 @@
 name: Personal APK release
 
 on:
+  push:
+    branches:
+      - xixia
   workflow_dispatch:
     inputs:
       version:
@@ -14,6 +17,7 @@ permissions:
 concurrency:
   group: personal-apk-release
   cancel-in-progress: false
+  queue: max
 
 jobs:
   release:
@@ -41,13 +45,27 @@ jobs:
           ref: ${{ github.sha }}
           persist-credentials: false
 
-      - name: Validate version and release availability
+      - name: Select and validate release version
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_VERSION: ${{ inputs.version }}
-        run: python3 .github/scripts/prepare_personal_release.py --version "$RELEASE_VERSION"
+        run: |
+          if [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" ]]; then
+            python3 .github/scripts/prepare_personal_release.py --version "$RELEASE_VERSION"
+          else
+            python3 .github/scripts/prepare_personal_release.py --auto
+          fi
+
+      - name: Report skipped release
+        if: env.RELEASE_BUILD_REQUIRED == 'false'
+        run: |
+          printf '%s\n' "$RELEASE_STATUS_MESSAGE" >> "$GITHUB_STEP_SUMMARY"
+          if [[ -n "${RELEASE_URL:-}" ]]; then
+            printf '%s\n' "$RELEASE_URL" >> "$GITHUB_STEP_SUMMARY"
+          fi
 
       - name: Set up Java 17
+        if: env.RELEASE_BUILD_REQUIRED == 'true'
         uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4
         with:
           distribution: temurin
@@ -58,6 +76,7 @@ jobs:
             app/android/gradle/wrapper/gradle-wrapper.properties
 
       - name: Set up Flutter
+        if: env.RELEASE_BUILD_REQUIRED == 'true'
         uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
         with:
           flutter-version: "3.44.0"
@@ -65,12 +84,14 @@ jobs:
           cache: true
 
       - name: Set up Android SDK
+        if: env.RELEASE_BUILD_REQUIRED == 'true'
         uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3
         with:
           cmdline-tools-version: "13114758"
           packages: "platform-tools platforms;android-36 build-tools;36.0.0 cmake;3.22.1 ndk;28.2.13676358"
 
       - name: Prepare Android build tools and dependencies
+        if: env.RELEASE_BUILD_REQUIRED == 'true'
         working-directory: app
         run: |
           flutter config --jdk-dir "$JAVA_HOME"
@@ -78,6 +99,7 @@ jobs:
           flutter pub get --enforce-lockfile
 
       - name: Restore personal signing key
+        if: env.RELEASE_BUILD_REQUIRED == 'true'
         env:
           DROIDDESK_KEYSTORE_BASE64: ${{ secrets.DROIDDESK_KEYSTORE_BASE64 }}
           DROIDDESK_KEYSTORE_PASSWORD: ${{ secrets.DROIDDESK_KEYSTORE_PASSWORD }}
@@ -95,6 +117,7 @@ jobs:
           echo "DROIDDESK_KEYSTORE=$RUNNER_TEMP/droiddesk-personal-release.jks" >> "$GITHUB_ENV"
 
       - name: Build signed ARM64 release
+        if: env.RELEASE_BUILD_REQUIRED == 'true'
         working-directory: app
         env:
           DROIDDESK_KEYSTORE_PASSWORD: ${{ secrets.DROIDDESK_KEYSTORE_PASSWORD }}
@@ -105,6 +128,7 @@ jobs:
             --build-name "$RELEASE_NAME" --build-number "$RELEASE_CODE"
 
       - name: Verify and package release
+        if: env.RELEASE_BUILD_REQUIRED == 'true'
         run: |
           apk="app/build/app/outputs/flutter-apk/app-release.apk"
           tools="$ANDROID_HOME/build-tools/36.0.0"
@@ -145,6 +169,7 @@ jobs:
           PY
 
       - name: Create immutable tag and publish release
+        if: env.RELEASE_BUILD_REQUIRED == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
