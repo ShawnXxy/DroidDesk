@@ -1,6 +1,6 @@
 # Debian PRoot Acceptance — Nubia NX888J
 
-Date: 2026-11-04
+Date: 2026-11-05
 
 ## Device and build
 
@@ -60,17 +60,22 @@ tested.
 
 ## External display
 
-The final build was also validated on the connected `RTK FHD` HDMI display:
+The current review head was validated on the connected `RTK FHD` HDMI display.
+The logical display ID is assigned dynamically; the current run used
+`displayId=27` rather than the earlier run's `displayId=25`.
 
 | Field | Result |
 |---|---|
-| Android display | `displayId=25` |
+| Tested commit | `3022b81` |
+| Android display | `displayId=27` |
 | Mode | 2160 × 1440 at 60 Hz |
 | Placement | Generic secondary-display `ActivityOptions` path |
-| X11 surface | 2160 × 1440 |
-| Input | External pointer capture enabled; mouse and keyboard passed |
-| VS Code | Welcome window rendered and accepted mouse/keyboard input |
-| Stop/recovery | Closing the external view kept the Linux session running; phone home exposed **Return to Desktop** and **Stop Server** |
+| X11 surface | 2160 × 1440 shared buffer at 60 Hz |
+| Input | Physical mouse movement/click and physical keyboard text input passed |
+| Audio | Cookie-authenticated TCP, `AAudio_sink`, live stereo 44.1 kHz sink input, audible output |
+| VS Code | `1.145.0` Welcome window rendered and accepted mouse/keyboard input |
+| Background/return | Home reported **Desktop active** and returned to the same XFCE session |
+| Stop/recovery | PRoot, XFCE, D-Bus, PulseAudio, VS Code, crashpad, and the temporary Pulse cookie were absent after **Stop Server** |
 
 Two external-display defects were found and fixed:
 
@@ -82,11 +87,13 @@ Two external-display defects were found and fixed:
    Required desktop processes are now probed through an independent host
    process instead of the shared command channel.
 
-Android routed media to the `Smartisan TNT go` USB audio device. Native browser
-audio and Linux stereo PCM both played, but the output was quiet on this
-hardware path. Browser and Linux levels were comparable, so this is the
-Android/dock/display output gain rather than PulseAudio attenuation. DroidDesk
-does not override the user's Android media or display-speaker volume.
+Android routed media to the `Smartisan TNT go` USB audio device. At its saved
+per-device media volume of 8/15, the authenticated PulseAudio stream and sink
+input were healthy but the test tone was inaudible. Raising that Android route
+to 15/15 made the same WAV audible; the setting was restored to 8/15 after the
+test. This confirms an Android/dock/display gain issue rather than PulseAudio
+attenuation. DroidDesk does not override the user's media or display-speaker
+volume.
 
 ## Official Microsoft VS Code
 
@@ -124,6 +131,12 @@ without clearing its 1.5 GiB Debian rootfs.
   `a717861c07586a53d83b80d742cd3f59b20a6273`, `arm64`.
 - **Stop Server** removed PRoot, XFCE, D-Bus, PulseAudio, and the temporary
   shared PulseAudio cookie; only the main Android activity process remained.
+- To exercise failed-start cleanup on the real device, the test temporarily
+  renamed the host `proot-distro` launcher after installation. PulseAudio
+  started, profile application failed with the original `No such file or
+  directory` error, and the controller removed PulseAudio and the shared
+  cookie before revealing the failure. The launcher was restored in a
+  `finally` block and a subsequent normal desktop start passed.
 
 ## Lifecycle cleanup
 
@@ -160,3 +173,5 @@ when the desktop root process has already exited.
   optional-app UI does not install it yet.
 - Rootfs backup/import and GUI `.deb` import are not implemented.
 - Long-duration thermal and battery soak testing remains follow-up work.
+- The R2/TNT external-display regression must still be repeated on the exact
+  final review head.
