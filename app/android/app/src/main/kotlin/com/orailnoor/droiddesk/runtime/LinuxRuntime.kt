@@ -18,6 +18,16 @@ import com.orailnoor.droiddesk.display.DisplayProfilePolicy
 
 internal const val GUEST_PULSE_SERVER = "tcp:127.0.0.1"
 
+internal fun hostPulseAudioLibraryPath(
+    sdkInt: Int,
+    prefixLibraryPath: String,
+): String =
+    if (sdkInt <= Build.VERSION_CODES.R) {
+        "/system/lib64:$prefixLibraryPath"
+    } else {
+        prefixLibraryPath
+    }
+
 internal fun nativeDesktopBusSocket(directory: File): File =
     File(directory, UUID.randomUUID().toString().replace("-", ""))
 
@@ -267,9 +277,14 @@ class LinuxRuntime(context: Context) {
         check(File(binDir, "pulseaudio").canExecute()) {
             "The host PulseAudio package is unavailable"
         }
+        val audioLibraryPath = hostPulseAudioLibraryPath(
+            sdkInt = Build.VERSION.SDK_INT,
+            prefixLibraryPath = libDir.absolutePath,
+        )
         val output = executeCommand(
             """
             set -e
+            export LD_LIBRARY_PATH='$audioLibraryPath'
             limit() {
                 if command -v timeout >/dev/null 2>&1; then timeout "${'$'}@"; else shift; "${'$'}@"; fi
             }

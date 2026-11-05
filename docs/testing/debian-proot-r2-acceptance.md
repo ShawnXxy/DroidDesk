@@ -60,7 +60,40 @@ Clipboard acceptance covers foreground plain text. Smartisan's global “Big
 Bang” text-selection UI intercepts long presses, so the Android-side checks
 used its native copy action and Android's standard paste key event.
 
-## External display / TNT
+## Current-head phone regression
+
+The acceptance package was upgraded in place after the review fixes, preserving
+the existing 1.7 GiB Debian rootfs and the selected Debian PRoot environment.
+The phone-screen regression then verified:
+
+- the responsive home header kept the Settings button visible at the R2
+  viewport;
+- a cold XFCE launch reached `xfce4-session`, `xfce4-panel`, `xfwm4`, and
+  `xfdesktop`, and the internal display selected its 60 Hz mode;
+- the cookie-authenticated PulseAudio TCP endpoint reported
+  `Default Sink: OpenSL_ES_sink`;
+- Android 11 and older now put `/system/lib64` before the relocated prefix
+  libraries when starting host PulseAudio. This avoids mixing Termux
+  `libunwindstack`/`libc++` dependencies into the Android AAudio and OpenSL ES
+  modules;
+- `paplay /home/droiddesk/Downloads/a` produced a live
+  `protocol-native.c` sink input with stereo 44.1 kHz PCM;
+- an interactive `head -n 1` command received and echoed `R2TOKEN` through the
+  follow-up stdin channel;
+- the persisted Microsoft VS Code installation still reported `1.145.0`,
+  commit `a717861c07586a53d83b80d742cd3f59b20a6273`, and `arm64`;
+- snapshot format v2 included the host-backed
+  `home/Downloads/r2-audio-test.wav` and `home/Downloads/a`. Both files were
+  deleted from the shared Downloads directory and restored with matching
+  SHA-256 `768ec91faf910a02f61320331189e9f61a31a7a40bd700b0cbb8a63283c1038a`;
+- **Stop Server** left no PRoot, XFCE, D-Bus, or PulseAudio processes, removed
+  the temporary guest Pulse cookie, and retained the Debian ready marker.
+
+## External display / TNT (baseline acceptance)
+
+The evidence below predates the latest authenticated-audio and Android 11
+library-order fixes. It validates the TNT architecture and interaction path,
+but the current PR head still requires a fresh external-display regression.
 
 The final acceptance build was launched from the Smartisan TNT desktop while
 wireless ADB observed the session:
