@@ -39,18 +39,24 @@ should enter `xixia`: code running in the release job can access signing secrets
 
 ## Publish a personal version
 
-1. Commit and push the desired code to `xixia`.
-2. Open [Personal APK release](https://github.com/ShawnXxy/DroidDesk/actions/workflows/personal-release.yml),
-   choose **Run workflow**, and select **xixia**.
-3. Enter a new version, such as `1.3.2+7`, and run the workflow. This explicitly
-   requests both building and publishing; ordinary pushes do neither.
+Every push to `xixia`, including a pull request merge, automatically builds,
+signs, and publishes a personal release. The workflow chooses a version by
+incrementing both the patch version and Android build number beyond the higher
+values in `app/pubspec.yaml` and the latest published personal release. If the
+next tag or release already exists after an interrupted run, it keeps
+incrementing until it finds an unused version. Release runs share a FIFO
+concurrency queue so merges and manual releases wait instead of replacing an
+already pending run. GitHub does not guarantee that queued runs start in push
+order, so an automatic run also verifies that its commit is still the current
+`xixia` head; a stale queued run exits without replacing a newer release.
 
-Both the three-part version name and Android build number must increase beyond
-the version in `app/pubspec.yaml` and the latest published personal release.
-The first release must therefore exceed the locally installed `1.3.1+6`.
-The workflow passes the chosen values to Flutter without committing a version
-bump. Tags use the version name, such as `v1.3.2`; existing tags and releases
-are never overwritten.
+To publish a specific version manually, open
+[Personal APK release](https://github.com/ShawnXxy/DroidDesk/actions/workflows/personal-release.yml),
+choose **Run workflow** on `xixia`, and enter a version such as `1.3.2+7`.
+Both the three-part version name and Android build number must exceed the source
+version and latest published personal release. The workflow passes the selected
+values to Flutter without committing a version bump. Tags use the version name,
+such as `v1.3.2`; existing tags and releases are never overwritten.
 
 The job builds an ARM64 Release APK using Flutter 3.44.0 and Java 17. Missing
 signing secrets, an unexpected signing certificate, a wrong package/version,
@@ -63,7 +69,9 @@ certificate; later runs use it to enforce increasing Android build numbers.
 
 If publication fails after creating the tag or draft, inspect that run and the
 draft before retrying. The workflow does not delete or overwrite them; resolve
-the incomplete release explicitly or choose a new version.
+the incomplete release explicitly or choose a new version. If publication
+completed but only the final reporting step failed, an automatic retry detects
+the release for that source commit and exits without publishing a duplicate.
 
 ## Installing and updating
 
