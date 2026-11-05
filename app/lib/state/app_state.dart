@@ -19,7 +19,8 @@ class AppState extends ChangeNotifier {
   bool _sessionControlBusy = false;
 
   DesktopDisplayState get desktopDisplays => _desktopDisplays;
-  bool get desktopDisplayBusy => _desktopOperationBusy || _sessionControlBusy || _desktopDisplays.isMoving;
+  bool get desktopDisplayBusy =>
+      _desktopOperationBusy || _sessionControlBusy || _desktopDisplays.isMoving;
   String? get desktopOperationError => _desktopOperationError;
   String? get desktopDisplayError =>
       _desktopOperationError ?? _desktopDisplays.error?.toString();
@@ -85,14 +86,19 @@ class AppState extends ChangeNotifier {
 
   Future<void> setAutoOpenOnMonitor(bool enabled) async {
     if (!_allowDisplayRouting()) return;
-    await _runDesktopOperation(() => DroidDeskPlatform.setAutoOpenOnMonitor(enabled));
+    await _runDesktopOperation(
+      () => DroidDeskPlatform.setAutoOpenOnMonitor(enabled),
+    );
   }
 
   Future<void> openDesktopOnDisplay(DesktopDisplayInfo display) async {
     if (!_allowDisplayRouting()) return;
-    await _runDesktopOperation(() => DroidDeskPlatform.openDesktopOnDisplay(
-        displayId: display.id, displayKey: display.key,
-      ));
+    await _runDesktopOperation(
+      () => DroidDeskPlatform.openDesktopOnDisplay(
+        displayId: display.id,
+        displayKey: display.key,
+      ),
+    );
   }
 
   Future<void> moveDesktopToPhone() async {
@@ -103,17 +109,25 @@ class AppState extends ChangeNotifier {
   bool _allowDisplayRouting() {
     if (_disposed) return false;
     if (_desktopDisplays.crossDisplayMovesAllowed) return true;
-    _recordDisplayError(StateError('The phone or TNT launcher selects the display environment'));
+    _recordDisplayError(
+      StateError('The phone or TNT launcher selects the display environment'),
+    );
     return false;
   }
 
   Future<void> saveDesktopDisplaySettings(DesktopDisplaySettings settings) =>
-      _runDesktopOperation(() => DroidDeskPlatform.saveDesktopDisplaySettings(settings));
+      _runDesktopOperation(
+        () => DroidDeskPlatform.saveDesktopDisplaySettings(settings),
+      );
 
-  Future<void> _runDesktopOperation(Future<DesktopDisplayState> Function() operation) async {
+  Future<void> _runDesktopOperation(
+    Future<DesktopDisplayState> Function() operation,
+  ) async {
     if (_disposed) return;
     if (desktopDisplayBusy) {
-      _recordDisplayError(StateError('Another desktop display action is in progress'));
+      _recordDisplayError(
+        StateError('Another desktop display action is in progress'),
+      );
       return;
     }
     _desktopOperationBusy = true;
@@ -122,7 +136,9 @@ class AppState extends ChangeNotifier {
     final revision = _desktopEventRevision;
     try {
       final state = await operation();
-      if (!_disposed && revision == _desktopEventRevision) _desktopDisplays = state;
+      if (!_disposed && revision == _desktopEventRevision) {
+        _desktopDisplays = state;
+      }
     } on PlatformException catch (error) {
       _recordDisplayError(error);
     } on FormatException catch (error) {
@@ -225,8 +241,7 @@ class AppState extends ChangeNotifier {
     final status = _environmentStatus;
     if (status == null) return false;
     return switch (_selectedEnvironment) {
-      LinuxEnvironmentKind.prootDebian =>
-        status.capabilities.prootInstallable,
+      LinuxEnvironmentKind.prootDebian => status.capabilities.prootInstallable,
       LinuxEnvironmentKind.termuxNative =>
         !status.capabilities.host.state.blocksProvisioning &&
             !status.capabilities.localExecution.state.blocksProvisioning,
@@ -270,8 +285,7 @@ class AppState extends ChangeNotifier {
     final primaryBlockingReason = environmentBlockingReason;
     return [
       for (final entry in checks.entries)
-        if (entry.value.state !=
-                CapabilityEvidenceState.supportedAndProbed &&
+        if (entry.value.state != CapabilityEvidenceState.supportedAndProbed &&
             entry.value.reason?.isNotEmpty == true &&
             entry.value.reason != primaryBlockingReason)
           '${entry.key}: ${entry.value.reason}',
@@ -298,8 +312,7 @@ class AppState extends ChangeNotifier {
   String? get avfDiagnostic {
     final capabilities = _environmentStatus?.capabilities;
     if (capabilities == null ||
-        capabilities.avfFeature.state ==
-            CapabilityEvidenceState.unavailable) {
+        capabilities.avfFeature.state == CapabilityEvidenceState.unavailable) {
       return null;
     }
     return capabilities.avfPermission.reason ??
@@ -430,10 +443,12 @@ class AppState extends ChangeNotifier {
   @override
   void dispose() {
     _disposed = true;
-    if (DroidDeskPlatform.onDesktopDisplayStateChanged == _receiveDesktopDisplays) {
+    if (DroidDeskPlatform.onDesktopDisplayStateChanged ==
+        _receiveDesktopDisplays) {
       DroidDeskPlatform.onDesktopDisplayStateChanged = null;
     }
-    if (DroidDeskPlatform.onDesktopDisplayError == _receiveDesktopDisplayError) {
+    if (DroidDeskPlatform.onDesktopDisplayError ==
+        _receiveDesktopDisplayError) {
       DroidDeskPlatform.onDesktopDisplayError = null;
     }
     _lifecycleListener?.dispose();
@@ -498,8 +513,8 @@ class AppState extends ChangeNotifier {
         _selectedEnvironment = status.hasRoot
             ? LinuxEnvironmentKind.chrootUbuntu
             : status.capabilities.prootInstallable
-                ? LinuxEnvironmentKind.prootDebian
-                : LinuxEnvironmentKind.termuxNative;
+            ? LinuxEnvironmentKind.prootDebian
+            : LinuxEnvironmentKind.termuxNative;
       }
 
       if (_installedDE.isNotEmpty) {
@@ -646,7 +661,10 @@ class AppState extends ChangeNotifier {
         'Installing desktop environment (this may take a while)...';
     _isInstallingDE = true;
     notifyListeners();
-    if (!await DroidDeskPlatform.installDesktopEnvironment(_selectedDE)) {
+    if (!await DroidDeskPlatform.provisionEnvironment(
+      kind: LinuxEnvironmentKind.chrootUbuntu.wireValue,
+      de: _selectedDE,
+    )) {
       throw StateError('Desktop Essentials package installation failed');
     }
     _isExtracting = false;
@@ -788,7 +806,10 @@ class AppState extends ChangeNotifier {
     try {
       final installed = await _installedVersion();
       if (installed.isEmpty) return;
-      final release = await UpdateService.check(installedVersion: installed, manual: manual);
+      final release = await UpdateService.check(
+        installedVersion: installed,
+        manual: manual,
+      );
       if (release != null || manual) {
         if (_availableUpdate?.tag != release?.tag) _downloadedUpdatePath = null;
         _availableUpdate = release;
@@ -837,8 +858,11 @@ class AppState extends ChangeNotifier {
           'cancelled' => null,
           'signature_mismatch' =>
             'This release is signed with a different key. Install it once from the release page.',
-          'size_mismatch' || 'network' => 'The download did not finish. Check your connection and try again.',
-          _ => result['message']?.toString() ?? 'The update could not be downloaded.',
+          'size_mismatch' || 'network' =>
+            'The download did not finish. Check your connection and try again.',
+          _ =>
+            result['message']?.toString() ??
+                'The update could not be downloaded.',
         };
         notifyListeners();
         return false;
@@ -918,7 +942,9 @@ class AppState extends ChangeNotifier {
     _packageRemoving = removing;
     _packageCancelling = false;
     _packageProgress = 0;
-    _packageStatus = removing ? 'Preparing removal...' : 'Preparing $displayName...';
+    _packageStatus = removing
+        ? 'Preparing removal...'
+        : 'Preparing $displayName...';
     _packageLog = '';
     notifyListeners();
   }
@@ -946,7 +972,12 @@ class AppState extends ChangeNotifier {
     List<String> iconNames = const [],
   }) async {
     if (_activePackage != null) return false;
-    _startPackageOperation(package, displayName ?? package, iconNames, removing: false);
+    _startPackageOperation(
+      package,
+      displayName ?? package,
+      iconNames,
+      removing: false,
+    );
     var ok = false;
     try {
       ok = await DroidDeskPlatform.installNativePackage(package);
@@ -961,7 +992,12 @@ class AppState extends ChangeNotifier {
     List<String> iconNames = const [],
   }) async {
     if (_activePackage != null) return false;
-    _startPackageOperation(package, displayName ?? package, iconNames, removing: true);
+    _startPackageOperation(
+      package,
+      displayName ?? package,
+      iconNames,
+      removing: true,
+    );
     var ok = false;
     try {
       ok = await DroidDeskPlatform.removeNativePackage(package);
@@ -978,7 +1014,12 @@ class AppState extends ChangeNotifier {
   /// Upgrades all non-core packages through the same progress UI as installs.
   Future<bool> updateAllPackages() async {
     if (_activePackage != null) return false;
-    _startPackageOperation(updatesOperation, 'packages', const [], removing: false);
+    _startPackageOperation(
+      updatesOperation,
+      'packages',
+      const [],
+      removing: false,
+    );
     _packageStatus = 'Checking for updates...';
     var ok = false;
     try {
@@ -989,7 +1030,9 @@ class AppState extends ChangeNotifier {
   }
 
   Future<void> cancelPackageOperation() async {
-    if (_activePackage == null || _packageCancelling || _packageRemoving) return;
+    if (_activePackage == null || _packageCancelling || _packageRemoving) {
+      return;
+    }
     _packageCancelling = true;
     _packageStatus = 'Cancelling installation...';
     notifyListeners();
@@ -1005,9 +1048,7 @@ class AppState extends ChangeNotifier {
 
   // ── Session Control ──
 
-  Future<void> startLinux({
-    String mode = 'x11',
-  }) async {
+  Future<void> startLinux({String mode = 'x11'}) async {
     if (_disposed) return;
     if (desktopDisplayBusy) {
       _recordDisplayError(StateError('Another desktop action is in progress'));
@@ -1094,7 +1135,7 @@ class AppState extends ChangeNotifier {
     try {
       _terminalOutput.add(isInput ? '$command\n' : '\$ $command\n');
       notifyListeners();
-      return await DroidDeskPlatform.executeCommand(command);
+      return await DroidDeskPlatform.executeCommand(command, stdin: isInput);
     } catch (e) {
       return "Error executing command: $e";
     } finally {
@@ -1164,13 +1205,13 @@ class PackageOperationResult {
 
   String get message => isUpdateAll
       ? (cancelled
-          ? 'Update cancelled'
-          : ok
-              ? 'Packages updated'
-              : 'Some updates failed')
+            ? 'Update cancelled'
+            : ok
+            ? 'Packages updated'
+            : 'Some updates failed')
       : cancelled
       ? '$displayName installation cancelled'
       : removed
-          ? (ok ? '$displayName removed' : 'Could not remove $displayName')
-          : (ok ? '$displayName installed' : '$displayName installation failed');
+      ? (ok ? '$displayName removed' : 'Could not remove $displayName')
+      : (ok ? '$displayName installed' : '$displayName installation failed');
 }

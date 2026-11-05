@@ -93,4 +93,37 @@ void main() {
     await tester.pumpAndSettle();
     expect(tester.takeException(), isNull);
   });
+
+  testWidgets('rooted phone preserves an explicit Debian selection', (
+    tester,
+  ) async {
+    await useNubiaViewport(tester);
+    native.hasRoot = true;
+    native.runtimeStatus = environmentStatusPayload();
+    native.provisionSuccess = false;
+    await state.refreshStatus();
+    state.selectEnvironment(LinuxEnvironmentKind.prootDebian);
+
+    await tester.pumpWidget(
+      ChangeNotifierProvider.value(
+        value: state,
+        child: const MaterialApp(home: SetupProgressScreen()),
+      ),
+    );
+    await tester.pump();
+    for (
+      var attempt = 0;
+      attempt < 30 && state.errorMessage == null;
+      attempt++
+    ) {
+      await tester.pump(const Duration(milliseconds: 100));
+    }
+
+    expect(find.text('Root access detected'), findsNothing);
+    final provision = native.calls.lastWhere(
+      (call) => call.method == 'provisionEnvironment',
+    );
+    expect(provision.arguments, {'kind': 'prootDebian', 'de': 'xfce4'});
+    await tester.pumpAndSettle();
+  });
 }

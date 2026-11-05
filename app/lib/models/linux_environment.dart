@@ -7,7 +7,9 @@ enum LinuxEnvironmentKind {
   final String wireValue;
 
   static LinuxEnvironmentKind parse(Object? value) {
-    if (value is! String) throw const FormatException('environmentKind must be a string');
+    if (value is! String) {
+      throw const FormatException('environmentKind must be a string');
+    }
     return values.firstWhere(
       (kind) => kind.wireValue == value,
       orElse: () => throw FormatException('Unknown Linux environment: $value'),
@@ -27,7 +29,9 @@ enum CapabilityEvidenceState {
   final String wireValue;
 
   static CapabilityEvidenceState parse(Object? value) {
-    if (value is! String) throw const FormatException('Capability state must be a string');
+    if (value is! String) {
+      throw const FormatException('Capability state must be a string');
+    }
     return values.firstWhere(
       (state) => state.wireValue == value,
       orElse: () => throw FormatException('Unknown capability state: $value'),
@@ -35,7 +39,10 @@ enum CapabilityEvidenceState {
   }
 
   bool get blocksProvisioning => switch (this) {
-    blockedByPermission || blockedByPolicy || failedSelfTest || unavailable => true,
+    blockedByPermission ||
+    blockedByPolicy ||
+    failedSelfTest ||
+    unavailable => true,
     _ => false,
   };
 }
@@ -167,16 +174,30 @@ class LinuxRuntimeCapabilities {
   }
 
   bool get prootInstallable =>
+      prootCandidate &&
       !host.state.blocksProvisioning &&
       !localExecution.state.blocksProvisioning &&
       !proot.state.blocksProvisioning &&
       !x11.state.blocksProvisioning &&
+      !audio.state.blocksProvisioning &&
+      !clipboard.state.blocksProvisioning &&
+      !renderer.state.blocksProvisioning &&
       !storage.state.blocksProvisioning;
 
   String? get prootBlockingReason {
-    for (final evidence in [host, localExecution, proot, x11, storage]) {
+    for (final evidence in [
+      host,
+      localExecution,
+      proot,
+      x11,
+      audio,
+      clipboard,
+      renderer,
+      storage,
+    ]) {
       if (evidence.state.blocksProvisioning) return evidence.reason;
     }
+    if (!prootCandidate) return 'Debian compatibility requirements are not met';
     return null;
   }
 }
@@ -217,7 +238,9 @@ class LinuxEnvironmentStatus {
     final running = _requiredBool(map, 'running');
     final provisioning = _requiredBool(map, 'provisioning');
     if (running && provisioning) {
-      throw const FormatException('An environment cannot run while provisioning');
+      throw const FormatException(
+        'An environment cannot run while provisioning',
+      );
     }
     final lastError = map['lastError'];
     if (lastError != null && lastError is! String) {

@@ -90,6 +90,8 @@ sealed interface ExecutionRequest {
         override val kind: EnvironmentKind,
         val command: String,
         val onOutput: ((String) -> Unit)? = null,
+        val interactive: Boolean = false,
+        val stdin: Boolean = false,
     ) : ExecutionRequest
 
     data class Desktop(

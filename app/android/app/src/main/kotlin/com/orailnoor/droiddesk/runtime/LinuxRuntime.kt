@@ -98,6 +98,7 @@ class LinuxRuntime(context: Context) {
     }
 
     @Volatile private var activeCommandProcess: Process? = null
+    @Volatile private var activeCommandAcceptsInput = false
     @Volatile private var installLogSink: ((String) -> Unit)? = null
     @Volatile private var packageOperationCancelled = false
 
@@ -282,9 +283,6 @@ class LinuxRuntime(context: Context) {
                 sleep 0.1
             done
             limit 2 pactl info >/dev/null 2>&1
-            pactl load-module module-native-protocol-tcp \
-                auth-anonymous=1 listen=127.0.0.1 >/dev/null
-            limit 2 pactl -s tcp:127.0.0.1 info >/dev/null 2>&1
             """.trimIndent(),
         )
         check(!output.startsWith("Error:")) { output }
@@ -1415,6 +1413,7 @@ class LinuxRuntime(context: Context) {
 
         env["DISPLAY"] = ":0"
         env["XDG_RUNTIME_DIR"] = tmpDir.absolutePath
+        env["PULSE_COOKIE"] = File(homeDir, ".config/pulse/cookie").absolutePath
 
         env["PERL5LIB"] = "${prefixDir.absolutePath}/lib/perl5/core_perl:${prefixDir.absolutePath}/lib/perl5/site_perl:${prefixDir.absolutePath}/lib/perl5/vendor_perl:${prefixDir.absolutePath}/lib/perl5"
         env["PYTHONHOME"] = prefixDir.absolutePath
@@ -1860,6 +1859,8 @@ class LinuxRuntime(context: Context) {
     fun executeCommandArgs(
         command: List<String>,
         onOutput: ((String) -> Unit)? = null,
+        interactive: Boolean = false,
+        stdin: String? = null,
     ): ExecutionResult {
         if (packageOperationCancelled) {
             return ExecutionResult(1, "Error: Package operation cancelled")
@@ -1867,8 +1868,23 @@ class LinuxRuntime(context: Context) {
         if (!isBootstrapped()) {
             return ExecutionResult(1, "Error: Runtime not bootstrapped")
         }
-        if (activeCommandProcess?.isAlive == true) {
-            return ExecutionResult(1, "Error: Another command is already running")
+        val active = activeCommandProcess
+        if (active?.isAlive == true) {
+            if (stdin == null || !activeCommandAcceptsInput) {
+                return ExecutionResult(1, "Error: Another command is already running")
+            }
+            return try {
+                active.outputStream.apply {
+                    write((stdin + "\n").toByteArray())
+                    flush()
+                }
+                ExecutionResult(0, "")
+            } catch (error: Exception) {
+                ExecutionResult(1, "Error: ${error.message}")
+            }
+        }
+        if (stdin != null) {
+            return ExecutionResult(1, "Error: No interactive command is running")
         }
         return try {
             val process = ProcessBuilder(command)
@@ -1880,6 +1896,7 @@ class LinuxRuntime(context: Context) {
                 }
                 .start()
             activeCommandProcess = process
+            activeCommandAcceptsInput = interactive
             val output = StringBuilder()
             val reader = InputStreamReader(process.inputStream)
             val buffer = CharArray(1024)
@@ -1896,6 +1913,7 @@ class LinuxRuntime(context: Context) {
             ExecutionResult(1, "Error: ${error.message}")
         } finally {
             activeCommandProcess = null
+            activeCommandAcceptsInput = false
         }
     }
 
@@ -2792,6 +2810,7 @@ $stagedProfile
             if (process.isAlive) process.destroyForcibly()
         }
         activeCommandProcess = null
+        activeCommandAcceptsInput = false
     }
 
     private fun processPid(process: Process): Int? = runCatching {

@@ -333,7 +333,8 @@ class RootfsManager(private val context: Context) {
                 #!/bin/bash
                 # DroidDesk environment configuration
                 export DISPLAY=:0
-                export PULSE_SERVER=127.0.0.1
+                export PULSE_SERVER=unix:/tmp/pulse/native
+                export PULSE_COOKIE=/root/.config/pulse/cookie
                 export MESA_NO_ERROR=1
                 export MESA_GL_VERSION_OVERRIDE=4.6
                 export MESA_GLES_VERSION_OVERRIDE=3.2

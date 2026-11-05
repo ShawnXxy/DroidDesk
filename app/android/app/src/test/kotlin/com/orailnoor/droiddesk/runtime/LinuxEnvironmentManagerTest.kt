@@ -193,14 +193,33 @@ class LinuxEnvironmentManagerTest {
         assertEquals(EnvironmentKind.TERMUX_NATIVE, manager.recommendedKind())
     }
 
+    @Test
+    fun legacy_native_install_is_persisted_before_a_new_debian_recommendation() {
+        val selection = FakeSelectionStore()
+        val manager = manager(
+            adapters = listOf(
+                FakeAdapter(EnvironmentKind.TERMUX_NATIVE),
+                FakeAdapter(EnvironmentKind.PROOT_DEBIAN),
+            ),
+            capabilities = capabilities(),
+            selection = selection,
+            legacySelection = { EnvironmentKind.TERMUX_NATIVE },
+        )
+
+        assertEquals(EnvironmentKind.TERMUX_NATIVE, manager.recommendedKind())
+        assertEquals(EnvironmentKind.TERMUX_NATIVE.wireValue, selection.value)
+    }
+
     private fun manager(
         adapters: List<EnvironmentAdapter>,
         capabilities: RuntimeCapabilities = capabilities(),
         selection: FakeSelectionStore = FakeSelectionStore(),
+        legacySelection: () -> EnvironmentKind? = { null },
     ) = LinuxEnvironmentManager(
         adapters = adapters,
         capabilities = { capabilities },
         selectionStore = selection,
+        legacySelection = legacySelection,
     )
 
     private class FakeSelectionStore(

@@ -184,6 +184,9 @@ class FakeDesktopPlatform {
               throw PlatformException(code: 'TEST_UPDATE_DISABLED');
             case 'checkRoot':
               return hasRoot;
+            case 'downloadRootfs':
+            case 'extractRootfs':
+              return true;
             case 'updateStatusBarTheme':
               return null;
             case 'startLinux':
@@ -222,6 +225,8 @@ class FakeDesktopPlatform {
                 'isRunning': false,
                 'distro': kind == 'prootDebian'
                     ? 'debian-bookworm'
+                    : kind == 'chrootUbuntu'
+                    ? 'ubuntu-chroot'
                     : 'termux-native',
                 'installedDE': 'xfce4',
               };

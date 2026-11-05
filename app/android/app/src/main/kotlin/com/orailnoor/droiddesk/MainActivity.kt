@@ -995,12 +995,15 @@ class MainActivity : FlutterActivity() {
                 // ── Command execution ──
                 "executeCommand" -> {
                     val command = call.argument<String>("command") ?: ""
+                    val stdin = call.argument<Boolean>("stdin") ?: false
                     Thread {
                         val execution = environmentManager.execute(
                             ExecutionRequest.Shell(
                                 environmentManager.activeKind(),
                                 command,
                                 ::appendTerminalOutput,
+                                interactive = true,
+                                stdin = stdin,
                             ),
                         )
                         android.os.Handler(android.os.Looper.getMainLooper()).post {

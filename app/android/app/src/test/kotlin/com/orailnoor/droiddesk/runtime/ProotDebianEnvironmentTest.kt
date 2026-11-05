@@ -14,6 +14,9 @@ class ProotDebianEnvironmentTest {
 
         assertTrue(command.contains("http://mirrors.ustc.edu.cn"))
         assertTrue(command.contains("if ! apt-get update"))
+        assertTrue(command.contains("if [ ! -f \"${'$'}backup_dir/debian.sources\" ]"))
+        assertTrue(command.contains("https://deb.debian.org"))
+        assertTrue(command.contains("s|https://mirrors.ustc.edu.cn|https://deb.debian.org|g"))
         assertTrue(command.contains("cp -f \"${'$'}backup_dir/debian.sources\""))
         assertTrue(command.contains("apt-get install -y --no-install-recommends xfce4 curl"))
     }
@@ -50,18 +53,32 @@ class ProotDebianEnvironmentTest {
         val environment = ProotDebianEnvironment(host)
 
         val shell = environment.execute(
-            ExecutionRequest.Shell(EnvironmentKind.PROOT_DEBIAN, "apt-get update"),
+            ExecutionRequest.Shell(
+                EnvironmentKind.PROOT_DEBIAN,
+                "apt-get update",
+                interactive = true,
+            ),
+        )
+        val stdin = environment.execute(
+            ExecutionRequest.Shell(
+                EnvironmentKind.PROOT_DEBIAN,
+                "yes",
+                interactive = true,
+                stdin = true,
+            ),
         )
         val desktop = environment.execute(
             ExecutionRequest.Desktop(EnvironmentKind.PROOT_DEBIAN, "thunar"),
         )
 
         assertEquals(0, shell.exitCode)
+        assertEquals(0, stdin.exitCode)
         assertEquals(0, desktop.exitCode)
         assertEquals(
             listOf(
-                "execute:root:apt-get update",
-                "execute:droiddesk:thunar",
+                "execute:root:apt-get update:true:false",
+                "execute:root:yes:true:true",
+                "execute:droiddesk:thunar:false:false",
             ),
             host.calls,
         )
@@ -113,8 +130,10 @@ class ProotDebianEnvironmentTest {
             user: String,
             command: String,
             onOutput: ((String) -> Unit)?,
+            interactive: Boolean,
+            stdin: Boolean,
         ): ExecutionResult {
-            calls += "execute:$user:$command"
+            calls += "execute:$user:$command:$interactive:$stdin"
             return ExecutionResult(0, "ok")
         }
     }

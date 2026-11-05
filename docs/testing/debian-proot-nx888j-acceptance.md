@@ -50,7 +50,7 @@ and safety margin; neither number is the final base install size.
 | Phone viewport | Passed at 360 × 800 logical / 1260 × 2800 physical |
 | Background and return | Same XFCE session resumed through **Return to Desktop** |
 | Android render-rate request | `mActiveRenderFrameRate=60.000004` while `DesktopActivity` was focused |
-| Audio | Debian `pactl -s tcp:127.0.0.1 info` connected to the host PulseAudio AAudio/OpenSL ES path |
+| Audio | Debian connected to the host PulseAudio AAudio/OpenSL ES path through the app-private `/tmp/pulse/native` socket |
 | Android → X11 clipboard | Android Notes token was read unchanged by Debian `xclip -selection clipboard -o` |
 | X11 → Android clipboard | Debian `xclip` token pasted unchanged into Android Notes |
 

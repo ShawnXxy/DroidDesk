@@ -163,6 +163,26 @@ class RuntimeCapabilityProbeTest {
         assertTrue("probe took ${elapsedMillis}ms", elapsedMillis < 200)
     }
 
+    @Test
+    fun completedLaterProbeIsCollectedAfterAnEarlierProbeConsumesTheDeadline() {
+        val capabilities = RuntimeCapabilityProbe(
+            source = FakeCapabilitySource(
+                localExecutionProbe = {
+                    Thread.sleep(100)
+                    CapabilityEvidence(EvidenceState.SUPPORTED_AND_PROBED)
+                },
+                prootProbe = {
+                    CapabilityEvidence(EvidenceState.SUPPORTED_AND_PROBED)
+                },
+            ),
+            requiredBytes = GIB,
+            timeoutMillis = 25,
+        ).probe()
+
+        assertEquals(EvidenceState.FAILED_SELF_TEST, capabilities.localExecution.state)
+        assertEquals(EvidenceState.SUPPORTED_AND_PROBED, capabilities.proot.state)
+    }
+
     private class FakeCapabilitySource(
         override val apiLevel: Int = 36,
         override val abi: String = "arm64-v8a",
@@ -184,11 +204,12 @@ class RuntimeCapabilityProbeTest {
         ),
         private val avfFeaturePresent: Boolean = false,
         private val avfPermissionsGranted: Boolean = false,
+        private val localExecutionProbe: () -> CapabilityEvidence = { localExecution },
         private val prootProbe: () -> CapabilityEvidence = {
             CapabilityEvidence(EvidenceState.SUPPORTED_AND_PROBED)
         },
     ) : RuntimeCapabilitySource {
-        override fun probeLocalExecution(): CapabilityEvidence = localExecution
+        override fun probeLocalExecution(): CapabilityEvidence = localExecutionProbe()
 
         override fun probeProot(): CapabilityEvidence = prootProbe()
 

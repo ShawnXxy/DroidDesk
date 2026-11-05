@@ -41,6 +41,25 @@ void main() {
     expect(state.environmentRecommendationReason, contains('ptrace failed'));
   });
 
+  test(
+    'failed audio probe blocks Debian in both native and Flutter contracts',
+    () async {
+      final payload = environmentStatusPayload(prootCandidate: false);
+      final capabilities = payload['capabilities']! as Map<Object?, Object?>;
+      capabilities['audio'] = {
+        'state': 'FAILED_SELF_TEST',
+        'reason': 'PulseAudio connection failed',
+      };
+      native.runtimeStatus = payload;
+
+      await state.refreshStatus();
+      state.selectEnvironment(LinuxEnvironmentKind.prootDebian);
+
+      expect(state.canProvisionSelectedEnvironment, isFalse);
+      expect(state.environmentBlockingReason, 'PulseAudio connection failed');
+    },
+  );
+
   test('existing Native install remains selected after upgrade', () async {
     native.runtimeStatus = environmentStatusPayload(
       kind: 'termuxNative',
@@ -101,4 +120,25 @@ void main() {
     expect(ok, isFalse);
     expect(state.errorMessage, 'Docker Hub and ECR were unreachable');
   });
+
+  test(
+    'rooted chroot setup persists its selection through managed provisioning',
+    () async {
+      native.hasRoot = true;
+      native.runtimeStatus = environmentStatusPayload(
+        kind: 'termuxNative',
+        installed: true,
+      );
+      await state.refreshStatus();
+
+      final ok = await state.runSetup(useRoot: true);
+
+      expect(ok, isTrue);
+      final provision = native.calls.lastWhere(
+        (call) => call.method == 'provisionEnvironment',
+      );
+      expect(provision.arguments, {'kind': 'chrootUbuntu', 'de': 'xfce4'});
+      expect(state.selectedEnvironment, LinuxEnvironmentKind.chrootUbuntu);
+    },
+  );
 }

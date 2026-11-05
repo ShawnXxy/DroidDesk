@@ -5,6 +5,7 @@ import 'package:percent_indicator/circular_percent_indicator.dart';
 import 'package:droiddesk/theme/droid_theme.dart';
 import 'package:droiddesk/state/app_state.dart';
 import 'package:droiddesk/screens/home_screen.dart';
+import 'package:droiddesk/models/linux_environment.dart';
 
 /// Setup progress screen — step 3 of setup wizard.
 /// Shows download, extraction, and configuration progress.
@@ -67,11 +68,15 @@ class _SetupProgressScreenState extends State<SetupProgressScreen> {
       }
     }
 
-    final rooted = await state.detectRootForSetup();
-    if (!mounted) return;
-
     var useRoot = false;
-    if (rooted) {
+    if (state.selectedEnvironment == LinuxEnvironmentKind.chrootUbuntu) {
+      final rooted = await state.detectRootForSetup();
+      if (!mounted) return;
+      if (!rooted) {
+        _started = false;
+        await state.runSetup(environment: LinuxEnvironmentKind.chrootUbuntu);
+        return;
+      }
       final confirmed =
           await showDialog<bool>(
             context: context,
@@ -111,7 +116,7 @@ class _SetupProgressScreenState extends State<SetupProgressScreen> {
     if (!mounted) return;
     await state.runSetup(
       useRoot: useRoot ? true : null,
-      environment: useRoot ? null : state.selectedEnvironment,
+      environment: state.selectedEnvironment,
     );
   }
 

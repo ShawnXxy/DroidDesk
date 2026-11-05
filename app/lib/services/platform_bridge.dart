@@ -24,7 +24,9 @@ class DroidDeskPlatform {
 
   static Future<void> updateStatusBarTheme(bool isLightMode) async {
     try {
-      await _channel.invokeMethod('updateStatusBarTheme', {'isLightMode': isLightMode});
+      await _channel.invokeMethod('updateStatusBarTheme', {
+        'isLightMode': isLightMode,
+      });
     } catch (_) {}
   }
 
@@ -100,7 +102,9 @@ class DroidDeskPlatform {
 
   /// Installed app version: `{versionName, versionCode}`.
   static Future<Map<String, dynamic>> getAppVersion() async {
-    final result = await _channel.invokeMethod<Map<dynamic, dynamic>>('getAppVersion');
+    final result = await _channel.invokeMethod<Map<dynamic, dynamic>>(
+      'getAppVersion',
+    );
     return result == null ? {} : Map<String, dynamic>.from(result);
   }
 
@@ -124,7 +128,9 @@ class DroidDeskPlatform {
       'downloadUpdate',
       {'url': url, 'size': size, 'tag': tag},
     );
-    return result == null ? {'ok': false, 'code': 'unknown'} : Map<String, dynamic>.from(result);
+    return result == null
+        ? {'ok': false, 'code': 'unknown'}
+        : Map<String, dynamic>.from(result);
   }
 
   static Future<void> cancelUpdateDownload() async {
@@ -137,7 +143,8 @@ class DroidDeskPlatform {
 
   /// Opens Android's package installer for a downloaded update.
   static Future<bool> installUpdate(String path) async {
-    return await _channel.invokeMethod<bool>('installUpdate', {'path': path}) ?? false;
+    return await _channel.invokeMethod<bool>('installUpdate', {'path': path}) ??
+        false;
   }
 
   // ── Runtime Status ──
@@ -255,7 +262,9 @@ class DroidDeskPlatform {
   }
 
   /// Installed packages with newer versions; [refresh] runs `apt-get update` first (slow).
-  static Future<List<Map<String, dynamic>>> getUpgradablePackages({bool refresh = false}) async {
+  static Future<List<Map<String, dynamic>>> getUpgradablePackages({
+    bool refresh = false,
+  }) async {
     final result = await _channel.invokeMethod<List<dynamic>>(
       'getUpgradablePackages',
       {'refresh': refresh},
@@ -271,7 +280,9 @@ class DroidDeskPlatform {
 
   /// Linux and device disk usage in bytes: system, home, cache, deviceFree, deviceTotal.
   static Future<Map<String, dynamic>> getStorageInfo() async {
-    final result = await _channel.invokeMethod<Map<dynamic, dynamic>>('getStorageInfo');
+    final result = await _channel.invokeMethod<Map<dynamic, dynamic>>(
+      'getStorageInfo',
+    );
     return result == null ? {} : Map<String, dynamic>.from(result);
   }
 
@@ -323,7 +334,9 @@ class DroidDeskPlatform {
 
   /// Launcher icon of an installed Android app as PNG bytes, or null if unavailable.
   static Future<Uint8List?> getAppIcon(String packageName) async {
-    return _channel.invokeMethod<Uint8List>('getAppIcon', {'package': packageName});
+    return _channel.invokeMethod<Uint8List>('getAppIcon', {
+      'package': packageName,
+    });
   }
 
   /// Real icon for a Linux package: `{'format': 'png'|'svg', 'bytes': Uint8List}` or null.
@@ -391,42 +404,58 @@ class DroidDeskPlatform {
 
   static Future<DesktopDisplayState> getDesktopDisplays() async =>
       DesktopDisplayState.fromMap(
-        desktopDisplayMap(await _channel.invokeMethod<Object?>('getDesktopDisplays')),
+        desktopDisplayMap(
+          await _channel.invokeMethod<Object?>('getDesktopDisplays'),
+        ),
       );
 
   static Future<DesktopDisplayState> setAutoOpenOnMonitor(bool enabled) async =>
       DesktopDisplayState.fromMap(
-        desktopDisplayMap(await _channel.invokeMethod<Object?>(
-          'setAutoOpenOnMonitor', {'enabled': enabled},
-        )),
+        desktopDisplayMap(
+          await _channel.invokeMethod<Object?>('setAutoOpenOnMonitor', {
+            'enabled': enabled,
+          }),
+        ),
       );
 
-  static Future<DesktopDisplaySettings> getDesktopDisplaySettings(String displayKey) async =>
-      DesktopDisplaySettings.fromMap(
-        desktopDisplayMap(await _channel.invokeMethod<Object?>(
-          'getDesktopDisplaySettings', {'displayKey': displayKey},
-        )),
-      );
+  static Future<DesktopDisplaySettings> getDesktopDisplaySettings(
+    String displayKey,
+  ) async => DesktopDisplaySettings.fromMap(
+    desktopDisplayMap(
+      await _channel.invokeMethod<Object?>('getDesktopDisplaySettings', {
+        'displayKey': displayKey,
+      }),
+    ),
+  );
 
-  static Future<DesktopDisplayState> saveDesktopDisplaySettings(DesktopDisplaySettings settings) async =>
-      DesktopDisplayState.fromMap(
-        desktopDisplayMap(await _channel.invokeMethod<Object?>(
-          'saveDesktopDisplaySettings', settings.toMap(),
-        )),
-      );
+  static Future<DesktopDisplayState> saveDesktopDisplaySettings(
+    DesktopDisplaySettings settings,
+  ) async => DesktopDisplayState.fromMap(
+    desktopDisplayMap(
+      await _channel.invokeMethod<Object?>(
+        'saveDesktopDisplaySettings',
+        settings.toMap(),
+      ),
+    ),
+  );
 
   static Future<DesktopDisplayState> openDesktopOnDisplay({
     required int displayId,
     required String displayKey,
   }) async => DesktopDisplayState.fromMap(
-    desktopDisplayMap(await _channel.invokeMethod<Object?>(
-      'openDesktopOnDisplay', {'displayId': displayId, 'displayKey': displayKey},
-    )),
+    desktopDisplayMap(
+      await _channel.invokeMethod<Object?>('openDesktopOnDisplay', {
+        'displayId': displayId,
+        'displayKey': displayKey,
+      }),
+    ),
   );
 
   static Future<DesktopDisplayState> moveDesktopToPhone() async =>
       DesktopDisplayState.fromMap(
-        desktopDisplayMap(await _channel.invokeMethod<Object?>('moveDesktopToPhone')),
+        desktopDisplayMap(
+          await _channel.invokeMethod<Object?>('moveDesktopToPhone'),
+        ),
       );
 
   static Future<bool> startLinux({
@@ -448,9 +477,13 @@ class DroidDeskPlatform {
     await _channel.invokeMethod('launchDesktopActivity');
   }
 
-  static Future<String> executeCommand(String command) async {
+  static Future<String> executeCommand(
+    String command, {
+    bool stdin = false,
+  }) async {
     final result = await _channel.invokeMethod('executeCommand', {
       'command': command,
+      'stdin': stdin,
     });
     return result as String? ?? '';
   }

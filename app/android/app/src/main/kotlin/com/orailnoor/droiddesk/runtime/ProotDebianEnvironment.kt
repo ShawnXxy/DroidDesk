@@ -1,12 +1,16 @@
 package com.orailnoor.droiddesk.runtime
 
 import android.content.Context
+import android.os.Handler
+import android.os.Looper
 import com.orailnoor.droiddesk.display.DisplayProfile
 import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.security.MessageDigest
 import java.util.Properties
+import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicBoolean
 
 internal fun debianDesktopInstallCommand(packages: List<String>): String {
     require(packages.all { it.matches(Regex("[a-z0-9][a-z0-9+.-]*")) })
@@ -17,14 +21,26 @@ internal fun debianDesktopInstallCommand(packages: List<String>): String {
         backup_dir=/etc/apt/droiddesk-source-backup
         mkdir -p "${'$'}backup_dir"
         if [ -f /etc/apt/sources.list ]; then
-            cp -f /etc/apt/sources.list "${'$'}backup_dir/sources.list"
+            if [ ! -f "${'$'}backup_dir/sources.list" ]; then
+                cp -f /etc/apt/sources.list "${'$'}backup_dir/sources.list"
+            fi
+            sed -i \
+                -e 's|http://mirrors.ustc.edu.cn|http://deb.debian.org|g' \
+                -e 's|https://mirrors.ustc.edu.cn|https://deb.debian.org|g' \
+                "${'$'}backup_dir/sources.list"
             sed -i \
                 -e 's|http://deb.debian.org|http://mirrors.ustc.edu.cn|g' \
                 -e 's|https://deb.debian.org|https://mirrors.ustc.edu.cn|g' \
                 /etc/apt/sources.list
         fi
         if [ -f /etc/apt/sources.list.d/debian.sources ]; then
-            cp -f /etc/apt/sources.list.d/debian.sources "${'$'}backup_dir/debian.sources"
+            if [ ! -f "${'$'}backup_dir/debian.sources" ]; then
+                cp -f /etc/apt/sources.list.d/debian.sources "${'$'}backup_dir/debian.sources"
+            fi
+            sed -i \
+                -e 's|http://mirrors.ustc.edu.cn|http://deb.debian.org|g' \
+                -e 's|https://mirrors.ustc.edu.cn|https://deb.debian.org|g' \
+                "${'$'}backup_dir/debian.sources"
             sed -i \
                 -e 's|http://deb.debian.org|http://mirrors.ustc.edu.cn|g' \
                 -e 's|https://deb.debian.org|https://mirrors.ustc.edu.cn|g' \
@@ -72,6 +88,8 @@ interface ProotDebianHost : ProotProvisioningHost, ProotDesktopSessionHost {
         user: String,
         command: String,
         onOutput: ((String) -> Unit)? = null,
+        interactive: Boolean = false,
+        stdin: Boolean = false,
     ): ExecutionResult
 
     override fun isDesktopReady(): Boolean =
@@ -100,6 +118,12 @@ internal class ProotDebianEnvironment(
 ) : EnvironmentAdapter {
     override val kind = EnvironmentKind.PROOT_DEBIAN
     private val session = sessionController ?: ProotDebianSessionController(host, processRunner)
+    private val displayProfiles = DesktopProfileExecutor(
+        Executors.newSingleThreadExecutor { task ->
+            Thread(task, "ProotDesktopProfiles").apply { isDaemon = true }
+        },
+        { task -> Handler(Looper.getMainLooper()).post(task) },
+    )
 
     override fun status(capabilities: RuntimeCapabilities): EnvironmentStatus {
         val marker = host.readReadyMarker()
@@ -134,7 +158,13 @@ internal class ProotDebianEnvironment(
     override fun stop(): Result<Unit> = session.stop()
 
     override fun execute(request: ExecutionRequest): ExecutionResult = when (request) {
-        is ExecutionRequest.Shell -> host.executeActive("root", request.command, request.onOutput)
+        is ExecutionRequest.Shell -> host.executeActive(
+            "root",
+            request.command,
+            request.onOutput,
+            request.interactive,
+            request.stdin,
+        )
         is ExecutionRequest.Desktop -> host.executeActive("droiddesk", request.command)
     }
 
@@ -146,8 +176,10 @@ internal class ProotDebianEnvironment(
     override fun applyDisplayProfile(
         profile: DisplayProfile,
         onComplete: (Result<Unit>) -> Unit,
-    ) {
-        onComplete(session.applyProfile(profile))
+    ) = displayProfiles.apply({ session.applyProfile(profile) }, onComplete)
+
+    override fun cancelDisplayProfile() {
+        displayProfiles.cancel()
     }
 
     override fun readClipboard(): String? {
@@ -205,6 +237,15 @@ internal class AndroidProotDebianHost(
     private val runtimeDir = File(prefixDir, "var/lib/proot-distro")
     private val markerDir = File(filesDir, "environments/proot-debian")
     private val markerFile = File(markerDir, "ready.properties")
+    private val statusPreferences = appContext.getSharedPreferences(
+        "proot_debian_status",
+        Context.MODE_PRIVATE,
+    )
+    @Volatile private var cachedRootfsSizeBytes =
+        statusPreferences.getLong(KEY_ROOTFS_SIZE_BYTES, -1L).takeIf { it >= 0 }
+    @Volatile private var rootfsSizeRefreshedAt =
+        statusPreferences.getLong(KEY_ROOTFS_SIZE_REFRESHED_AT, 0L)
+    private val rootfsSizeRefreshInFlight = AtomicBoolean(false)
     private val commandBuilder = ProotCommandBuilder(
         prootDistro = File(prefixDir, "bin/proot-distro"),
         prefixDir = prefixDir,
@@ -374,6 +415,7 @@ internal class AndroidProotDebianHost(
         }
         FileOutputStream(temporary).use { properties.store(it, null) }
         check(temporary.renameTo(markerFile)) { "Could not activate Debian ready marker" }
+        refreshRootfsSize(force = true)
     }
 
     override fun readReadyMarker(): ProotReadyMarker? = runCatching {
@@ -400,8 +442,42 @@ internal class AndroidProotDebianHost(
 
     override fun rootfsSizeBytes(): Long {
         val rootfs = rootfsPath()
-        if (!rootfs.isDirectory) return 0
-        return rootfs.walkTopDown().filter(File::isFile).sumOf(File::length)
+        if (!rootfs.isDirectory) {
+            cachedRootfsSizeBytes = 0
+            return 0
+        }
+        refreshRootfsSize()
+        return cachedRootfsSizeBytes ?: 0
+    }
+
+    private fun refreshRootfsSize(force: Boolean = false) {
+        val now = System.currentTimeMillis()
+        if (!force &&
+            cachedRootfsSizeBytes != null &&
+            now - rootfsSizeRefreshedAt < ROOTFS_SIZE_CACHE_TTL_MS
+        ) {
+            return
+        }
+        if (!rootfsSizeRefreshInFlight.compareAndSet(false, true)) return
+        ROOTFS_SIZE_EXECUTOR.execute {
+            try {
+                val size = rootfsPath()
+                    .takeIf(File::isDirectory)
+                    ?.walkTopDown()
+                    ?.filter(File::isFile)
+                    ?.sumOf(File::length)
+                    ?: 0L
+                val refreshedAt = System.currentTimeMillis()
+                cachedRootfsSizeBytes = size
+                rootfsSizeRefreshedAt = refreshedAt
+                statusPreferences.edit()
+                    .putLong(KEY_ROOTFS_SIZE_BYTES, size)
+                    .putLong(KEY_ROOTFS_SIZE_REFRESHED_AT, refreshedAt)
+                    .apply()
+            } finally {
+                rootfsSizeRefreshInFlight.set(false)
+            }
+        }
     }
 
     override fun optionalAppsStatus(): Map<String, Boolean> {
@@ -424,8 +500,17 @@ internal class AndroidProotDebianHost(
         user: String,
         command: String,
         onOutput: ((String) -> Unit)?,
+        interactive: Boolean,
+        stdin: Boolean,
     ): ExecutionResult =
-        executeContainer(ProotDebianProvisioner.ACTIVE_CONTAINER, user, command, onOutput)
+        executeContainer(
+            ProotDebianProvisioner.ACTIVE_CONTAINER,
+            user,
+            command,
+            onOutput,
+            interactive,
+            stdin,
+        )
 
     override fun launchCommand(profile: DisplayProfile): List<String> {
         val binds = sharedFolderBinds()
@@ -434,7 +519,7 @@ internal class AndroidProotDebianHost(
             arguments = listOf("/usr/local/bin/droiddesk-start-xfce"),
             environment = mapOf(
                 "DISPLAY" to ":0",
-                "PULSE_SERVER" to "127.0.0.1",
+                "PULSE_SERVER" to "unix:/tmp/pulse/native",
                 "XDG_RUNTIME_DIR" to "/tmp/runtime-droiddesk",
                 "LIBGL_ALWAYS_SOFTWARE" to "1",
             ),
@@ -500,6 +585,8 @@ internal class AndroidProotDebianHost(
         user: String,
         command: String,
         onOutput: ((String) -> Unit)? = null,
+        interactive: Boolean = false,
+        stdin: Boolean = false,
     ): ExecutionResult {
         val binds = sharedFolderBinds()
         val args = commandBuilder.login(
@@ -507,13 +594,18 @@ internal class AndroidProotDebianHost(
             arguments = listOf("bash", "-lc", prootBusAwareCommand(command)),
             environment = mapOf(
                 "DISPLAY" to ":0",
-                "PULSE_SERVER" to "127.0.0.1",
+                "PULSE_SERVER" to "unix:/tmp/pulse/native",
                 "XDG_RUNTIME_DIR" to "/tmp/runtime-droiddesk",
             ),
             binds = binds,
             user = user,
         )
-        return linuxRuntime.executeCommandArgs(args, onOutput)
+        return linuxRuntime.executeCommandArgs(
+            args,
+            onOutput,
+            interactive,
+            command.takeIf { stdin },
+        )
     }
 
     private fun sharedFolderBinds(): List<ProotBind> = listOf(
@@ -538,6 +630,15 @@ internal class AndroidProotDebianHost(
         val current = File(runtimeDir, "containers/$name/rootfs")
         if (current.exists()) return current
         return File(runtimeDir, "installed-rootfs/$name")
+    }
+
+    private companion object {
+        const val KEY_ROOTFS_SIZE_BYTES = "rootfs_size_bytes"
+        const val KEY_ROOTFS_SIZE_REFRESHED_AT = "rootfs_size_refreshed_at"
+        const val ROOTFS_SIZE_CACHE_TTL_MS = 10 * 60 * 1000L
+        val ROOTFS_SIZE_EXECUTOR = Executors.newSingleThreadExecutor { task ->
+            Thread(task, "ProotRootfsSize").apply { isDaemon = true }
+        }
     }
 
     private fun installedPackages(rootfs: File): Set<String> {

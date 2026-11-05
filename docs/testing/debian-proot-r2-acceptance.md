@@ -46,7 +46,7 @@ invocation. Retrying the same installation then completed successfully.
 | XFCE first frame | Passed |
 | Embedded X11 | Passed at `DISPLAY=:0` |
 | Background and return | Same XFCE session resumed |
-| Host audio | Debian `pactl -s tcp:127.0.0.1 info` connected to PulseAudio 17 |
+| Host audio | Debian connected to PulseAudio 17 through the app-private `/tmp/pulse/native` socket |
 | Shared Documents | Wrote and reread `droiddesk-r2-acceptance.txt` |
 | Android → X11 clipboard | Smartisan Notes text was read unchanged by Debian `xclip` |
 | X11 → Android clipboard | Debian token `R2_X_TO_ANDROID_1105` pasted into the Android browser address bar |

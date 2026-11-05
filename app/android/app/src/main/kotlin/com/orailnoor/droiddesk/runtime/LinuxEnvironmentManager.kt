@@ -6,6 +6,7 @@ internal class LinuxEnvironmentManager(
     adapters: List<EnvironmentAdapter>,
     private val capabilities: () -> RuntimeCapabilities,
     private val selectionStore: EnvironmentSelectionStore,
+    private val legacySelection: () -> EnvironmentKind? = { null },
 ) {
     private val adaptersInOrder = adapters.toList()
     private val adaptersByKind = adapters.associateBy(EnvironmentAdapter::kind)
@@ -116,9 +117,14 @@ internal class LinuxEnvironmentManager(
     fun activeKind(): EnvironmentKind = selectedKindOrNull() ?: recommendedKind()
 
     private fun selectedKindOrNull(): EnvironmentKind? {
-        val persisted = selectionStore.read() ?: return null
-        return EnvironmentKind.fromWire(persisted)
-            ?: throw IllegalStateException("Unknown persisted Linux environment: $persisted")
+        val persisted = selectionStore.read()
+        if (persisted != null) {
+            return EnvironmentKind.fromWire(persisted)
+                ?: throw IllegalStateException("Unknown persisted Linux environment: $persisted")
+        }
+        val migrated = legacySelection()?.takeIf(adaptersByKind::containsKey) ?: return null
+        selectionStore.write(migrated)
+        return migrated
     }
 
     private fun adapter(kind: EnvironmentKind): EnvironmentAdapter =
@@ -148,7 +154,7 @@ internal class SharedPreferencesEnvironmentSelectionStore(
 internal fun createLinuxEnvironmentManager(
     context: Context,
     linuxRuntime: LinuxRuntime = LinuxRuntime(context.applicationContext),
-    chrootRuntime: ChrootRuntime = ChrootRuntime(context.applicationContext),
+    chrootRuntime: ChrootRuntime = ChrootRuntime(context.applicationContext, linuxRuntime),
 ): LinuxEnvironmentManager {
     val probe = RuntimeCapabilityProbe(
         AndroidRuntimeCapabilitySource(context.applicationContext, linuxRuntime, chrootRuntime),
@@ -169,6 +175,17 @@ internal fun createLinuxEnvironmentManager(
         ),
         capabilities = probe::probe,
         selectionStore = SharedPreferencesEnvironmentSelectionStore(context.applicationContext),
+        legacySelection = {
+            when {
+                chrootRuntime.hasRoot() &&
+                    chrootRuntime.isRootfsReady() &&
+                    chrootRuntime.isDesktopInstalled() ->
+                    EnvironmentKind.CHROOT_UBUNTU
+                linuxRuntime.isBootstrapped() && linuxRuntime.getInstalledDE().isNotEmpty() ->
+                    EnvironmentKind.TERMUX_NATIVE
+                else -> null
+            }
+        },
     )
 }
 

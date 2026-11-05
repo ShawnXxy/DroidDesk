@@ -162,11 +162,7 @@ class RuntimeCapabilityProbe(
         name: String,
         fallback: (String) -> T,
     ): T {
-        val remainingNanos = deadlineNanos - System.nanoTime()
-        if (remainingNanos <= 0) {
-            future.cancel(true)
-            return fallback("$name probe timed out after ${timeoutMillis}ms")
-        }
+        val remainingNanos = maxOf(0L, deadlineNanos - System.nanoTime())
         return try {
             future.get(remainingNanos, TimeUnit.NANOSECONDS)
         } catch (_: TimeoutException) {
