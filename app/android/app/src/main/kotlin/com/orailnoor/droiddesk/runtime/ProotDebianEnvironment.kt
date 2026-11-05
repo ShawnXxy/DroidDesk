@@ -58,6 +58,21 @@ internal fun debianDesktopInstallCommand(packages: List<String>): String {
 }
 
 internal const val PROOT_SESSION_BUS_FILE = "/tmp/runtime-droiddesk/dbus-address"
+internal const val PROOT_PULSE_COOKIE_FILE = "/tmp/pulse/cookie"
+
+internal fun sharePulseCookie(hostCookie: File, sharedCookie: File): Result<Unit> =
+    runCatching {
+        check(hostCookie.isFile) { "The host PulseAudio cookie is unavailable" }
+        sharedCookie.parentFile?.mkdirs()
+        hostCookie.copyTo(sharedCookie, overwrite = true)
+        sharedCookie.setReadable(false, false)
+        sharedCookie.setWritable(false, false)
+        sharedCookie.setReadable(true, true)
+        sharedCookie.setWritable(true, true)
+        check(sharedCookie.canRead() && sharedCookie.canWrite()) {
+            "The shared PulseAudio cookie permissions are invalid"
+        }
+    }
 
 internal fun prootSessionLauncherScript(): String = """
     #!/bin/sh
@@ -264,7 +279,13 @@ internal class AndroidProotDebianHost(
         onLog: (String) -> Unit,
     ): Result<ProotToolchainVersions> = linuxRuntime.ensureProotToolchain(onProgress, onLog)
 
-    override fun prepareHostSession(): Result<Unit> = linuxRuntime.startPulseAudio()
+    override fun prepareHostSession(): Result<Unit> = runCatching {
+        linuxRuntime.startPulseAudio().getOrThrow()
+        sharePulseCookie(
+            File(hostHome, ".config/pulse/cookie"),
+            File(tmpDir, "pulse/cookie"),
+        ).getOrThrow()
+    }
 
     override fun stopHostSession(): Result<Unit> = runCatching {
         linuxRuntime.stopHostProcess("dbus-daemon").getOrThrow()
@@ -274,6 +295,11 @@ internal class AndroidProotDebianHost(
             }
         }
         linuxRuntime.stopPulseAudio().getOrThrow()
+        File(tmpDir, "pulse/cookie").let { cookie ->
+            check(!cookie.exists() || cookie.delete()) {
+                "Could not remove the retired PulseAudio cookie"
+            }
+        }
     }
 
     override fun containerState(): ProotContainerState = when {
@@ -524,7 +550,8 @@ internal class AndroidProotDebianHost(
             arguments = listOf("/usr/local/bin/droiddesk-start-xfce"),
             environment = mapOf(
                 "DISPLAY" to ":0",
-                "PULSE_SERVER" to "unix:/tmp/pulse/native",
+                "PULSE_SERVER" to GUEST_PULSE_SERVER,
+                "PULSE_COOKIE" to PROOT_PULSE_COOKIE_FILE,
                 "XDG_RUNTIME_DIR" to "/tmp/runtime-droiddesk",
                 "LIBGL_ALWAYS_SOFTWARE" to "1",
             ),
@@ -599,7 +626,8 @@ internal class AndroidProotDebianHost(
             arguments = listOf("bash", "-lc", prootBusAwareCommand(command)),
             environment = mapOf(
                 "DISPLAY" to ":0",
-                "PULSE_SERVER" to "unix:/tmp/pulse/native",
+                "PULSE_SERVER" to GUEST_PULSE_SERVER,
+                "PULSE_COOKIE" to PROOT_PULSE_COOKIE_FILE,
                 "XDG_RUNTIME_DIR" to "/tmp/runtime-droiddesk",
             ),
             binds = binds,

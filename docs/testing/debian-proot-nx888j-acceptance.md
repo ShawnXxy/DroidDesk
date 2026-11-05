@@ -50,7 +50,7 @@ and safety margin; neither number is the final base install size.
 | Phone viewport | Passed at 360 × 800 logical / 1260 × 2800 physical |
 | Background and return | Same XFCE session resumed through **Return to Desktop** |
 | Android render-rate request | `mActiveRenderFrameRate=60.000004` while `DesktopActivity` was focused |
-| Audio | Debian connected to the host PulseAudio AAudio/OpenSL ES path through the app-private `/tmp/pulse/native` socket |
+| Audio | Debian connected to the host PulseAudio AAudio/OpenSL ES path through cookie-authenticated loopback TCP |
 | Android → X11 clipboard | Android Notes token was read unchanged by Debian `xclip -selection clipboard -o` |
 | X11 → Android clipboard | Debian `xclip` token pasted unchanged into Android Notes |
 
@@ -102,6 +102,28 @@ does not override the user's Android media or display-speaker volume.
 
 The Electron system-DBus and udev warnings observed at first launch did not
 prevent the GUI from opening.
+
+## Review-fix regression retest
+
+The post-review build was installed over the existing acceptance package
+without clearing its 1.5 GiB Debian rootfs.
+
+- Cold startup restored `xfce4-session`, `xfce4-panel`, `xfwm4`, and
+  `xfdesktop`, then revealed the desktop without a readiness/profile error.
+- The Debian terminal reported Bookworm and identified itself as
+  **Debian PRoot** instead of Native Termux.
+- `pactl info` connected through cookie-authenticated `tcp:127.0.0.1` and
+  reported `AAudio_sink`; playback of a generated stereo WAV created a live
+  PulseAudio sink input.
+- An interactive `head -n 1` command received a later
+  `stdin-token-20261105` submission and echoed the token before exiting.
+- Snapshot format v2 included the bound
+  `home/Downloads/nubia-audio-test.wav`; deleting the source and restoring the
+  snapshot recreated it in the host-backed Downloads directory.
+- The previously installed VS Code remained available as `1.145.0`, commit
+  `a717861c07586a53d83b80d742cd3f59b20a6273`, `arm64`.
+- **Stop Server** removed PRoot, XFCE, D-Bus, PulseAudio, and the temporary
+  shared PulseAudio cookie; only the main Android activity process remained.
 
 ## Lifecycle cleanup
 

@@ -51,7 +51,6 @@ class ChrootRuntime(
     private val rootfsDir: File get() = File(baseDir, "rootfs")
     private val tmpDir: File get() = File(baseDir, "tmp")
     private val x11HostDir: File get() = File(tmpDir, ".X11-unix")
-    private val pulseHostDir: File get() = File(tmpDir, "pulse")
     private val pulseCookie: File get() = File(baseDir, "home/.config/pulse/cookie")
 
     // ── Status ──
@@ -203,7 +202,7 @@ class ChrootRuntime(
                 #!/bin/bash
                 # DroidDesk portable graphics environment
                 export DISPLAY=:0
-                export PULSE_SERVER=unix:/tmp/pulse/native
+                export PULSE_SERVER=tcp:127.0.0.1
                 export PULSE_COOKIE=/root/.config/pulse/cookie
                 export XDG_RUNTIME_DIR=/tmp/runtime-root
                 export XDG_SESSION_TYPE=x11
@@ -479,7 +478,7 @@ class ChrootRuntime(
 
         ensureMounts()
         bindX11Socket()
-        if (audioReady.isSuccess) bindPulseAudioSocket()
+        if (audioReady.isSuccess) sharePulseAudioCookie()
 
         if (!File(rootfsDir, "usr/bin/xclip").canExecute()) {
             Log.i(TAG, "Installing the chroot clipboard compatibility helper")
@@ -555,7 +554,7 @@ class ChrootRuntime(
 
             # Source DroidDesk environment
             . /etc/profile.d/droiddesk-ha.sh 2>/dev/null || true
-            export PULSE_SERVER=unix:/tmp/pulse/native
+            export PULSE_SERVER=tcp:127.0.0.1
             export PULSE_COOKIE=/root/.config/pulse/cookie
 
             # Make sure X11 socket dir exists in case bind mount was late
@@ -894,28 +893,17 @@ DROIDDESK_SESSION
         Log.i(TAG, "Bound X11 socket: $hostX11 -> $chrootX11")
     }
 
-    private fun bindPulseAudioSocket() {
-        if (!hasRoot()) return
-        val chrootPulse = File(rootfsDir, "tmp/pulse").absolutePath
-        val hostPulse = pulseHostDir.absolutePath
-        val mounts = rootShell.exec("mount").lines()
-        if (mounts.none { it.contains(" on $chrootPulse ") }) {
-            rootShell.exec(
-                "mkdir -p ${shellQuote(chrootPulse)} && " +
-                    "mount --bind ${shellQuote(hostPulse)} ${shellQuote(chrootPulse)}",
-            )
-            Log.i(TAG, "Bound PulseAudio socket: $hostPulse -> $chrootPulse")
-        }
-        if (pulseCookie.isFile) {
-            val target = File(rootfsDir, "root/.config/pulse/cookie").absolutePath
-            rootShell.exec(
-                "mkdir -p ${shellQuote(File(target).parentFile!!.absolutePath)} && " +
-                    "cp -f ${shellQuote(pulseCookie.absolutePath)} ${shellQuote(target)} && " +
-                    "chmod 0600 ${shellQuote(target)}",
-            )
-        } else {
+    private fun sharePulseAudioCookie() {
+        if (!pulseCookie.isFile) {
             Log.w(TAG, "PulseAudio cookie is unavailable; chroot audio authentication may fail")
+            return
         }
+        val target = File(rootfsDir, "root/.config/pulse/cookie").absolutePath
+        rootShell.exec(
+            "mkdir -p ${shellQuote(File(target).parentFile!!.absolutePath)} && " +
+                "cp -f ${shellQuote(pulseCookie.absolutePath)} ${shellQuote(target)} && " +
+                "chmod 0600 ${shellQuote(target)}",
+        )
     }
 
     /**
@@ -933,7 +921,6 @@ DROIDDESK_SESSION
             File(rootfsDir, "dev/pts").absolutePath,
             File(rootfsDir, "dev/shm").absolutePath,
             File(rootfsDir, "tmp/.X11-unix").absolutePath,
-            File(rootfsDir, "tmp/pulse").absolutePath,
         )
         // Unmount in reverse order, be tolerant of busy mounts
         targets.reversed().forEach { target ->

@@ -33,6 +33,21 @@ class ProotDebianEnvironmentTest {
     }
 
     @Test
+    fun hostPulseCookieIsCopiedIntoTheSharedPrivateTmpDirectory() {
+        val directory = Files.createTempDirectory("pulse-cookie").toFile()
+        val hostCookie = File(directory, "home/.config/pulse/cookie").apply {
+            parentFile!!.mkdirs()
+            writeBytes(ByteArray(256) { it.toByte() })
+        }
+        val sharedCookie = File(directory, "tmp/pulse/cookie")
+
+        sharePulseCookie(hostCookie, sharedCookie).getOrThrow()
+
+        assertTrue(sharedCookie.isFile)
+        assertTrue(hostCookie.readBytes().contentEquals(sharedCookie.readBytes()))
+    }
+
+    @Test
     fun readyMarkerDrivesInstalledStatusAndDebianPaths() {
         val host = FakeEnvironmentHost()
         val environment = ProotDebianEnvironment(host)

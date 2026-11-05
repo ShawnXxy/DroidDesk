@@ -35,7 +35,8 @@ class ProotDebianSessionTest {
         assertTrue(result.isSuccess)
         assertEquals(listOf("prepare", "profile"), host.calls.take(2))
         assertTrue(runner.startedCommand.contains("DISPLAY=:0"))
-        assertTrue(runner.startedCommand.contains("PULSE_SERVER=unix:/tmp/pulse/native"))
+        assertTrue(runner.startedCommand.contains("PULSE_SERVER=tcp:127.0.0.1"))
+        assertTrue(runner.startedCommand.contains("PULSE_COOKIE=/tmp/pulse/cookie"))
         assertTrue(runner.startedCommand.contains("XDG_RUNTIME_DIR=/tmp/runtime-droiddesk"))
         assertEquals(
             listOf("dbus-run-session", "--", "startxfce4"),
@@ -160,7 +161,8 @@ class ProotDebianSessionTest {
         override fun launchCommand(profile: DisplayProfile): List<String> = listOf(
             "env",
             "DISPLAY=:0",
-            "PULSE_SERVER=unix:/tmp/pulse/native",
+            "PULSE_SERVER=tcp:127.0.0.1",
+            "PULSE_COOKIE=/tmp/pulse/cookie",
             "XDG_RUNTIME_DIR=/tmp/runtime-droiddesk",
             "proot-distro",
             "login",

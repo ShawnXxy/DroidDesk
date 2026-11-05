@@ -16,6 +16,8 @@ import java.util.concurrent.TimeUnit
 import com.orailnoor.droiddesk.display.DisplayProfile
 import com.orailnoor.droiddesk.display.DisplayProfilePolicy
 
+internal const val GUEST_PULSE_SERVER = "tcp:127.0.0.1"
+
 internal fun nativeDesktopBusSocket(directory: File): File =
     File(directory, UUID.randomUUID().toString().replace("-", ""))
 
@@ -282,6 +284,13 @@ class LinuxRuntime(context: Context) {
                 sleep 0.1
             done
             limit 2 pactl info >/dev/null 2>&1
+            pactl load-module module-native-protocol-tcp \
+                listen=127.0.0.1 \
+                auth-cookie='${File(homeDir, ".config/pulse/cookie").absolutePath}' \
+                >/dev/null
+            PULSE_SERVER=$GUEST_PULSE_SERVER \
+                PULSE_COOKIE='${File(homeDir, ".config/pulse/cookie").absolutePath}' \
+                limit 2 pactl info >/dev/null 2>&1
             """.trimIndent(),
         )
         check(!output.startsWith("Error:")) { output }
