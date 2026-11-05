@@ -21,7 +21,8 @@ data class DesktopLaunchRequest(
 )
 
 interface DesktopDisplayHost {
-    fun currentDisplayId(): Int? = null
+    fun currentDisplay(): DesktopDisplay? = null
+    fun currentDisplayId(): Int? = currentDisplay()?.id
     fun bindActivity(activity: Activity) {}
     fun unbindActivity(activity: Activity) {}
     fun displays(): List<DesktopDisplay>
@@ -426,7 +427,16 @@ class DesktopDisplayCoordinator(
         return { sessionStartListeners.remove(listener) }
     }
 
-    fun displays(): List<DesktopDisplay> = checkNotNull(host) { "Display discovery is not initialized" }.displays()
+    fun displays(): List<DesktopDisplay> {
+        val platform = checkNotNull(host) { "Display discovery is not initialized" }
+        val discovered = platform.displays()
+        val current = platform.currentDisplay()
+        return if (current != null && discovered.none { it.id == current.id }) {
+            discovered + current
+        } else {
+            discovered
+        }
+    }
 
     fun snapshot(): Map<String, Any?> {
         assertMainThread()
@@ -589,7 +599,7 @@ class DesktopDisplayCoordinator(
 
     fun startupTarget(displayId: Int): DesktopStartupTarget {
         assertMainThread()
-        val display = displays().firstOrNull { it.id == displayId && it.eligible }
+        val display = displays().firstOrNull { it.id == displayId && canLaunch(it) }
             ?: throw DesktopDisplayException("DISPLAY_UNAVAILABLE", "The app's current display is not available")
         return DesktopStartupTarget(display.id, display.key, environmentPolicy.environmentFor(display.id))
     }
@@ -612,7 +622,7 @@ class DesktopDisplayCoordinator(
             }
             return
         }
-        val actual = owner?.actualDisplay?.invoke()
+        val actual = owner?.actualDisplay?.invoke() ?: host?.currentDisplayId()
         val target = current.firstOrNull { it.id == actual }
             ?: current.firstOrNull { it.key == lastTarget?.key }
             ?: current.firstOrNull { it.isDefault }
@@ -652,7 +662,7 @@ class DesktopDisplayCoordinator(
             isStopped || (!sessionStarting && !platform.sessionRunning()) ->
                 DesktopDisplayException("SESSION_STOPPED", "Start the Linux desktop before moving its view")
             move != null -> DesktopDisplayException("INVALID_ARGUMENT", "A desktop move is already in progress")
-            !target.eligible -> DesktopDisplayException("DISPLAY_NOT_ALLOWED", target.reason ?: "Android denied this display")
+            !canLaunch(target) -> DesktopDisplayException("DISPLAY_NOT_ALLOWED", target.reason ?: "Android denied this display")
             else -> null
         }
         if (failure != null) {
@@ -693,7 +703,7 @@ class DesktopDisplayCoordinator(
         assertMainThread()
         if (!isSessionCurrent(epoch)) return false
         val target = displays().firstOrNull { it.id == displayId && it.key == displayKey } ?: return false
-        if (!target.eligible) return false
+        if (!canLaunch(target)) return false
         val pending = move
         return if (pending != null) {
             pending.request.requestId == requestId && pending.request.display.key == target.key
@@ -723,7 +733,7 @@ class DesktopDisplayCoordinator(
         }
         val target = pending.request.display
         if (pending.request.requestId != requestId || lease.displayId != target.id || owner?.actualDisplay?.invoke() != target.id ||
-            displays().none { it.id == target.id && it.key == target.key && it.eligible }) return
+            displays().none { it.id == target.id && it.key == target.key && canLaunch(it) }) return
         move = null
         pending.cancelTimeout()
         lastTarget = target
@@ -769,7 +779,7 @@ class DesktopDisplayCoordinator(
         }
         if (pending != null && current.none { it.key == pending.request.display.key }) {
             onDisplayRemoved(pending.request.display.id)
-        } else if (pending != null && current.any { it.key == pending.request.display.key && !it.eligible }) {
+        } else if (pending != null && current.any { it.key == pending.request.display.key && !canLaunch(it) }) {
             failMove(DesktopDisplayException("DISPLAY_NOT_ALLOWED", "Display placement permission changed"), true)
         } else if (pending == null) {
             lastTarget?.takeIf { target -> current.none { it.key == target.key } }?.let { onDisplayRemoved(it.id) }
@@ -778,6 +788,9 @@ class DesktopDisplayCoordinator(
         publish()
         refreshAutomaticOpening()
     }
+
+    private fun canLaunch(display: DesktopDisplay): Boolean =
+        display.eligible || host?.currentDisplayId() == display.id
 
     private fun automaticOpeningEnabled(): Boolean =
         environmentPolicy.allowCrossDisplayMoves && (settingsStore?.loadAutoOpenOnMonitor() ?: true)

@@ -61,8 +61,19 @@ internal class AndroidDesktopDisplayHost(
         if (localDesktop?.get() === activity) localDesktop = null
     }
 
-    override fun currentDisplayId(): Int? =
-        boundActivity?.get()?.takeUnless { it.isDestroyed || it.isFinishing }?.window?.decorView?.display?.displayId
+    @Suppress("DEPRECATION")
+    override fun currentDisplay(): DesktopDisplay? =
+        boundActivity?.get()?.takeUnless { it.isDestroyed || it.isFinishing }?.let { activity ->
+            val display = activity.display ?: activity.window.decorView.display ?: return@let null
+            DesktopDisplay(
+                id = display.displayId,
+                key = "bound:${display.displayId}",
+                name = display.name,
+                isDefault = display.displayId == android.view.Display.DEFAULT_DISPLAY,
+                eligible = true,
+                reason = null,
+            )
+        }
 
     override fun displays() = repository.snapshot()
 
@@ -80,25 +91,36 @@ internal class AndroidDesktopDisplayHost(
             LinuxRuntime(context).isRunning()
 
     override fun launch(request: DesktopLaunchRequest) {
-        val current = repository.requireDisplay(request.display.key)
-        if (current.id != request.display.id || !current.eligible) {
+        val activity = boundActivity?.get()?.takeUnless { it.isDestroyed || it.isFinishing }
+        val boundDisplay = currentDisplay()
+        val current = boundDisplay?.takeIf { it.id == request.display.id }
+            ?: repository.requireDisplay(request.display.key)
+        val currentActivityDisplay = boundDisplay?.id
+        if (current.id != request.display.id || (!current.eligible && current.id != currentActivityDisplay)) {
             throw DesktopDisplayException("DISPLAY_UNAVAILABLE", "The selected display is no longer launchable")
         }
         try {
             if (environmentPolicy.displayLocalMode) {
-                val activity = boundActivity?.get()?.takeUnless { it.isDestroyed || it.isFinishing }
+                val localActivity = activity
                     ?: throw DesktopDisplayException("DISPLAY_UNAVAILABLE", "The app's current window is unavailable")
-                if (activity.window.decorView.display?.displayId != current.id) {
+                if (localActivity.window.decorView.display?.displayId != current.id) {
                     throw DesktopDisplayException("DISPLAY_UNAVAILABLE", "The app moved before desktop startup")
                 }
-                activity.startActivity(DesktopDisplayLauncher.localIntent(activity, request))
+                localActivity.startActivity(DesktopDisplayLauncher.localIntent(localActivity, request))
             } else {
                 val intent = DesktopDisplayLauncher.intent(context, current.id, current.key, request.requestId).apply {
                     putExtra("sessionGeneration", request.sessionGeneration)
                     putExtra("mode", request.mode)
                     putExtra("de", request.desktopEnv)
                 }
-                context.startActivity(intent, ActivityOptions.makeBasic().setLaunchDisplayId(current.id).toBundle())
+                if (currentActivityDisplay == current.id) {
+                    checkNotNull(activity).startActivity(
+                        intent,
+                        ActivityOptions.makeBasic().setLaunchDisplayId(current.id).toBundle(),
+                    )
+                } else {
+                    context.startActivity(intent, ActivityOptions.makeBasic().setLaunchDisplayId(current.id).toBundle())
+                }
             }
             Log.i("DesktopDisplay", "Launch request=${request.requestId} display=${current.id}")
         } catch (error: SecurityException) {

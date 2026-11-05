@@ -28,6 +28,21 @@ internal fun hostPulseAudioLibraryPath(
         prefixLibraryPath
     }
 
+internal fun stopHostProcessWithFallback(
+    processName: String,
+    isAlive: () -> Boolean,
+    terminate: (force: Boolean) -> Unit,
+    awaitExit: (timeoutMillis: Long) -> Boolean,
+) {
+    if (!isAlive()) return
+    terminate(false)
+    if (awaitExit(2_000L)) return
+    terminate(true)
+    check(awaitExit(2_000L)) {
+        "Timed out stopping host process: $processName"
+    }
+}
+
 internal fun nativeDesktopBusSocket(directory: File): File =
     File(directory, UUID.randomUUID().toString().replace("-", ""))
 
@@ -341,33 +356,61 @@ class LinuxRuntime(context: Context) {
         }
         val pkill = File(binDir, "pkill")
         check(pkill.canExecute()) { "Host process terminator is unavailable" }
-        val process = ProcessBuilder(pkill.absolutePath, "-9", "-x", processName)
-            .directory(prefixDir)
-            .redirectErrorStream(true)
-            .also { builder ->
-                builder.environment().clear()
-                builder.environment().putAll(getTermuxEnv())
+        stopHostProcessWithFallback(
+            processName = processName,
+            isAlive = { hostProcessAlive(processName) },
+            terminate = { force ->
+                val process = ProcessBuilder(
+                    pkill.absolutePath,
+                    if (force) "-9" else "-15",
+                    "-x",
+                    processName,
+                )
+                    .directory(prefixDir)
+                    .redirectErrorStream(true)
+                    .also { builder ->
+                        builder.environment().clear()
+                        builder.environment().putAll(getTermuxEnv())
+                    }
+                    .start()
+                check(process.waitFor(3, TimeUnit.SECONDS)) {
+                    process.destroyForcibly()
+                    "Timed out signalling host process: $processName"
+                }
+                val output = process.inputStream.bufferedReader().readText().trim()
+                check(process.exitValue() in 0..1) {
+                    "Could not signal host process $processName: $output"
+                }
+            },
+            awaitExit = { timeoutMillis ->
+                waitForHostProcessExit(processName, timeoutMillis)
             }
-            .start()
-        check(process.waitFor(3, TimeUnit.SECONDS)) {
-            process.destroyForcibly()
-            "Timed out stopping host process: $processName"
-        }
-        val output = process.inputStream.bufferedReader().readText().trim()
-        check(process.exitValue() in 0..1) {
-            "Could not stop host process $processName: $output"
-        }
+        )
     }
 
     fun hostProcessesAlive(processNames: Collection<String>): Boolean {
+        return processNames.all(::hostProcessAlive)
+    }
+
+    private fun hostProcessAlive(processName: String): Boolean {
+        require(processName.matches(Regex("[a-zA-Z0-9._-]+"))) {
+            "Invalid host process name: $processName"
+        }
         val pgrep = File(binDir, "pgrep")
         if (!pgrep.canExecute()) return false
-        return processNames.all { processName ->
-            require(processName.matches(Regex("[a-zA-Z0-9._-]+"))) {
-                "Invalid host process name: $processName"
-            }
-            probeProcess(listOf(pgrep.absolutePath, "-x", processName))?.exitCode == 0
-        }
+        return probeProcess(listOf(pgrep.absolutePath, "-x", processName))?.exitCode == 0
+    }
+
+    private fun waitForHostProcessExit(
+        processName: String,
+        timeoutMillis: Long,
+    ): Boolean {
+        val deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMillis)
+        do {
+            if (!hostProcessAlive(processName)) return true
+            Thread.sleep(50)
+        } while (System.nanoTime() < deadline)
+        return !hostProcessAlive(processName)
     }
 
     fun probeClipboard(): CapabilityEvidence {
