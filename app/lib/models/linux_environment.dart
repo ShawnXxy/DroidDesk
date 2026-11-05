@@ -39,10 +39,7 @@ enum CapabilityEvidenceState {
   }
 
   bool get blocksProvisioning => switch (this) {
-    blockedByPermission ||
-    blockedByPolicy ||
-    failedSelfTest ||
-    unavailable => true,
+    blockedByPermission || blockedByPolicy || failedSelfTest || unavailable => true,
     _ => false,
   };
 }
@@ -238,9 +235,7 @@ class LinuxEnvironmentStatus {
     final running = _requiredBool(map, 'running');
     final provisioning = _requiredBool(map, 'provisioning');
     if (running && provisioning) {
-      throw const FormatException(
-        'An environment cannot run while provisioning',
-      );
+      throw const FormatException('An environment cannot run while provisioning');
     }
     final lastError = map['lastError'];
     if (lastError != null && lastError is! String) {
