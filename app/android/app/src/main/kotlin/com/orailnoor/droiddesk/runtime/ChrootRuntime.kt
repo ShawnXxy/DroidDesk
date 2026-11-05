@@ -86,7 +86,10 @@ class ChrootRuntime(
                 "Root and rootfs are present but the desktop is not installed",
             )
         }
-        val probeRoot = File(context.cacheDir, "chroot-capability-probe")
+        val probeRoot = File(
+            context.cacheDir,
+            "chroot-capability-probe-${UUID.randomUUID()}",
+        )
         val source = File(probeRoot, "source")
         val target = File(probeRoot, "target")
         val cleanup = "umount -l ${shellQuote(target.absolutePath)} 2>/dev/null || true; " +

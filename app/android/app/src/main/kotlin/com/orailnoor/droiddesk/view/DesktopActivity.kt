@@ -75,6 +75,7 @@ class DesktopActivity : Activity() {
     private var displayRequestId = 0L
     private var sessionEpoch = 0L
     private var readinessThread: Thread? = null
+    private var awaitingSessionStart = false
     private var currentProfile: DisplayProfile? = null
     private var desktopReady = false
     private var appliedUiProfile: DisplayProfile? = null
@@ -527,7 +528,11 @@ class DesktopActivity : Activity() {
                     startDesktopSessionIfRequested(startEpoch)
                 }, 250)
             } else if (!sessionStartPending && !desktopReady && !desktopRevealed) {
-                waitForDesktopAndReveal()
+                if (displayCoordinator.isStarting) {
+                    awaitPendingSessionStart()
+                } else {
+                    waitForDesktopAndReveal()
+                }
             }
             displayCoordinator.onAttached(lease, displayRequestId, content)
         }
@@ -1001,6 +1006,21 @@ class DesktopActivity : Activity() {
         }, "LinuxDesktopReady").also { it.start() }
     }
 
+    private fun awaitPendingSessionStart() {
+        if (awaitingSessionStart) return
+        awaitingSessionStart = true
+        val epoch = sessionEpoch
+        displayCoordinator.awaitSessionReady(epoch) { outcome ->
+            if (!isCurrentRenderer()) return@awaitSessionReady
+            awaitingSessionStart = false
+            if (outcome.isSuccess) {
+                waitForDesktopAndReveal()
+            } else {
+                revealDesktop(false)
+            }
+        }
+    }
+
     /** Follows the theme picked in the app (Flutter stores it as flutter.theme_mode). */
     private fun isLightTheme(): Boolean {
         val mode = getSharedPreferences("FlutterSharedPreferences", MODE_PRIVATE)
@@ -1160,6 +1180,7 @@ class DesktopActivity : Activity() {
         if (rendererReleased) return
         rendererReleased = true
         sessionStartPending = false
+        awaitingSessionStart = false
         profileRevision++
         desktopReady = false
         val ownedLease = rendererLease

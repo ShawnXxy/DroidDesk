@@ -19,8 +19,8 @@ import com.orailnoor.droiddesk.runtime.RootShell
 import com.orailnoor.droiddesk.runtime.AndroidAppBridge
 import com.orailnoor.droiddesk.runtime.AppUpdater
 import com.orailnoor.droiddesk.runtime.DesktopIntegration
-import com.orailnoor.droiddesk.runtime.AndroidRuntimeCapabilitySource
-import com.orailnoor.droiddesk.runtime.RuntimeCapabilityProbe
+import com.orailnoor.droiddesk.runtime.RuntimeCapabilityCache
+import com.orailnoor.droiddesk.runtime.RuntimeCapabilityRegistry
 import com.orailnoor.droiddesk.runtime.EnvironmentKind
 import com.orailnoor.droiddesk.runtime.ExecutionRequest
 import com.orailnoor.droiddesk.runtime.LinuxEnvironmentManager
@@ -61,8 +61,7 @@ class MainActivity : FlutterActivity() {
     private lateinit var linuxRuntime: LinuxRuntime
     private lateinit var chrootRuntime: ChrootRuntime
     private lateinit var desktopIntegration: DesktopIntegration
-    private lateinit var runtimeCapabilityProbe: RuntimeCapabilityProbe
-    private lateinit var runtimeCapabilityCache: com.orailnoor.droiddesk.runtime.RuntimeCapabilityCache
+    private lateinit var runtimeCapabilityCache: RuntimeCapabilityCache
     private lateinit var environmentManager: LinuxEnvironmentManager
     private var displayStateSubscription: (() -> Unit)? = null
 
@@ -106,12 +105,10 @@ class MainActivity : FlutterActivity() {
         }
         linuxRuntime = LinuxRuntime(applicationContext)
         chrootRuntime = ChrootRuntime(applicationContext)
-        runtimeCapabilityProbe = RuntimeCapabilityProbe(
-            AndroidRuntimeCapabilitySource(applicationContext, linuxRuntime, chrootRuntime),
-        )
-        runtimeCapabilityCache = com.orailnoor.droiddesk.runtime.RuntimeCapabilityCache(
-            runtimeCapabilityProbe::probe,
-            runtimeCapabilityProbe.pending(),
+        runtimeCapabilityCache = RuntimeCapabilityRegistry.get(
+            applicationContext,
+            linuxRuntime,
+            chrootRuntime,
         )
         environmentManager = createLinuxEnvironmentManager(
             applicationContext,

@@ -36,7 +36,7 @@ class RuntimeCapabilityProbe(
     fun pending(): RuntimeCapabilities {
         val pending = CapabilityEvidence(
             EvidenceState.PRESENT_UNVERIFIED,
-            "Capability probe is pending",
+            PENDING_REASON,
         )
         val avfPresent = source.hasAvfFeature()
         val avfFeature = if (avfPresent) {
@@ -230,6 +230,7 @@ class RuntimeCapabilityProbe(
         const val LOCAL_LINUX_TARGET_SDK = 28
         const val DEFAULT_TIMEOUT_MILLIS = 1_000L
         const val DEFAULT_REQUIRED_BYTES = 2L * 1024L * 1024L * 1024L
+        const val PENDING_REASON = "Capability probe is pending"
     }
 }
 
@@ -269,6 +270,27 @@ internal class RuntimeCapabilityCache(
             }
         }
     }
+}
+
+internal object RuntimeCapabilityRegistry {
+    @Volatile private var cache: RuntimeCapabilityCache? = null
+
+    fun get(
+        context: Context,
+        linuxRuntime: LinuxRuntime,
+        chrootRuntime: ChrootRuntime,
+    ): RuntimeCapabilityCache =
+        cache ?: synchronized(this) {
+            cache ?: RuntimeCapabilityProbe(
+                AndroidRuntimeCapabilitySource(
+                    context.applicationContext,
+                    linuxRuntime,
+                    chrootRuntime,
+                ),
+            ).let { probe ->
+                RuntimeCapabilityCache(probe::probe, probe.pending())
+            }.also { cache = it }
+        }
 }
 
 class AndroidRuntimeCapabilitySource(

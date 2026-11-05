@@ -176,12 +176,10 @@ internal fun createLinuxEnvironmentManager(
     chrootRuntime: ChrootRuntime = ChrootRuntime(context.applicationContext, linuxRuntime),
     capabilities: (() -> RuntimeCapabilities)? = null,
 ): LinuxEnvironmentManager {
-    val probe = RuntimeCapabilityProbe(
-        AndroidRuntimeCapabilitySource(context.applicationContext, linuxRuntime, chrootRuntime),
-    )
-    val capabilityProvider = capabilities ?: RuntimeCapabilityCache(
-        probe::probe,
-        probe.pending(),
+    val capabilityProvider = capabilities ?: RuntimeCapabilityRegistry.get(
+        context.applicationContext,
+        linuxRuntime,
+        chrootRuntime,
     )::current
     return LinuxEnvironmentManager(
         adapters = listOf(
@@ -200,18 +198,32 @@ internal fun createLinuxEnvironmentManager(
         capabilities = capabilityProvider,
         selectionStore = SharedPreferencesEnvironmentSelectionStore(context.applicationContext),
         legacySelection = { detected ->
-            when {
-                detected.chroot.state == EvidenceState.SUPPORTED_AND_PROBED &&
-                    !detected.x11.blocksProvisioning &&
-                    chrootRuntime.isRootfsReady() &&
-                    chrootRuntime.isDesktopInstalled() ->
-                    EnvironmentKind.CHROOT_UBUNTU
-                linuxRuntime.isBootstrapped() && linuxRuntime.getInstalledDE().isNotEmpty() ->
-                    EnvironmentKind.TERMUX_NATIVE
-                else -> null
-            }
+            legacyEnvironmentSelection(
+                detected = detected,
+                chrootInstalled =
+                    chrootRuntime.isRootfsReady() && chrootRuntime.isDesktopInstalled(),
+                nativeInstalled =
+                    linuxRuntime.isBootstrapped() && linuxRuntime.getInstalledDE().isNotEmpty(),
+            )
         },
     )
+}
+
+internal fun legacyEnvironmentSelection(
+    detected: RuntimeCapabilities,
+    chrootInstalled: Boolean,
+    nativeInstalled: Boolean,
+): EnvironmentKind? = when {
+    chrootInstalled &&
+        detected.chroot.state == EvidenceState.SUPPORTED_AND_PROBED &&
+        !detected.x11.blocksProvisioning ->
+        EnvironmentKind.CHROOT_UBUNTU
+    chrootInstalled &&
+        detected.chroot.state == EvidenceState.PRESENT_UNVERIFIED &&
+        detected.chroot.reason == RuntimeCapabilityProbe.PENDING_REASON ->
+        null
+    nativeInstalled -> EnvironmentKind.TERMUX_NATIVE
+    else -> null
 }
 
 internal object ProotDebianSessionRegistry {

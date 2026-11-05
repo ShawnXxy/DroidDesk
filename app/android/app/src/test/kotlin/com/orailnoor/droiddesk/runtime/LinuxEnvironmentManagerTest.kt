@@ -210,6 +210,81 @@ class LinuxEnvironmentManagerTest {
         assertEquals(EnvironmentKind.TERMUX_NATIVE.wireValue, selection.value)
     }
 
+    @Test
+    fun pendingChrootProbeDefersMigrationWhenBothLegacyRuntimesExist() {
+        val pending = capabilities().copy(
+            chroot = CapabilityEvidence(
+                EvidenceState.PRESENT_UNVERIFIED,
+                RuntimeCapabilityProbe.PENDING_REASON,
+            ),
+        )
+
+        assertEquals(
+            null,
+            legacyEnvironmentSelection(
+                detected = pending,
+                chrootInstalled = true,
+                nativeInstalled = true,
+            ),
+        )
+    }
+
+    @Test
+    fun deferredLegacyMigrationCanSelectChrootAfterProbeCompletes() {
+        val selection = FakeSelectionStore()
+        var detected = capabilities().copy(
+            chroot = CapabilityEvidence(
+                EvidenceState.PRESENT_UNVERIFIED,
+                RuntimeCapabilityProbe.PENDING_REASON,
+            ),
+        )
+        val manager = LinuxEnvironmentManager(
+            adapters = listOf(
+                FakeAdapter(EnvironmentKind.TERMUX_NATIVE),
+                FakeAdapter(EnvironmentKind.PROOT_DEBIAN),
+                FakeAdapter(EnvironmentKind.CHROOT_UBUNTU),
+            ),
+            capabilities = { detected },
+            selectionStore = selection,
+            legacySelection = {
+                legacyEnvironmentSelection(
+                    detected = it,
+                    chrootInstalled = true,
+                    nativeInstalled = true,
+                )
+            },
+        )
+
+        assertEquals(EnvironmentKind.PROOT_DEBIAN, manager.recommendedKind())
+        assertEquals(null, selection.value)
+
+        detected = detected.copy(
+            chroot = CapabilityEvidence(EvidenceState.SUPPORTED_AND_PROBED),
+        )
+
+        assertEquals(EnvironmentKind.CHROOT_UBUNTU, manager.recommendedKind())
+        assertEquals(EnvironmentKind.CHROOT_UBUNTU.wireValue, selection.value)
+    }
+
+    @Test
+    fun completedChrootFailureFallsBackToLegacyNative() {
+        val failed = capabilities().copy(
+            chroot = CapabilityEvidence(
+                EvidenceState.FAILED_SELF_TEST,
+                "Rooted chroot functional probe exited 1",
+            ),
+        )
+
+        assertEquals(
+            EnvironmentKind.TERMUX_NATIVE,
+            legacyEnvironmentSelection(
+                detected = failed,
+                chrootInstalled = true,
+                nativeInstalled = true,
+            ),
+        )
+    }
+
     private fun manager(
         adapters: List<EnvironmentAdapter>,
         capabilities: RuntimeCapabilities = capabilities(),
