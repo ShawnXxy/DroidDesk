@@ -7,6 +7,7 @@ import android.app.ActivityManager
 import android.app.Activity
 import android.content.ActivityNotFoundException
 import android.content.res.Configuration
+import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
@@ -17,6 +18,31 @@ import com.orailnoor.droiddesk.runtime.LinuxRuntime
 import com.orailnoor.droiddesk.runtime.ProotDebianSessionRegistry
 import com.orailnoor.droiddesk.service.DroidDeskService
 import java.lang.ref.WeakReference
+
+internal fun <T> activityDisplayForSdk(
+    sdkInt: Int,
+    api30Display: () -> T?,
+    decorDisplay: () -> T?,
+): T? =
+    if (sdkInt >= Build.VERSION_CODES.R) {
+        api30Display() ?: decorDisplay()
+    } else {
+        decorDisplay()
+    }
+
+internal fun resolveLaunchDisplay(
+    request: DesktopDisplay,
+    repositoryDisplay: DesktopDisplay?,
+    boundDisplay: DesktopDisplay?,
+): DesktopDisplay =
+    repositoryDisplay?.takeIf {
+        it.id == request.id && it.key == request.key
+    } ?: boundDisplay?.takeIf {
+        it.id == request.id && it.key == request.key
+    } ?: throw DesktopDisplayException(
+        "DISPLAY_UNAVAILABLE",
+        "The selected display is no longer launchable",
+    )
 
 class DesktopDisplayLauncher {
     companion object {
@@ -61,10 +87,13 @@ internal class AndroidDesktopDisplayHost(
         if (localDesktop?.get() === activity) localDesktop = null
     }
 
-    @Suppress("DEPRECATION")
     override fun currentDisplay(): DesktopDisplay? =
         boundActivity?.get()?.takeUnless { it.isDestroyed || it.isFinishing }?.let { activity ->
-            val display = activity.display ?: activity.window.decorView.display ?: return@let null
+            val display = activityDisplayForSdk(
+                Build.VERSION.SDK_INT,
+                api30Display = { activity.display },
+                decorDisplay = { activity.window.decorView.display },
+            ) ?: return@let null
             DesktopDisplay(
                 id = display.displayId,
                 key = "bound:${display.displayId}",
@@ -93,8 +122,10 @@ internal class AndroidDesktopDisplayHost(
     override fun launch(request: DesktopLaunchRequest) {
         val activity = boundActivity?.get()?.takeUnless { it.isDestroyed || it.isFinishing }
         val boundDisplay = currentDisplay()
-        val current = boundDisplay?.takeIf { it.id == request.display.id }
-            ?: repository.requireDisplay(request.display.key)
+        val repositoryDisplay = repository.snapshot().firstOrNull {
+            it.key == request.display.key
+        }
+        val current = resolveLaunchDisplay(request.display, repositoryDisplay, boundDisplay)
         val currentActivityDisplay = boundDisplay?.id
         if (current.id != request.display.id || (!current.eligible && current.id != currentActivityDisplay)) {
             throw DesktopDisplayException("DISPLAY_UNAVAILABLE", "The selected display is no longer launchable")
