@@ -60,6 +60,64 @@ class ProotDebianSessionTest {
     }
 
     @Test
+    fun failedProfileCleansUpThePreparedHostSession() {
+        val host = FakeSessionHost().apply {
+            profileFailure = IllegalStateException("profile failed")
+        }
+        val session = ProotDebianSessionController(host, FakeProcessRunner())
+
+        val result = session.start(DisplayProfilePolicy.phoneDefaultProfile())
+
+        assertTrue(result.isFailure)
+        assertEquals("profile failed", result.exceptionOrNull()!!.message)
+        assertEquals(listOf("prepare", "profile", "stop"), host.calls)
+    }
+
+    @Test
+    fun failedHostPreparationRunsIdempotentCleanup() {
+        val host = FakeSessionHost().apply {
+            prepareFailure = IllegalStateException("prepare failed")
+        }
+        val session = ProotDebianSessionController(host, FakeProcessRunner())
+
+        val result = session.start(DisplayProfilePolicy.phoneDefaultProfile())
+
+        assertTrue(result.isFailure)
+        assertEquals("prepare failed", result.exceptionOrNull()!!.message)
+        assertEquals(listOf("prepare", "stop"), host.calls)
+    }
+
+    @Test
+    fun failedProcessLaunchCleansUpThePreparedHostSession() {
+        val host = FakeSessionHost()
+        val runner = FakeProcessRunner().apply {
+            startFailure = IllegalStateException("process launch failed")
+        }
+        val session = ProotDebianSessionController(host, runner)
+
+        val result = session.start(DisplayProfilePolicy.phoneDefaultProfile())
+
+        assertTrue(result.isFailure)
+        assertEquals("process launch failed", result.exceptionOrNull()!!.message)
+        assertEquals(listOf("prepare", "profile", "stop"), host.calls)
+    }
+
+    @Test
+    fun failedCleanupDoesNotReplaceTheDesktopStartupError() {
+        val host = FakeSessionHost().apply {
+            profileFailure = IllegalStateException("profile failed")
+            stopFailure = IllegalStateException("cleanup failed")
+        }
+        val session = ProotDebianSessionController(host, FakeProcessRunner())
+
+        val result = session.start(DisplayProfilePolicy.phoneDefaultProfile())
+
+        val error = result.exceptionOrNull()!!
+        assertEquals("profile failed", error.message)
+        assertEquals(listOf("cleanup failed"), error.suppressed.map { it.message })
+    }
+
+    @Test
     fun stopTerminatesDescendantsBeforeRootProcess() {
         val runner = FakeProcessRunner(descendants = listOf(11, 12))
         val host = FakeSessionHost()
@@ -144,18 +202,21 @@ class ProotDebianSessionTest {
         var desktopProcessesAlive = true
         var profileHome: String? = null
         var policy: ProotDesktopPolicy? = null
+        var prepareFailure: Throwable? = null
+        var profileFailure: Throwable? = null
+        var stopFailure: Throwable? = null
         val calls = mutableListOf<String>()
 
         override fun isDesktopReady(): Boolean = ready
 
         override fun prepareHostSession(): Result<Unit> {
             calls += "prepare"
-            return Result.success(Unit)
+            return prepareFailure?.let(Result.Companion::failure) ?: Result.success(Unit)
         }
 
         override fun stopHostSession(): Result<Unit> {
             calls += "stop"
-            return Result.success(Unit)
+            return stopFailure?.let(Result.Companion::failure) ?: Result.success(Unit)
         }
 
         override fun launchCommand(profile: DisplayProfile): List<String> = listOf(
@@ -183,7 +244,7 @@ class ProotDebianSessionTest {
             calls += "profile"
             profileHome = guestHome
             this.policy = policy
-            return Result.success(Unit)
+            return profileFailure?.let(Result.Companion::failure) ?: Result.success(Unit)
         }
 
         override fun waitForDesktopReady(timeoutMs: Long): Boolean = desktopProcessesAlive
@@ -198,11 +259,13 @@ class ProotDebianSessionTest {
         val root = FakeProcess(10)
         var exit: EnvironmentExitMetadata? = null
         var startedCommand: List<String> = emptyList()
+        var startFailure: Throwable? = null
 
         override fun start(
             command: List<String>,
             onOutput: (String) -> Unit,
         ): EnvironmentProcess {
+            startFailure?.let { throw it }
             root.alive = true
             startedCommand = command
             calls += "start:${command.joinToString(" ")}"

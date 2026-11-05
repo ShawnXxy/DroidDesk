@@ -62,10 +62,12 @@ class ProotDebianSessionController(
         if (!host.isDesktopReady()) {
             return Result.failure(IllegalStateException("Debian PRoot desktop is not ready"))
         }
+        var hostPreparationAttempted = false
         return runCatching {
             if (existing != null) {
                 stop().getOrThrow()
             }
+            hostPreparationAttempted = true
             host.prepareHostSession().getOrThrow()
             host.applyProfile(
                 profile,
@@ -78,6 +80,15 @@ class ProotDebianSessionController(
             desktopConfirmed = false
             sessionFailed = false
             lastError = null
+        }.onFailure { startupFailure ->
+            if (hostPreparationAttempted) {
+                val cleanupFailure = runCatching {
+                    host.stopHostSession().getOrThrow()
+                }.exceptionOrNull()
+                if (cleanupFailure != null && cleanupFailure !== startupFailure) {
+                    startupFailure.addSuppressed(cleanupFailure)
+                }
+            }
         }
     }
 
