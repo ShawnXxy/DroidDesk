@@ -30,6 +30,8 @@ data class ProotDesktopPolicy(
 
 interface ProotDesktopSessionHost {
     fun isDesktopReady(): Boolean
+    fun prepareHostSession(): Result<Unit> = Result.success(Unit)
+    fun stopHostSession(): Result<Unit> = Result.success(Unit)
     fun launchCommand(profile: com.orailnoor.droiddesk.display.DisplayProfile): List<String>
     fun applyProfile(
         profile: com.orailnoor.droiddesk.display.DisplayProfile,
@@ -61,6 +63,10 @@ class ProotDebianSessionController(
             return Result.failure(IllegalStateException("Debian PRoot desktop is not ready"))
         }
         return runCatching {
+            if (existing != null) {
+                stop().getOrThrow()
+            }
+            host.prepareHostSession().getOrThrow()
             host.applyProfile(
                 profile,
                 guestHome = "/home/droiddesk",
@@ -77,7 +83,8 @@ class ProotDebianSessionController(
 
     fun isRunning(): Boolean {
         val process = rootProcess ?: return false
-        if (!process.isAlive()) {
+        val rootAlive = process.isAlive()
+        if (!rootAlive) {
             val exit = runner.exitMetadata(process)
             lastError = buildString {
                 append(exit?.reason ?: "PROCESS_EXITED")
@@ -88,7 +95,8 @@ class ProotDebianSessionController(
             sessionFailed = true
             return false
         }
-        if (desktopConfirmed && !host.desktopProcessesAlive()) {
+        val desktopAlive = !desktopConfirmed || host.desktopProcessesAlive()
+        if (!desktopAlive) {
             lastError = "Required XFCE desktop process exited"
             sessionFailed = true
             return false
@@ -116,12 +124,15 @@ class ProotDebianSessionController(
     )
 
     fun stop(): Result<Unit> = runCatching {
-        val process = rootProcess ?: return Result.success(Unit)
-        val descendants = runner.descendants(process).asReversed()
-        descendants.forEach { runner.terminate(it, force = false) }
-        runner.terminate(process.pid, force = false)
-        descendants.forEach { runner.terminate(it, force = true) }
-        runner.terminate(process.pid, force = true)
+        val process = rootProcess
+        if (process != null) {
+            val descendants = runner.descendants(process).asReversed()
+            descendants.forEach { runner.terminate(it, force = false) }
+            runner.terminate(process.pid, force = false)
+            descendants.forEach { runner.terminate(it, force = true) }
+            runner.terminate(process.pid, force = true)
+        }
+        host.stopHostSession().getOrThrow()
         rootProcess = null
         desktopConfirmed = false
         sessionFailed = false

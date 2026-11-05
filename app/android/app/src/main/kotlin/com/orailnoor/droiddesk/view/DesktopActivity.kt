@@ -39,7 +39,6 @@ import com.termux.x11.MainActivity as TermuxMainActivity
 import com.termux.x11.LorieView
 import com.orailnoor.droiddesk.runtime.LinuxRuntime
 import com.orailnoor.droiddesk.runtime.ChrootRuntime
-import com.orailnoor.droiddesk.runtime.ClipboardSync
 import com.orailnoor.droiddesk.runtime.EnvironmentKind
 import com.orailnoor.droiddesk.runtime.StartRequest
 import com.orailnoor.droiddesk.runtime.createLinuxEnvironmentManager
@@ -66,7 +65,6 @@ class DesktopActivity : Activity() {
     private lateinit var linuxRuntime: LinuxRuntime
     private lateinit var chrootRuntime: ChrootRuntime
     private lateinit var environmentManager: com.orailnoor.droiddesk.runtime.LinuxEnvironmentManager
-    private var clipboardSync: ClipboardSync? = null
     private lateinit var placeholder: FrameLayout
     private var x11ServiceClient: X11ServiceClient? = null
     private var inputController: X11InputController? = null
@@ -193,9 +191,7 @@ class DesktopActivity : Activity() {
         sessionMode = intent.getStringExtra("mode") ?: displayCoordinator.sessionMode
         desktopEnv = intent.getStringExtra("de") ?: displayCoordinator.desktopEnv
         if (sessionMode == "proot") {
-            window.attributes = window.attributes.apply {
-                preferredRefreshRate = 60f
-            }
+            applyProotRefreshPolicy()
         }
         estimatedLoadingSeconds = if (shouldStartSession) 30 else 10
 
@@ -214,15 +210,31 @@ class DesktopActivity : Activity() {
         setupLorieView()
     }
 
+    private fun applyProotRefreshPolicy() {
+        val display = windowManager.defaultDisplay
+        val currentMode = display.mode
+        val sixtyHertzMode = display.supportedModes
+            .filter { kotlin.math.abs(it.refreshRate - 60f) < 0.5f }
+            .minByOrNull { mode ->
+                kotlin.math.abs(mode.physicalWidth - currentMode.physicalWidth) +
+                    kotlin.math.abs(mode.physicalHeight - currentMode.physicalHeight)
+            }
+        window.attributes = window.attributes.apply {
+            preferredRefreshRate = 60f
+            sixtyHertzMode?.let { preferredDisplayModeId = it.modeId }
+        }
+        Log.i(
+            TAG,
+            "PRoot refresh policy requested 60 Hz" +
+                sixtyHertzMode?.let { " via display mode ${it.modeId}" }.orEmpty(),
+        )
+    }
+
     override fun onWindowFocusChanged(hasFocus: Boolean) {
         super.onWindowFocusChanged(hasFocus)
-        if (!hasFocus) {
-            clipboardSync?.stop()
-            return
-        }
+        if (!hasFocus) return
         if (isCurrentRenderer()) {
             enableImmersiveMode()
-            startClipboardSync()
             inputController?.reacquireFocus()
         }
     }
@@ -240,9 +252,7 @@ class DesktopActivity : Activity() {
         enableImmersiveMode()
         scheduleGeometry()
         // Restored windows can retain focus without another focus callback.
-        if (hasWindowFocus() && isCurrentRenderer()) {
-            startClipboardSync()
-        }
+        if (hasWindowFocus() && isCurrentRenderer()) inputController?.reacquireFocus()
     }
 
     override fun onConfigurationChanged(newConfig: Configuration) {
@@ -250,20 +260,7 @@ class DesktopActivity : Activity() {
         scheduleGeometry()
     }
 
-    private fun startClipboardSync() {
-        if (clipboardSync == null) {
-            val kind = EnvironmentKind.fromSessionMode(sessionMode)
-            clipboardSync = ClipboardSync(
-                this,
-                { environmentManager.readClipboard(kind) },
-                { value -> environmentManager.writeClipboard(value, kind) },
-            )
-        }
-        clipboardSync?.start()
-    }
-
     override fun onPause() {
-        clipboardSync?.stop()
         super.onPause()
     }
 
@@ -403,6 +400,10 @@ class DesktopActivity : Activity() {
     private fun attachDesktopInput() {
         val lease = rendererLease ?: return
         if (!isCurrentRenderer()) return
+        val preferences = TermuxMainActivity.getPrefs().apply {
+            pointerCapture.put(lease.displayId != android.view.Display.DEFAULT_DISPLAY)
+        }
+        lorieView?.reloadPreferences(preferences)
         applyWindowGeometry()
         if (inputController == null) {
             val settings = currentProfile?.settings
@@ -428,6 +429,7 @@ class DesktopActivity : Activity() {
         }
         addDesktopControls()
         lorieView?.requestFocus()
+        inputController?.reacquireFocus()
         applyWindowGeometry()
         waitForDesktopAndReveal()
     }
@@ -517,7 +519,9 @@ class DesktopActivity : Activity() {
         if (inputController != null && LorieView.connected()) {
             if (displayCoordinator.consumeSessionStart(lease)) {
                 shouldStartSession = true
-                startDesktopSessionIfRequested()
+                view.postDelayed({
+                    if (isCurrentRenderer()) startDesktopSessionIfRequested()
+                }, 250)
             }
             displayCoordinator.onAttached(lease, displayRequestId, content)
         }
@@ -1163,8 +1167,6 @@ class DesktopActivity : Activity() {
         geometryListener = null
         if (::placeholder.isInitialized) placeholder.setOnApplyWindowInsetsListener(null)
         collapsedFadeHandler.removeCallbacks(fadeCollapsedControl)
-        clipboardSync?.stop()
-        clipboardSync = null
         extraKeysBar?.releaseAll()
         extraKeysBar = null
         val lease = rendererLease

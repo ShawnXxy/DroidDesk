@@ -83,6 +83,26 @@ class LinuxEnvironmentManagerTest {
     }
 
     @Test
+    fun stop_cleans_selected_adapter_after_its_root_process_has_exited() {
+        val calls = mutableListOf<String>()
+        val proot = FakeAdapter(EnvironmentKind.PROOT_DEBIAN, calls).apply {
+            currentStatus = status(kind, installed = true, running = false)
+        }
+        val manager = manager(
+            adapters = listOf(proot),
+            selection = FakeSelectionStore(EnvironmentKind.PROOT_DEBIAN.wireValue),
+        )
+
+        val result = manager.stop()
+
+        assertTrue(result.isSuccess)
+        assertEquals(
+            listOf("stop:PROOT_DEBIAN"),
+            calls,
+        )
+    }
+
+    @Test
     fun unknown_persisted_kind_does_not_fall_back_silently() {
         val manager = manager(
             adapters = listOf(FakeAdapter(EnvironmentKind.TERMUX_NATIVE)),
@@ -120,6 +140,24 @@ class LinuxEnvironmentManagerTest {
         assertEquals(listOf(0.5 to "Downloading Debian"), progress)
         assertEquals(listOf("network failed\n"), logs)
         assertEquals(null, selection.value)
+    }
+
+    @Test
+    fun provision_returns_failure_when_requested_adapter_is_unavailable() {
+        val manager = manager(
+            adapters = listOf(FakeAdapter(EnvironmentKind.TERMUX_NATIVE)),
+        )
+
+        val result = manager.provision(
+            ProvisionRequest(EnvironmentKind.PROOT_DEBIAN, "xfce4"),
+        )
+
+        assertTrue(result.isFailure)
+        assertTrue(
+            result.exceptionOrNull()!!.message!!.contains(
+                "Linux environment adapter is unavailable: prootDebian",
+            ),
+        )
     }
 
     @Test

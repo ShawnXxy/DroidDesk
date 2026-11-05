@@ -60,6 +60,16 @@ class EnvironmentSelectionScreen extends StatelessWidget {
                   text: blockingReason,
                 ),
               ],
+              if (state.environmentCapabilityDiagnostics.isNotEmpty) ...[
+                const SizedBox(height: 14),
+                _Notice(
+                  icon: Icons.fact_check_outlined,
+                  color: DroidTheme.textMuted,
+                  text:
+                      'Capability checks:\n'
+                      '${state.environmentCapabilityDiagnostics.map((item) => '• $item').join('\n')}',
+                ),
+              ],
               if (state.showEnvironmentStorageWarning) ...[
                 const SizedBox(height: 14),
                 _Notice(

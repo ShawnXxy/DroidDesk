@@ -182,7 +182,7 @@ class RuntimeCapabilityProbe(
         const val REQUIRED_ABI = "arm64-v8a"
         const val LOCAL_LINUX_TARGET_SDK = 28
         const val DEFAULT_TIMEOUT_MILLIS = 1_000L
-        const val DEFAULT_REQUIRED_BYTES = 6L * 1024L * 1024L * 1024L
+        const val DEFAULT_REQUIRED_BYTES = 2L * 1024L * 1024L * 1024L
     }
 }
 

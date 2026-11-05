@@ -8,6 +8,60 @@ import java.io.FileOutputStream
 import java.security.MessageDigest
 import java.util.Properties
 
+internal fun debianDesktopInstallCommand(packages: List<String>): String {
+    require(packages.all { it.matches(Regex("[a-z0-9][a-z0-9+.-]*")) })
+    val packageList = packages.joinToString(" ")
+    return """
+        set -e
+        export DEBIAN_FRONTEND=noninteractive
+        backup_dir=/etc/apt/droiddesk-source-backup
+        mkdir -p "${'$'}backup_dir"
+        if [ -f /etc/apt/sources.list ]; then
+            cp -f /etc/apt/sources.list "${'$'}backup_dir/sources.list"
+            sed -i \
+                -e 's|http://deb.debian.org|http://mirrors.ustc.edu.cn|g' \
+                -e 's|https://deb.debian.org|https://mirrors.ustc.edu.cn|g' \
+                /etc/apt/sources.list
+        fi
+        if [ -f /etc/apt/sources.list.d/debian.sources ]; then
+            cp -f /etc/apt/sources.list.d/debian.sources "${'$'}backup_dir/debian.sources"
+            sed -i \
+                -e 's|http://deb.debian.org|http://mirrors.ustc.edu.cn|g' \
+                -e 's|https://deb.debian.org|https://mirrors.ustc.edu.cn|g' \
+                /etc/apt/sources.list.d/debian.sources
+        fi
+        if ! apt-get update; then
+            [ ! -f "${'$'}backup_dir/sources.list" ] ||
+                cp -f "${'$'}backup_dir/sources.list" /etc/apt/sources.list
+            [ ! -f "${'$'}backup_dir/debian.sources" ] ||
+                cp -f "${'$'}backup_dir/debian.sources" /etc/apt/sources.list.d/debian.sources
+            apt-get update
+        fi
+        apt-get install -y --no-install-recommends $packageList
+    """.trimIndent()
+}
+
+internal const val PROOT_SESSION_BUS_FILE = "/tmp/runtime-droiddesk/dbus-address"
+
+internal fun prootSessionLauncherScript(): String = """
+    #!/bin/sh
+    set -eu
+    install -d -m 0700 /tmp/runtime-droiddesk
+    rm -f $PROOT_SESSION_BUS_FILE
+    exec dbus-run-session -- sh -c '
+        umask 077
+        printf "%s\n" "${'$'}DBUS_SESSION_BUS_ADDRESS" > $PROOT_SESSION_BUS_FILE
+        exec startxfce4
+    '
+""".trimIndent() + "\n"
+
+internal fun prootBusAwareCommand(command: String): String = """
+    if [ -r $PROOT_SESSION_BUS_FILE ]; then
+        export DBUS_SESSION_BUS_ADDRESS="${'$'}(cat $PROOT_SESSION_BUS_FILE)"
+    fi
+    $command
+""".trimIndent()
+
 interface ProotDebianHost : ProotProvisioningHost, ProotDesktopSessionHost {
     fun readReadyMarker(): ProotReadyMarker?
     fun isRunning(): Boolean
@@ -167,6 +221,18 @@ internal class AndroidProotDebianHost(
         onLog: (String) -> Unit,
     ): Result<ProotToolchainVersions> = linuxRuntime.ensureProotToolchain(onProgress, onLog)
 
+    override fun prepareHostSession(): Result<Unit> = linuxRuntime.startPulseAudio()
+
+    override fun stopHostSession(): Result<Unit> = runCatching {
+        linuxRuntime.stopHostProcess("dbus-daemon").getOrThrow()
+        File(tmpDir, "runtime-droiddesk/dbus-address").let { address ->
+            check(!address.exists() || address.delete()) {
+                "Could not remove the retired desktop bus address"
+            }
+        }
+        linuxRuntime.stopPulseAudio().getOrThrow()
+    }
+
     override fun containerState(): ProotContainerState = when {
         readReadyMarker() != null && containerRootfs(ProotDebianProvisioner.ACTIVE_CONTAINER).isDirectory ->
             ProotContainerState.ACTIVE_READY
@@ -216,13 +282,11 @@ internal class AndroidProotDebianHost(
         container: String,
         packages: List<String>,
         onLog: (String) -> Unit,
-    ): Result<Unit> {
-        require(packages.all { it.matches(Regex("[a-z0-9][a-z0-9+.-]*")) })
-        val command = "export DEBIAN_FRONTEND=noninteractive; " +
-            "apt-get update && apt-get install -y --no-install-recommends " +
-            packages.joinToString(" ")
-        return runRoot(container, command, onLog)
-    }
+    ): Result<Unit> = runRoot(
+        container,
+        debianDesktopInstallCommand(packages),
+        onLog,
+    )
 
     override fun configureDesktopUser(
         container: String,
@@ -367,12 +431,7 @@ internal class AndroidProotDebianHost(
         val binds = sharedFolderBinds()
         return commandBuilder.login(
             container = ProotDebianProvisioner.ACTIVE_CONTAINER,
-            arguments = listOf(
-                "bash",
-                "-lc",
-                "install -d -m 0700 /tmp/runtime-droiddesk && " +
-                    "exec dbus-run-session -- startxfce4",
-            ),
+            arguments = listOf("/usr/local/bin/droiddesk-start-xfce"),
             environment = mapOf(
                 "DISPLAY" to ":0",
                 "PULSE_SERVER" to "127.0.0.1",
@@ -391,6 +450,11 @@ internal class AndroidProotDebianHost(
     ): Result<Unit> = runCatching {
         val rootfs = rootfsPath()
         val home = File(rootfs, guestHome.removePrefix("/"))
+        File(rootfs, "usr/local/bin/droiddesk-start-xfce").apply {
+            parentFile?.mkdirs()
+            writeText(prootSessionLauncherScript())
+            setExecutable(true, false)
+        }
         val wallpaper = File(home, ".local/share/backgrounds/droiddesk-sunset-wave.jpg")
         check(
             XfceMobileProfile.install(
@@ -428,13 +492,8 @@ internal class AndroidProotDebianHost(
         return false
     }
 
-    override fun desktopProcessesAlive(): Boolean {
-        val result = executeActive(
-            "root",
-            "pgrep -x xfce4-session >/dev/null && pgrep -x xfce4-panel >/dev/null",
-        )
-        return result.exitCode == 0
-    }
+    override fun desktopProcessesAlive(): Boolean =
+        linuxRuntime.hostProcessesAlive(listOf("xfce4-session", "xfce4-panel"))
 
     private fun executeContainer(
         container: String,
@@ -445,7 +504,7 @@ internal class AndroidProotDebianHost(
         val binds = sharedFolderBinds()
         val args = commandBuilder.login(
             container = container,
-            arguments = listOf("bash", "-lc", command),
+            arguments = listOf("bash", "-lc", prootBusAwareCommand(command)),
             environment = mapOf(
                 "DISPLAY" to ":0",
                 "PULSE_SERVER" to "127.0.0.1",

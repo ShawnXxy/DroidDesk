@@ -149,29 +149,57 @@ class ProotDebianProvisioner(
         onProgress: (Double, String) -> Unit,
         onLog: (String) -> Unit,
     ): String {
-        onProgress(0.15, "Downloading Debian ARM64 image")
-        host.installContainer(IMAGE_REFERENCE, STAGING_CONTAINER, onLog).getOrThrow()
-        return STAGING_CONTAINER
+        var lastFailure: Throwable? = null
+        IMAGE_REFERENCES.forEachIndexed { index, imageReference ->
+            if (index > 0) {
+                onLog("\nRetrying Debian download through a regional mirror...\n")
+            }
+            onProgress(
+                0.15,
+                if (index == 0) {
+                    "Downloading Debian ARM64 image"
+                } else {
+                    "Retrying Debian download through a regional mirror"
+                },
+            )
+            val installed = host.installContainer(imageReference, STAGING_CONTAINER, onLog)
+            if (installed.isSuccess) return STAGING_CONTAINER
+
+            lastFailure = installed.exceptionOrNull()
+            onLog(
+                "\nDebian image source failed: $imageReference\n" +
+                    "${lastFailure?.message.orEmpty()}\n",
+            )
+            host.discardContainer(STAGING_CONTAINER).getOrThrow()
+        }
+        throw lastFailure ?: IllegalStateException("No Debian image source was available")
     }
 
     companion object {
         const val READY_SCHEMA = 1
-        const val PACKAGE_SET_VERSION = 1
+        const val PACKAGE_SET_VERSION = 5
+        private const val IMAGE_DIGEST =
+            "sha256:99c0b25c46d0214d5a2091092e7908907dcaecd6a962cde0ac700acee222b6f3"
         const val IMAGE_REFERENCE =
-            "debian@sha256:99c0b25c46d0214d5a2091092e7908907dcaecd6a962cde0ac700acee222b6f3"
+            "debian@$IMAGE_DIGEST"
+        const val IMAGE_MIRROR_REFERENCE =
+            "public.ecr.aws/docker/library/debian@$IMAGE_DIGEST"
+        val IMAGE_REFERENCES = listOf(IMAGE_REFERENCE, IMAGE_MIRROR_REFERENCE)
         const val ACTIVE_CONTAINER = "droiddesk-debian"
         const val STAGING_CONTAINER = "droiddesk-debian-staging"
         const val LEGACY_CONTAINER = "debian"
-        const val DEFAULT_REQUIRED_BYTES = 6L * 1024L * 1024L * 1024L
+        const val DEFAULT_REQUIRED_BYTES = 2L * 1024L * 1024L * 1024L
 
         val DESKTOP_PACKAGES = listOf(
             "xfce4",
             "xfce4-terminal",
             "xfce4-whiskermenu-plugin",
+            "devilspie2",
             "thunar",
             "mousepad",
             "dbus-x11",
             "xclip",
+            "pulseaudio-utils",
             "sudo",
             "ca-certificates",
             "curl",
@@ -182,7 +210,7 @@ class ProotDebianProvisioner(
             "python3",
             "python3-pip",
             "fonts-noto-core",
-            "papirus-icon-theme",
+            "adwaita-icon-theme",
         )
     }
 }

@@ -9,6 +9,27 @@ import java.nio.file.Files
 class ProotDebianEnvironmentTest {
 
     @Test
+    fun desktopInstallUsesFastMirrorWithOfficialFallback() {
+        val command = debianDesktopInstallCommand(listOf("xfce4", "curl"))
+
+        assertTrue(command.contains("http://mirrors.ustc.edu.cn"))
+        assertTrue(command.contains("if ! apt-get update"))
+        assertTrue(command.contains("cp -f \"${'$'}backup_dir/debian.sources\""))
+        assertTrue(command.contains("apt-get install -y --no-install-recommends xfce4 curl"))
+    }
+
+    @Test
+    fun sessionLauncherSharesItsDbusAddressWithLaterCommands() {
+        val launcher = prootSessionLauncherScript()
+        val command = prootBusAwareCommand("xfconf-query --version")
+
+        assertTrue(launcher.contains("DBUS_SESSION_BUS_ADDRESS"))
+        assertTrue(launcher.contains(PROOT_SESSION_BUS_FILE))
+        assertTrue(command.contains("export DBUS_SESSION_BUS_ADDRESS"))
+        assertTrue(command.endsWith("xfconf-query --version"))
+    }
+
+    @Test
     fun readyMarkerDrivesInstalledStatusAndDebianPaths() {
         val host = FakeEnvironmentHost()
         val environment = ProotDebianEnvironment(host)

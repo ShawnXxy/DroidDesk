@@ -22,6 +22,41 @@ class RuntimeCapabilityProbeTest {
     }
 
     @Test
+    fun expectedPreinstallEvidenceStillAllowsDebianRecommendation() {
+        val capabilities = RuntimeCapabilityProbe(
+            source = FakeCapabilitySource(
+                localExecution = CapabilityEvidence(
+                    EvidenceState.PRESENT_UNVERIFIED,
+                    "The native bootstrap is not installed",
+                ),
+                x11 = CapabilityEvidence(
+                    EvidenceState.PRESENT_UNVERIFIED,
+                    "The X11 session is not ready",
+                ),
+                prootProbe = {
+                    CapabilityEvidence(
+                        EvidenceState.PRESENT_UNVERIFIED,
+                        "PRoot is not installed",
+                    )
+                },
+            ),
+            requiredBytes = GIB,
+        ).probe()
+
+        assertTrue(capabilities.prootCandidate)
+    }
+
+    @Test
+    fun defaultStorageGateIsBelowTheSixGibRecommendation() {
+        val capabilities = RuntimeCapabilityProbe(
+            source = FakeCapabilitySource(availableBytes = 3L * GIB),
+        ).probe()
+
+        assertEquals(2L * GIB, capabilities.requiredBytes)
+        assertEquals(EvidenceState.SUPPORTED_AND_PROBED, capabilities.storage.state)
+    }
+
+    @Test
     fun nonArm64OrUnsupportedApiIsRejectedWithTheHostReason() {
         val nonArm64 = RuntimeCapabilityProbe(
             source = FakeCapabilitySource(abi = "x86_64"),
@@ -41,7 +76,7 @@ class RuntimeCapabilityProbeTest {
     }
 
     @Test
-    fun failedLocalExecutionOrInsufficientStorageBlocksProot() {
+    fun failedRequiredProbeOrInsufficientStorageBlocksProot() {
         val noExec = RuntimeCapabilityProbe(
             source = FakeCapabilitySource(
                 localExecution = CapabilityEvidence(
@@ -55,12 +90,22 @@ class RuntimeCapabilityProbeTest {
             source = FakeCapabilitySource(availableBytes = 512L * MIB),
             requiredBytes = GIB,
         ).probe()
+        val noAudio = RuntimeCapabilityProbe(
+            source = FakeCapabilitySource(
+                audio = CapabilityEvidence(
+                    EvidenceState.FAILED_SELF_TEST,
+                    "PulseAudio connection failed",
+                ),
+            ),
+            requiredBytes = GIB,
+        ).probe()
 
         assertFalse(noExec.prootCandidate)
         assertEquals(EvidenceState.FAILED_SELF_TEST, noExec.localExecution.state)
         assertFalse(noSpace.prootCandidate)
         assertEquals(EvidenceState.BLOCKED_BY_POLICY, noSpace.storage.state)
         assertEquals(GIB, noSpace.requiredBytes)
+        assertFalse(noAudio.prootCandidate)
     }
 
     @Test

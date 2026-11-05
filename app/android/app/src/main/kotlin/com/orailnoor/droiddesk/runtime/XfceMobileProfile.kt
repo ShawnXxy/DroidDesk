@@ -181,7 +181,7 @@ object XfceMobileProfile {
           </property>
           <property name="Net" type="empty">
             <property name="ThemeName" type="string" value="Adwaita"/>
-            <property name="IconThemeName" type="string" value="Papirus"/>
+            <property name="IconThemeName" type="string" value="Adwaita"/>
             <property name="CursorSize" type="int" value="32"/>
           </property>
           <property name="Gtk" type="empty">

@@ -44,6 +44,7 @@ void main() {
     expect(find.text('Performance mode'), findsOneWidget);
     expect(find.textContaining('System VM'), findsNothing);
     expect(find.textContaining('Platform permission'), findsOneWidget);
+    expect(find.textContaining('Clipboard: Foreground only'), findsOneWidget);
   });
 
   testWidgets('Native remains selectable', (tester) async {

@@ -14,6 +14,7 @@ import android.net.Uri
 import com.orailnoor.droiddesk.view.DesktopActivity
 import com.orailnoor.droiddesk.runtime.ChrootRuntime
 import com.orailnoor.droiddesk.runtime.LinuxRuntime
+import com.orailnoor.droiddesk.runtime.ProotDebianSessionRegistry
 import com.orailnoor.droiddesk.service.DroidDeskService
 import java.lang.ref.WeakReference
 
@@ -73,7 +74,10 @@ internal class AndroidDesktopDisplayHost(
         )
     }
 
-    override fun sessionRunning() = ChrootRuntime(context).isRunning() || LinuxRuntime(context).isRunning()
+    override fun sessionRunning() =
+        ProotDebianSessionRegistry.isRunning() ||
+            ChrootRuntime(context).isRunning() ||
+            LinuxRuntime(context).isRunning()
 
     override fun launch(request: DesktopLaunchRequest) {
         val current = repository.requireDisplay(request.display.key)

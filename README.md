@@ -1,6 +1,6 @@
 # DroidDesk
 
-Run a full Linux desktop on any Android phone. Not a terminal. Not an emulator. A complete desktop environment with direct kernel access -- VS Code, Blender, Metasploit, local AI, all of it.
+Run a full Linux desktop on an ARM64 Android phone. Not just a terminal: DroidDesk provides an interactive desktop, persistent Linux files, and locally rendered GUI applications while continuing to use the Android device's kernel.
 
 Connect your phone to a monitor and it becomes a Linux PC. Unplug it and your entire setup comes with you.
 
@@ -29,9 +29,15 @@ If it runs on Ubuntu, it runs here.
 
 ## How It Works
 
-The Linux environment runs through Termux with direct access to the phone's kernel. No emulation, no translation -- native performance.
+DroidDesk selects a Linux runtime according to device capabilities:
 
-The setup script installs a full desktop (XFCE4/LXQt/MATE/KDE) inside Termux using the Termux User Repository (TUR) for GUI apps. For tools not available in TUR (Wireshark, Metasploit, etc.), a Proot container provides a standard Ubuntu/Debian/Kali environment where you install anything with `apt`.
+- **Debian PRoot** provides standard ARM64 Debian `apt` and `.deb` compatibility without root. PRoot translates Linux filesystem and process assumptions to Android; it does not emulate the ARM64 CPU, but it adds syscall and filesystem overhead.
+- **Termux Native** runs directly in the app-private Termux userspace for faster startup and lower overhead, using packages built for Termux's Android/Bionic environment.
+- **Ubuntu chroot** is available only when a rooted device passes the root, mount, chroot, SELinux, and X11 probes.
+
+The standalone app owns the embedded X11 server, display placement, input, foreground service, audio bridge, and plain-text clipboard integration. Debian and Native sessions render directly to `DISPLAY=:0`; VNC is not used for the on-device desktop.
+
+The separate Termux setup script installs a full desktop (XFCE4/LXQt/MATE/KDE) inside Termux using the Termux User Repository (TUR) for GUI apps. For tools not available in TUR (Wireshark, Metasploit, etc.), a PRoot container provides a standard Ubuntu/Debian/Kali environment where you install packages with `apt`.
 
 The automatic menu sync scans what you install inside Proot and adds it directly to your desktop app menu. No need to enter the container every time.
 
@@ -39,18 +45,48 @@ The automatic menu sync scans what you install inside Proot and adds it directly
 
 DroidDesk is also available as a standalone Android application that completely automates this process without requiring a separate Termux installation. It renders through an embedded Termux:X11 server running in its own Android process; the app does not use VNC.
 
-- **Rooted phones:** Run the Ubuntu filesystem through `chroot`.
-- **Non-rooted phones:** Run an app-private native Termux userspace and install desktop packages from the X11 and TUR repositories. PRoot is not used.
-- **Rendering:** Both modes connect directly to the embedded X11 server on `DISPLAY=:0`. Adreno devices use Turnip/Zink hardware acceleration when available; other GPUs fall back to Mesa software rendering.
-- **Automated setup:** The app extracts the bundled ARM64 Termux bootstrap, configures its private package prefix, and installs the selected desktop automatically.
+- **Non-rooted compatibility mode:** Install a persistent Debian ARM64 PRoot environment with XFCE and standard Debian package compatibility.
+- **Non-rooted performance mode:** Use the app-private Native Termux runtime when startup speed and lower overhead matter more than Debian package compatibility.
+- **Rooted mode:** Use Ubuntu through `chroot` only after all required privileged operations pass functional probes.
+- **Rendering:** Every mode connects to the embedded X11 server on `DISPLAY=:0`. The first Debian PRoot release guarantees Mesa software rendering; hardware acceleration is used only when an end-to-end probe succeeds.
+- **Automated setup:** The app extracts its ARM64 host toolchain, provisions the selected environment, configures the desktop, and preserves the selected mode across launches.
 
 Download the latest release APK from the Releases tab and sideload it to begin.
 
+### Runtime Modes and Tradeoffs
+
+| Mode | Best for | Package compatibility | Performance | Important limits |
+|---|---|---|---|---|
+| Debian Desktop (PRoot + XFCE) | Standard Linux GUI applications and `.deb` packages | Debian ARM64 `apt` packages | Moderate overhead, especially for package extraction and many small files | No real root, systemd, Docker, cgroups, kernel modules, or real mounts |
+| Native Desktop (Termux) | Fast interactive desktop and Termux/TUR software | Packages built for Termux/Bionic | Lowest overhead | Ordinary Debian/Ubuntu `.deb` packages are not ABI-compatible |
+| Ubuntu chroot | Rooted devices that pass all privileged probes | Ubuntu ARM64 packages | Closest to native Linux userspace | Requires working root, mounts, chroot, and compatible SELinux policy |
+
+The app recommends Debian Desktop on a supported non-root device, but keeps Native Desktop as the performance option and fallback. Existing installations are not deleted or migrated automatically.
+
 ## Requirements
 
-- Any Android phone (ARM64)
+- ARM64 Android phone
+- Android 9/API 28 or newer for the standalone app
+- About 6 GiB free during Debian provisioning for downloads, staging, rollback space, and the installed environment
+- Sideloading support; the current local-Linux architecture is not a Google Play distribution
 - [Termux](https://f-droid.org/en/packages/com.termux/) (install from F-Droid, not Play Store)
 - [Termux-X11](https://github.com/termux/termux-x11/releases/tag/nightly) (for on-phone display)
+
+Termux and the separate Termux-X11 APK are required only for the script-based installation below, not for the standalone DroidDesk APK.
+
+### Debian Desktop Compatibility Notes
+
+- The first setup downloads a pinned Debian ARM64 image and installs XFCE. Network and storage speed can make this take several minutes.
+- DroidDesk first tries the pinned Docker Hub image and automatically falls back to the same digest on AWS Public ECR when Docker Hub is unreachable.
+- Debian package installation prefers the USTC mirror when available and restores the official Debian source if that mirror fails.
+- Official Microsoft VS Code ARM64 has been validated as an acceptance workload. In PRoot it currently needs:
+
+  ```bash
+  code --no-sandbox --disable-gpu --disable-dev-shm-usage
+  ```
+
+- PRoot uses the Android kernel and cannot provide real root privileges, `systemd`, Docker/nested containers, cgroups, kernel modules, `iptables`, or privileged mounts.
+- App uninstall or **Clear data** removes the app-private Debian rootfs. A rootfs backup/import workflow is not implemented yet.
 
 ### For Monitor Output ( Optional )
 
@@ -203,6 +239,10 @@ Add this line:
 - For standalone phone use without a monitor, Termux-X11 is the recommended option.
 - The Proot container shares the display with the native Termux desktop. Apps installed in Proot render on the same screen.
 - GPU acceleration works best on Adreno GPUs (Qualcomm Snapdragon phones). Other GPUs fall back to software rendering.
+- Debian PRoot software rendering requests a 60 Hz Android render rate and disables XFCE compositing to reduce sustained CPU use. Vendor display policy can still override the request.
+- On a supported secondary display, DroidDesk opens a dedicated X11 view and captures the external pointer while that view is focused. Android Back releases the view and returns to DroidDesk controls.
+- Android media volume and the monitor/dock speaker volume remain the master controls for Linux audio; DroidDesk does not force the system volume.
+- Large Electron applications have a noticeable memory cost. On a Nubia NX888J, the validated VS Code process group used about 759 MiB RSS while open.
 
 ## Credits
 

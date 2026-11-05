@@ -1,6 +1,7 @@
 import 'package:droiddesk/models/linux_environment.dart';
 import 'package:droiddesk/state/app_state.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import '../models/linux_environment_test.dart';
 import '../support/desktop_display_fakes.dart';
 
@@ -65,7 +66,10 @@ void main() {
 
     expect(ok, isTrue);
     final methods = native.calls.map((call) => call.method).toList();
-    expect(methods.indexOf('stopLinux'), lessThan(methods.indexOf('provisionEnvironment')));
+    expect(
+      methods.indexOf('stopLinux'),
+      lessThan(methods.indexOf('provisionEnvironment')),
+    );
   });
 
   test('insufficient transaction storage blocks provisioning', () async {
@@ -80,5 +84,21 @@ void main() {
 
     expect(state.canProvisionSelectedEnvironment, isFalse);
     expect(state.environmentBlockingReason, contains('storage'));
+  });
+
+  test('provisioning preserves the native failure reason', () async {
+    SharedPreferences.setMockInitialValues({});
+    await state.initialize();
+    native.runtimeStatus = environmentStatusPayload();
+    native.provisionSuccess = false;
+    native.provisionFailureMessage = 'Docker Hub and ECR were unreachable';
+    await state.refreshStatus();
+
+    final ok = await state.runSetup(
+      environment: LinuxEnvironmentKind.prootDebian,
+    );
+
+    expect(ok, isFalse);
+    expect(state.errorMessage, 'Docker Hub and ECR were unreachable');
   });
 }

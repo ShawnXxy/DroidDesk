@@ -33,6 +33,7 @@ class ProotDebianSessionTest {
         val result = session.start(profile)
 
         assertTrue(result.isSuccess)
+        assertEquals(listOf("prepare", "profile"), host.calls.take(2))
         assertTrue(runner.startedCommand.contains("DISPLAY=:0"))
         assertTrue(runner.startedCommand.contains("PULSE_SERVER=127.0.0.1"))
         assertTrue(runner.startedCommand.contains("XDG_RUNTIME_DIR=/tmp/runtime-droiddesk"))
@@ -60,12 +61,14 @@ class ProotDebianSessionTest {
     @Test
     fun stopTerminatesDescendantsBeforeRootProcess() {
         val runner = FakeProcessRunner(descendants = listOf(11, 12))
-        val session = ProotDebianSessionController(FakeSessionHost(), runner)
+        val host = FakeSessionHost()
+        val session = ProotDebianSessionController(host, runner)
         session.start(DisplayProfilePolicy.phoneDefaultProfile()).getOrThrow()
 
         val result = session.stop()
 
         assertTrue(result.isSuccess)
+        assertTrue(host.calls.contains("stop"))
         assertEquals(
             listOf(
                 "term:12",
@@ -105,6 +108,28 @@ class ProotDebianSessionTest {
     }
 
     @Test
+    fun restartAfterDesktopFailureStopsTheOldProcessTreeFirst() {
+        val host = FakeSessionHost()
+        val runner = FakeProcessRunner(descendants = listOf(11))
+        val session = ProotDebianSessionController(host, runner)
+        val profile = DisplayProfilePolicy.phoneDefaultProfile()
+        session.start(profile).getOrThrow()
+        assertTrue(session.waitForDesktopReady(1_000))
+        host.desktopProcessesAlive = false
+        assertFalse(session.isRunning())
+        host.desktopProcessesAlive = true
+
+        val result = session.start(profile)
+
+        assertTrue(result.isSuccess)
+        assertEquals(2, runner.calls.count { it.startsWith("start:") })
+        assertTrue(host.calls.contains("stop"))
+        val firstStop = runner.calls.indexOf("term:10")
+        val secondStart = runner.calls.indexOfLast { it.startsWith("start:") }
+        assertTrue(firstStop in 0 until secondStart)
+    }
+
+    @Test
     fun recreatedControllerDoesNotInventARunningSession() {
         val host = FakeSessionHost().apply { desktopProcessesAlive = true }
         val session = ProotDebianSessionController(host, FakeProcessRunner())
@@ -118,8 +143,19 @@ class ProotDebianSessionTest {
         var desktopProcessesAlive = true
         var profileHome: String? = null
         var policy: ProotDesktopPolicy? = null
+        val calls = mutableListOf<String>()
 
         override fun isDesktopReady(): Boolean = ready
+
+        override fun prepareHostSession(): Result<Unit> {
+            calls += "prepare"
+            return Result.success(Unit)
+        }
+
+        override fun stopHostSession(): Result<Unit> {
+            calls += "stop"
+            return Result.success(Unit)
+        }
 
         override fun launchCommand(profile: DisplayProfile): List<String> = listOf(
             "env",
@@ -142,6 +178,7 @@ class ProotDebianSessionTest {
             guestHome: String,
             policy: ProotDesktopPolicy,
         ): Result<Unit> {
+            calls += "profile"
             profileHome = guestHome
             this.policy = policy
             return Result.success(Unit)
@@ -164,6 +201,7 @@ class ProotDebianSessionTest {
             command: List<String>,
             onOutput: (String) -> Unit,
         ): EnvironmentProcess {
+            root.alive = true
             startedCommand = command
             calls += "start:${command.joinToString(" ")}"
             return root

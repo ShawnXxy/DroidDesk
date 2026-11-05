@@ -230,7 +230,8 @@ class AppState extends ChangeNotifier {
       LinuxEnvironmentKind.termuxNative =>
         !status.capabilities.host.state.blocksProvisioning &&
             !status.capabilities.localExecution.state.blocksProvisioning,
-      LinuxEnvironmentKind.chrootUbuntu => status.hasRoot,
+      LinuxEnvironmentKind.chrootUbuntu =>
+        !status.capabilities.chroot.state.blocksProvisioning,
     };
   }
 
@@ -244,8 +245,37 @@ class AppState extends ChangeNotifier {
         status.capabilities.host.reason ??
             status.capabilities.localExecution.reason,
       LinuxEnvironmentKind.chrootUbuntu =>
-        status.hasRoot ? null : 'Root access is required',
+        status.capabilities.chroot.state.blocksProvisioning
+            ? status.capabilities.chroot.reason
+            : null,
     };
+  }
+
+  List<String> get environmentCapabilityDiagnostics {
+    final capabilities = _environmentStatus?.capabilities;
+    if (capabilities == null ||
+        _selectedEnvironment != LinuxEnvironmentKind.prootDebian) {
+      return const [];
+    }
+    final checks = <String, CapabilityEvidence>{
+      'Android host': capabilities.host,
+      'App-private execution': capabilities.localExecution,
+      'PRoot': capabilities.proot,
+      'X11': capabilities.x11,
+      'Audio': capabilities.audio,
+      'Clipboard': capabilities.clipboard,
+      'Renderer': capabilities.renderer,
+      'Storage': capabilities.storage,
+    };
+    final primaryBlockingReason = environmentBlockingReason;
+    return [
+      for (final entry in checks.entries)
+        if (entry.value.state !=
+                CapabilityEvidenceState.supportedAndProbed &&
+            entry.value.reason?.isNotEmpty == true &&
+            entry.value.reason != primaryBlockingReason)
+          '${entry.key}: ${entry.value.reason}',
+    ];
   }
 
   String? get environmentRecommendationReason {
@@ -560,7 +590,7 @@ class AppState extends ChangeNotifier {
       notifyListeners();
       return true;
     } catch (e) {
-      _errorMessage = 'Setup failed: $e';
+      _errorMessage ??= 'Setup failed: $e';
       _isDownloading = false;
       _isExtracting = false;
       _isInstallingDE = false;

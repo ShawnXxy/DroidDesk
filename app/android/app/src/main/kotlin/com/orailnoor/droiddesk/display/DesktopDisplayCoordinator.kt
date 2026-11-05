@@ -118,7 +118,9 @@ class DesktopDisplayCoordinator(
         if (expectedEpoch != null && !isSessionCurrent(expectedEpoch)) {
             throw DesktopDisplayException("SESSION_STOPPED", "The deferred desktop action belongs to a stopped session")
         }
-        require(mode == "termux" || mode == "chroot") { "Invalid Linux runtime" }
+        require(mode == "termux" || mode == "proot" || mode == "chroot") {
+            "Invalid Linux runtime"
+        }
         val epoch = beginSession()
         sessionMode = mode
         desktopEnv = desktop

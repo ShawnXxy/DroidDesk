@@ -42,7 +42,9 @@ internal class LinuxEnvironmentManager(
         onProgress: (Double, String) -> Unit = { _, _ -> },
         onLog: (String) -> Unit = {},
     ): Result<Unit> {
-        val result = adapter(request.kind).provision(request, onProgress, onLog)
+        val result = runCatching {
+            adapter(request.kind).provision(request, onProgress, onLog).getOrThrow()
+        }
         if (result.isSuccess) selectionStore.write(request.kind)
         return result
     }
@@ -63,8 +65,11 @@ internal class LinuxEnvironmentManager(
 
     fun stop(): Result<Unit> {
         val currentCapabilities = capabilities()
+        val selectedKind = selectedKindOrNull()
         for (candidate in adaptersInOrder) {
-            if (!candidate.status(currentCapabilities).running) continue
+            if (candidate.kind != selectedKind && !candidate.status(currentCapabilities).running) {
+                continue
+            }
             val stopped = candidate.stop()
             if (stopped.isFailure) return stopped
         }
@@ -179,4 +184,6 @@ internal object ProotDebianSessionRegistry {
                 controller = it
             }
         }
+
+    fun isRunning(): Boolean = controller?.isRunning() == true
 }

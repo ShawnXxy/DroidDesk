@@ -91,6 +91,42 @@ class ProotDebianProvisionerTest {
     }
 
     @Test
+    fun dockerHubFailureFallsBackToDigestPinnedMirror() {
+        val host = FakeProvisioningHost(ProotContainerState.ABSENT).apply {
+            installResults.add(
+                Result.failure(IllegalStateException("Docker Hub is unreachable")),
+            )
+            installResults.add(Result.success(identity()))
+        }
+        val logs = mutableListOf<String>()
+        val provisioner = ProotDebianProvisioner(host, requiredBytes = GIB)
+
+        val result = provisioner.provision({ _, _ -> }, logs::add)
+
+        assertTrue(result.isSuccess)
+        assertEquals(
+            listOf(
+                ProotDebianProvisioner.IMAGE_REFERENCE,
+                ProotDebianProvisioner.IMAGE_MIRROR_REFERENCE,
+            ),
+            host.installReferences,
+        )
+        assertTrue(
+            host.calls.indexOf("discard:droiddesk-debian-staging") <
+                host.calls.lastIndexOf("install:droiddesk-debian-staging"),
+        )
+        assertTrue(logs.joinToString("").contains("regional mirror"))
+    }
+
+    @Test
+    fun desktopPackageSetUsesTheLightweightAdwaitaTheme() {
+        assertTrue(ProotDebianProvisioner.DESKTOP_PACKAGES.contains("adwaita-icon-theme"))
+        assertFalse(ProotDebianProvisioner.DESKTOP_PACKAGES.contains("papirus-icon-theme"))
+        assertTrue(ProotDebianProvisioner.DESKTOP_PACKAGES.contains("pulseaudio-utils"))
+        assertTrue(ProotDebianProvisioner.DESKTOP_PACKAGES.contains("devilspie2"))
+    }
+
+    @Test
     fun insufficientTransactionStorageStopsBeforeToolchainInstallation() {
         val host = FakeProvisioningHost(ProotContainerState.ABSENT).apply {
             availableBytes = 512L * MIB
@@ -127,6 +163,8 @@ class ProotDebianProvisionerTest {
         var marker: ProotReadyMarker? = null
         var availableBytes: Long = 64L * GIB
         var installResult: Result<ProotImageIdentity> = Result.success(identity())
+        val installResults = ArrayDeque<Result<ProotImageIdentity>>()
+        val installReferences = mutableListOf<String>()
         var verificationResult: Result<ProotVerification> = Result.success(
             ProotVerification("arm64", desktopReady = true, missingPackages = emptyList()),
         )
@@ -158,7 +196,8 @@ class ProotDebianProvisionerTest {
             onLog: (String) -> Unit,
         ): Result<ProotImageIdentity> {
             calls += "install:$name"
-            return installResult
+            installReferences += imageReference
+            return if (installResults.isEmpty()) installResult else installResults.removeFirst()
         }
 
         override fun runRoot(

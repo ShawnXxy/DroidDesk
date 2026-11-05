@@ -13,6 +13,18 @@ data class CapabilityEvidence(
     val state: EvidenceState,
     val reason: String? = null,
 ) {
+    val blocksProvisioning: Boolean
+        get() = when (state) {
+            EvidenceState.SUPPORTED_AND_PROBED,
+            EvidenceState.PRESENT_UNVERIFIED,
+            -> false
+            EvidenceState.UNAVAILABLE,
+            EvidenceState.BLOCKED_BY_PERMISSION,
+            EvidenceState.BLOCKED_BY_POLICY,
+            EvidenceState.FAILED_SELF_TEST,
+            -> true
+        }
+
     fun toMap(): Map<String, Any?> = mapOf(
         "state" to state.name,
         "reason" to reason,
@@ -62,8 +74,17 @@ data class RuntimeCapabilities(
     val distribution: DistributionContract,
 ) {
     val prootCandidate: Boolean
-        get() = listOf(host, localExecution, proot, x11, storage)
-            .all { it.state == EvidenceState.SUPPORTED_AND_PROBED }
+        get() = listOf(
+            host,
+            localExecution,
+            proot,
+            x11,
+            audio,
+            clipboard,
+            renderer,
+            storage,
+        )
+            .none { it.blocksProvisioning }
 
     val avfAdapterAvailable: Boolean
         get() = avfFeature.state == EvidenceState.SUPPORTED_AND_PROBED &&

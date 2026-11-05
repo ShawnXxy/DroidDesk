@@ -12,6 +12,15 @@ import com.termux.x11.CmdEntryPoint
 import java.io.File
 import java.util.concurrent.CountDownLatch
 
+internal fun findXkbConfigRoot(filesDir: File): File? = listOf(
+    File(filesDir, "usr/share/X11/xkb"),
+    File(
+        filesDir,
+        "usr/var/lib/proot-distro/containers/droiddesk-debian/rootfs/usr/share/X11/xkb",
+    ),
+    File(filesDir, "rootfs/usr/share/X11/xkb"),
+).firstOrNull(File::isDirectory)
+
 /**
  * Owns the native X server in the dedicated :x11 process.
  *
@@ -116,10 +125,8 @@ class X11ServerService : Service() {
         Os.setenv("PREFIX", File(filesDir, "usr").absolutePath, true)
         Os.setenv("HOME", filesDir.absolutePath, true)
 
-        val installedXkbRoot = File(filesDir, "usr/share/X11/xkb")
-        val rootfsXkbRoot = File(filesDir, "rootfs/usr/share/X11/xkb")
-        val xkbRoot = if (installedXkbRoot.exists()) installedXkbRoot else rootfsXkbRoot
-        if (xkbRoot.exists()) {
+        val xkbRoot = findXkbConfigRoot(filesDir)
+        if (xkbRoot != null) {
             Os.setenv("XKB_CONFIG_ROOT", xkbRoot.absolutePath, true)
         } else {
             Log.w(TAG, "XKB config root not found")

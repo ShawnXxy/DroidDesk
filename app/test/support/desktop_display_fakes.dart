@@ -18,7 +18,11 @@ Map<Object?, Object?> desktopSnapshot({
   'crossDisplayMovesAllowed': true,
   'sessionRunning': phase != 'stopped',
   'sessionRestarting': false,
-  'sessionEnvironment': activeId == null ? null : activeId == 0 ? 'phone' : 'otherExternal',
+  'sessionEnvironment': activeId == null
+      ? null
+      : activeId == 0
+      ? 'phone'
+      : 'otherExternal',
   'sessionDisplayId': activeId,
   'sessionHeadless': false,
   'phase': phase,
@@ -103,8 +107,12 @@ class FakeDesktopPlatform {
     _runtimeStatus = value;
     running = value['running'] == true;
   }
+
   PlatformException? openError;
   PlatformException? autoOpenError;
+  bool hasRoot = false;
+  bool provisionSuccess = true;
+  String? provisionFailureMessage;
   Completer<Map<Object?, Object?>>? displayReply;
   Completer<Map<Object?, Object?>>? openReply;
   Completer<Map<Object?, Object?>>? autoOpenReply;
@@ -174,6 +182,8 @@ class FakeDesktopPlatform {
               };
             case 'getAppVersion':
               throw PlatformException(code: 'TEST_UPDATE_DISABLED');
+            case 'checkRoot':
+              return hasRoot;
             case 'updateStatusBarTheme':
               return null;
             case 'startLinux':
@@ -186,9 +196,21 @@ class FakeDesktopPlatform {
                 'running': false,
                 'isRunning': false,
               };
-              snapshot = desktopSnapshot(phase: 'stopped', activeId: null, width: null, height: null);
+              snapshot = desktopSnapshot(
+                phase: 'stopped',
+                activeId: null,
+                width: null,
+                height: null,
+              );
               return true;
             case 'provisionEnvironment':
+              if (!provisionSuccess) {
+                final failureMessage = provisionFailureMessage;
+                if (failureMessage != null) {
+                  DroidDeskPlatform.onInstallProgress?.call(-1, failureMessage);
+                }
+                return false;
+              }
               final arguments = call.arguments as Map<Object?, Object?>;
               final kind = arguments['kind'] as String;
               _runtimeStatus = {
@@ -198,7 +220,9 @@ class FakeDesktopPlatform {
                 'isBootstrapped': true,
                 'running': false,
                 'isRunning': false,
-                'distro': kind == 'prootDebian' ? 'debian-bookworm' : 'termux-native',
+                'distro': kind == 'prootDebian'
+                    ? 'debian-bookworm'
+                    : 'termux-native',
                 'installedDE': 'xfce4',
               };
               return true;
@@ -216,5 +240,9 @@ class FakeDesktopPlatform {
         .setMockMethodCallHandler(channel, null);
     DroidDeskPlatform.onDesktopDisplayStateChanged = null;
     DroidDeskPlatform.onDesktopDisplayError = null;
+    DroidDeskPlatform.onDownloadProgress = null;
+    DroidDeskPlatform.onExtractProgress = null;
+    DroidDeskPlatform.onInstallProgress = null;
+    DroidDeskPlatform.onTerminalOutput = null;
   }
 }

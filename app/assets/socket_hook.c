@@ -68,6 +68,12 @@ static void *(*real_dlopen)(const char *, int) = NULL;
 static volatile int hook_initialized = 0;
 static volatile int hook_initializing = 0;
 
+static const char* configured_prefix() {
+    const char *prefix = getenv("TERMUX__PREFIX");
+    if (!prefix || prefix[0] != '/') prefix = getenv("PREFIX");
+    return prefix && prefix[0] == '/' ? prefix : NEW_PREFIX;
+}
+
 static void do_init() {
     if (hook_initialized) return;
     if (__sync_lock_test_and_set(&hook_initializing, 1)) {
@@ -140,13 +146,14 @@ static const char* strip_dot_slash(const char *path) {
 static const char* rewrite_path(const char* path, char* buf, size_t buf_size) {
     if (!path) return path;
 
+    const char *new_prefix = configured_prefix();
     const char *p = strip_dot_slash(path);
 
     size_t rel_len = strlen(REL_TERMUX_PREFIX);
     if (strncmp(p, REL_TERMUX_PREFIX, rel_len) == 0) {
         char next = p[rel_len];
         if (next == '/' || next == '\0') {
-            snprintf(buf, buf_size, "%s%s", NEW_PREFIX, p + rel_len);
+            snprintf(buf, buf_size, "%s%s", new_prefix, p + rel_len);
             return buf;
         }
     }
@@ -155,14 +162,14 @@ static const char* rewrite_path(const char* path, char* buf, size_t buf_size) {
     if (strncmp(p, REL_TERMUX_BASE, base_len) == 0) {
         char next = p[base_len];
         if (next == '/' || next == '\0') {
-            snprintf(buf, buf_size, "%s", NEW_PREFIX);
+            snprintf(buf, buf_size, "%s", new_prefix);
             return buf;
         }
     }
 
     size_t term_len = strlen(TERMUX_PREFIX);
     if (strncmp(path, TERMUX_PREFIX, term_len) == 0) {
-        snprintf(buf, buf_size, "%s%s", NEW_PREFIX, path + term_len);
+        snprintf(buf, buf_size, "%s%s", new_prefix, path + term_len);
         return buf;
     }
 
@@ -170,7 +177,7 @@ static const char* rewrite_path(const char* path, char* buf, size_t buf_size) {
     if (strncmp(path, "/data/data/com.termux", abs_base_len) == 0) {
         char next = path[abs_base_len];
         if (next == '/' || next == '\0') {
-            snprintf(buf, buf_size, "%s", NEW_PREFIX);
+            snprintf(buf, buf_size, "%s", new_prefix);
             return buf;
         }
     }
@@ -184,7 +191,7 @@ static const char* rewrite_path(const char* path, char* buf, size_t buf_size) {
             if (i == 5 && tmpdir) {
                 snprintf(buf, buf_size, "%s/%s", tmpdir, path + len);
             } else {
-                snprintf(buf, buf_size, "%s/%s%s", NEW_PREFIX, subdirs[i], path + len);
+                snprintf(buf, buf_size, "%s/%s%s", new_prefix, subdirs[i], path + len);
             }
             return buf;
         }
@@ -211,7 +218,7 @@ int connect(int sockfd, const struct sockaddr *addr, socklen_t addrlen) {
         const char *termux_target = "/data/data/com.termux/files/usr/tmp/.X11-unix/X0";
         const char *tmp_target = "/tmp/.X11-unix/X0";
         const char *new_prefix_tmp = getenv("TMPDIR");
-        if (!new_prefix_tmp) new_prefix_tmp = NEW_PREFIX;
+        if (!new_prefix_tmp) new_prefix_tmp = configured_prefix();
         static char path_buf[256];
         const char *new_path = NULL;
 
@@ -450,7 +457,7 @@ int symlink(const char *target, const char *linkpath) {
     const char *new_target = target;
     size_t term_len = strlen(TERMUX_PREFIX);
     if (target && strncmp(target, TERMUX_PREFIX, term_len) == 0) {
-        snprintf(targetbuf, sizeof(targetbuf), "%s%s", NEW_PREFIX, target + term_len);
+        snprintf(targetbuf, sizeof(targetbuf), "%s%s", configured_prefix(), target + term_len);
         new_target = targetbuf;
     }
     return real_symlink(new_target, rewrite_path(linkpath, linkbuf, sizeof(linkbuf)));
@@ -463,7 +470,7 @@ int symlinkat(const char *target, int dirfd, const char *linkpath) {
     const char *new_target = target;
     size_t term_len = strlen(TERMUX_PREFIX);
     if (target && strncmp(target, TERMUX_PREFIX, term_len) == 0) {
-        snprintf(targetbuf, sizeof(targetbuf), "%s%s", NEW_PREFIX, target + term_len);
+        snprintf(targetbuf, sizeof(targetbuf), "%s%s", configured_prefix(), target + term_len);
         new_target = targetbuf;
     }
     return real_symlinkat(new_target, dirfd, rewrite_at_path(dirfd, linkpath, linkbuf, sizeof(linkbuf)));

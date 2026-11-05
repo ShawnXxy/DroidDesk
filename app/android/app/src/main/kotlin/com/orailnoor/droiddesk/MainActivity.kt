@@ -21,13 +21,11 @@ import com.orailnoor.droiddesk.runtime.AppUpdater
 import com.orailnoor.droiddesk.runtime.DesktopIntegration
 import com.orailnoor.droiddesk.runtime.AndroidRuntimeCapabilitySource
 import com.orailnoor.droiddesk.runtime.RuntimeCapabilityProbe
-import com.orailnoor.droiddesk.runtime.ChrootUbuntuEnvironment
 import com.orailnoor.droiddesk.runtime.EnvironmentKind
 import com.orailnoor.droiddesk.runtime.ExecutionRequest
 import com.orailnoor.droiddesk.runtime.LinuxEnvironmentManager
 import com.orailnoor.droiddesk.runtime.ProvisionRequest
-import com.orailnoor.droiddesk.runtime.SharedPreferencesEnvironmentSelectionStore
-import com.orailnoor.droiddesk.runtime.TermuxNativeEnvironment
+import com.orailnoor.droiddesk.runtime.createLinuxEnvironmentManager
 import com.orailnoor.droiddesk.view.AndroidSurfaceViewFactory
 import com.orailnoor.droiddesk.x11.X11ServerService
 import kotlin.concurrent.thread
@@ -110,13 +108,10 @@ class MainActivity : FlutterActivity() {
         runtimeCapabilityProbe = RuntimeCapabilityProbe(
             AndroidRuntimeCapabilitySource(applicationContext, linuxRuntime, chrootRuntime),
         )
-        environmentManager = LinuxEnvironmentManager(
-            adapters = listOf(
-                TermuxNativeEnvironment(applicationContext, linuxRuntime),
-                ChrootUbuntuEnvironment(applicationContext, chrootRuntime),
-            ),
-            capabilities = runtimeCapabilityProbe::probe,
-            selectionStore = SharedPreferencesEnvironmentSelectionStore(applicationContext),
+        environmentManager = createLinuxEnvironmentManager(
+            applicationContext,
+            linuxRuntime,
+            chrootRuntime,
         )
         desktopIntegration = DesktopIntegration(this)
         DesktopDisplayCoordinator.shared.initialize(applicationContext)
@@ -577,7 +572,24 @@ class MainActivity : FlutterActivity() {
                             },
                             onLog = ::appendTerminalOutput,
                         )
-                        runOnUiThread { result.success(outcome.isSuccess) }
+                        val error = outcome.exceptionOrNull()
+                        if (error != null) {
+                            val message = error.message ?: "Linux environment provisioning failed"
+                            Log.e(TAG, "Linux environment provisioning failed", error)
+                            appendTerminalOutput("\n$message\n")
+                            runOnUiThread {
+                                MethodChannel(
+                                    flutterEngine.dartExecutor.binaryMessenger,
+                                    CHANNEL,
+                                ).invokeMethod(
+                                    "onInstallProgress",
+                                    mapOf("progress" to -1.0, "status" to message),
+                                )
+                                result.success(false)
+                            }
+                        } else {
+                            runOnUiThread { result.success(true) }
+                        }
                     }
                 }
 
