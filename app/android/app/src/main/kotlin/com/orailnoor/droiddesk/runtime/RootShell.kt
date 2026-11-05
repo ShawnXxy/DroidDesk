@@ -3,6 +3,8 @@ package com.orailnoor.droiddesk.runtime
 import android.content.Context
 import android.util.Log
 import java.io.File
+import java.util.concurrent.TimeUnit
+import kotlin.concurrent.thread
 
 /**
  * Generic root command executor.
@@ -93,6 +95,32 @@ class RootShell(private val context: Context) {
     fun exec(command: String, onOutput: (String) -> Unit): Int {
         val su = findSuPath() ?: throw RootException("No su binary found. Is this device rooted?")
         return execStream(su, command, onOutput)
+    }
+
+    fun execBounded(command: String, timeoutMs: Long): ExecutionResult {
+        val su = findSuPath()
+            ?: return ExecutionResult(127, "No su binary found. Is this device rooted?")
+        val process = ProcessBuilder(su, "-c", command)
+            .redirectErrorStream(true)
+            .start()
+        val output = StringBuffer()
+        val reader = thread(name = "root-command-output", isDaemon = true) {
+            process.inputStream.bufferedReader().use { stream ->
+                val buffer = CharArray(1024)
+                var read: Int
+                while (stream.read(buffer).also { read = it } != -1) {
+                    output.append(buffer, 0, read)
+                }
+            }
+        }
+        if (!process.waitFor(timeoutMs, TimeUnit.MILLISECONDS)) {
+            process.destroyForcibly()
+            process.waitFor(500, TimeUnit.MILLISECONDS)
+            reader.join(500)
+            return ExecutionResult(124, output.toString())
+        }
+        reader.join(500)
+        return ExecutionResult(process.exitValue(), output.toString())
     }
 
     /**

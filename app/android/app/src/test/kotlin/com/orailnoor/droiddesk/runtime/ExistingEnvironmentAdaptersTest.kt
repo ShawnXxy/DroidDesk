@@ -95,7 +95,7 @@ class ExistingEnvironmentAdaptersTest {
                 "profile:phone",
                 "readClipboard",
                 "writeClipboard:new value",
-                "shell:uname -m",
+                "shell:uname -m:false:false",
                 "desktop:thunar",
                 "cancelProfile",
                 "stop",
@@ -119,6 +119,28 @@ class ExistingEnvironmentAdaptersTest {
         )
 
         assertEquals(EnvironmentKind.CHROOT_UBUNTU, manager.recommendedKind())
+    }
+
+    @Test
+    fun failedX11ProbeFallsBackFromOtherwiseFunctionalChroot() {
+        val manager = LinuxEnvironmentManager(
+            adapters = listOf(
+                TermuxNativeEnvironment(FakeLegacyRuntimePort(installed = true)),
+                ChrootUbuntuEnvironment(FakeLegacyRuntimePort(installed = true)),
+            ),
+            capabilities = {
+                capabilities().copy(
+                    chroot = CapabilityEvidence(EvidenceState.SUPPORTED_AND_PROBED),
+                    x11 = CapabilityEvidence(
+                        EvidenceState.FAILED_SELF_TEST,
+                        "X11 connection failed",
+                    ),
+                )
+            },
+            selectionStore = MemorySelectionStore(),
+        )
+
+        assertEquals(EnvironmentKind.TERMUX_NATIVE, manager.recommendedKind())
     }
 
     @Test
@@ -186,8 +208,13 @@ class ExistingEnvironmentAdaptersTest {
             return Result.success(Unit)
         }
 
-        override fun executeShell(command: String, onOutput: ((String) -> Unit)?): ExecutionResult {
-            calls += "shell:$command"
+        override fun executeShell(
+            command: String,
+            onOutput: ((String) -> Unit)?,
+            interactive: Boolean,
+            stdin: Boolean,
+        ): ExecutionResult {
+            calls += "shell:$command:$interactive:$stdin"
             onOutput?.invoke("shell output")
             return ExecutionResult(0, "shell output")
         }

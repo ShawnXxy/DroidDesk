@@ -97,8 +97,7 @@ class LinuxRuntime(context: Context) {
         private var displayProfiles: DesktopProfileExecutor? = null
     }
 
-    @Volatile private var activeCommandProcess: Process? = null
-    @Volatile private var activeCommandAcceptsInput = false
+    private val activeCommands = CommandOwnership<Process>()
     @Volatile private var installLogSink: ((String) -> Unit)? = null
     @Volatile private var packageOperationCancelled = false
 
@@ -109,7 +108,7 @@ class LinuxRuntime(context: Context) {
     fun beginPackageOperation() {
         // A previous App Store screen may have been closed while apt was still
         // running. Stop that process before accepting a new transaction.
-        if (activeCommandProcess?.isAlive == true) interruptCommand()
+        if (activeCommands.isBusy()) interruptCommand()
         packageOperationCancelled = false
         clearStalePackageLocks()
     }
@@ -120,7 +119,7 @@ class LinuxRuntime(context: Context) {
 
     fun cancelPackageOperation(): Boolean {
         packageOperationCancelled = true
-        val wasRunning = activeCommandProcess?.isAlive == true
+        val wasRunning = activeCommands.isBusy()
         interruptCommand()
         return wasRunning
     }
@@ -286,6 +285,26 @@ class LinuxRuntime(context: Context) {
             """.trimIndent(),
         )
         check(!output.startsWith("Error:")) { output }
+    }
+
+    fun ensureHostAudio(onLog: (String) -> Unit = {}): Result<Unit> = runCatching {
+        extractBootstrapIfNeeded(context)
+        setInstallLogSink(onLog)
+        try {
+            if (!isDpkgPackageInstalled("pulseaudio")) {
+                check(installOptionalPackages(listOf("pulseaudio"))) {
+                    "Could not install the host PulseAudio package"
+                }
+            }
+            check(File(binDir, "pulseaudio").canExecute()) {
+                "The host PulseAudio daemon is unavailable after installation"
+            }
+            check(File(binDir, "pactl").canExecute()) {
+                "The host PulseAudio control tool is unavailable after installation"
+            }
+        } finally {
+            setInstallLogSink(null)
+        }
     }
 
     fun stopPulseAudio(): Result<Unit> = runCatching {
@@ -1868,26 +1887,31 @@ class LinuxRuntime(context: Context) {
         if (!isBootstrapped()) {
             return ExecutionResult(1, "Error: Runtime not bootstrapped")
         }
-        val active = activeCommandProcess
-        if (active?.isAlive == true) {
-            if (stdin == null || !activeCommandAcceptsInput) {
-                return ExecutionResult(1, "Error: Another command is already running")
-            }
-            return try {
-                active.outputStream.apply {
-                    write((stdin + "\n").toByteArray())
-                    flush()
-                }
-                ExecutionResult(0, "")
-            } catch (error: Exception) {
-                ExecutionResult(1, "Error: ${error.message}")
-            }
-        }
         if (stdin != null) {
-            return ExecutionResult(1, "Error: No interactive command is running")
+            val input = activeCommands.input()
+            return when (input.state) {
+                CommandInputState.READY -> try {
+                    input.process!!.outputStream.apply {
+                        write((stdin + "\n").toByteArray())
+                        flush()
+                    }
+                    ExecutionResult(0, "")
+                } catch (error: Exception) {
+                    ExecutionResult(1, "Error: ${error.message}")
+                }
+                CommandInputState.STARTING ->
+                    ExecutionResult(1, "Error: The interactive command is still starting")
+                CommandInputState.NOT_INTERACTIVE ->
+                    ExecutionResult(1, "Error: The active command does not accept terminal input")
+                CommandInputState.ABSENT ->
+                    ExecutionResult(1, "Error: No interactive command is running")
+            }
         }
+        val lease = activeCommands.reserve(interactive)
+            ?: return ExecutionResult(1, "Error: Another command is already running")
+        var process: Process? = null
         return try {
-            val process = ProcessBuilder(command)
+            process = ProcessBuilder(command)
                 .directory(prefixDir)
                 .redirectErrorStream(true)
                 .also { builder ->
@@ -1895,8 +1919,10 @@ class LinuxRuntime(context: Context) {
                     builder.environment().putAll(getTermuxEnv())
                 }
                 .start()
-            activeCommandProcess = process
-            activeCommandAcceptsInput = interactive
+            if (!activeCommands.attach(lease, process)) {
+                process.destroyForcibly()
+                return ExecutionResult(1, "Error: Command was cancelled before it started")
+            }
             val output = StringBuilder()
             val reader = InputStreamReader(process.inputStream)
             val buffer = CharArray(1024)
@@ -1912,8 +1938,7 @@ class LinuxRuntime(context: Context) {
         } catch (error: Exception) {
             ExecutionResult(1, "Error: ${error.message}")
         } finally {
-            activeCommandProcess = null
-            activeCommandAcceptsInput = false
+            activeCommands.release(lease)
         }
     }
 
@@ -2732,26 +2757,39 @@ $stagedProfile
 
     // ── Command Execution ──
 
-    fun executeCommand(command: String, onOutput: ((String) -> Unit)? = null): String {
+    fun executeCommand(
+        command: String,
+        onOutput: ((String) -> Unit)? = null,
+        interactive: Boolean = false,
+        stdin: String? = null,
+    ): String {
         if (packageOperationCancelled) return "Error: Package operation cancelled"
-        activeCommandProcess?.let { process ->
-            try {
-                Log.d(TAG, "Routing input to active command: $command")
-                val os = process.outputStream
-                os.write((command + "\n").toByteArray())
-                os.flush()
-                return ""
-            } catch (e: Exception) {
-                Log.w(TAG, "Active process closed or failed to receive input: ${e.message}")
+        if (!isBootstrapped()) return "Error: Runtime not bootstrapped"
+        if (stdin != null) {
+            val input = activeCommands.input()
+            return when (input.state) {
+                CommandInputState.READY -> try {
+                    input.process!!.outputStream.apply {
+                        write((stdin + "\n").toByteArray())
+                        flush()
+                    }
+                    ""
+                } catch (error: Exception) {
+                    "Error: ${error.message}"
+                }
+                CommandInputState.STARTING -> "Error: The interactive command is still starting"
+                CommandInputState.NOT_INTERACTIVE ->
+                    "Error: The active command does not accept terminal input"
+                CommandInputState.ABSENT -> "Error: No interactive command is running"
             }
         }
-
-        if (!isBootstrapped()) return "Error: Runtime not bootstrapped"
 
         compileSocketHook()
 
         val bashBin = File(prefixDir, "bin/bash").absolutePath
         val fullCommand = listOf(bashBin, "-c", command)
+        val lease = activeCommands.reserve(interactive)
+            ?: return "Error: Another command is already running"
 
         return try {
             Log.d(TAG, "Executing command natively: $command")
@@ -2765,7 +2803,10 @@ $stagedProfile
                 }
                 .start()
 
-            activeCommandProcess = process
+            if (!activeCommands.attach(lease, process)) {
+                process.destroyForcibly()
+                return "Error: Command was cancelled before it started"
+            }
 
             val output = StringBuilder()
             val reader = java.io.InputStreamReader(process.inputStream)
@@ -2779,23 +2820,23 @@ $stagedProfile
                 onOutput?.invoke(chunk)
             }
             process.waitFor()
-            activeCommandProcess = null
             Log.d(TAG, "Command finished with exit code: ${process.exitValue()}")
 
             if (process.exitValue() != 0) {
-                throw Exception("Command failed with exit code ${process.exitValue()}. Output: \n$output")
+                throw Exception("Command failed with exit code ${process.exitValue()}. Output: $output")
             }
 
             output.toString()
         } catch (e: Exception) {
-            activeCommandProcess = null
             Log.e(TAG, "Command execution failed: ${e.message}")
             "Error: ${e.message}"
+        } finally {
+            activeCommands.release(lease)
         }
     }
 
     fun interruptCommand() {
-        activeCommandProcess?.let { process ->
+        activeCommands.cancel()?.let { process ->
             Log.d(TAG, "Interrupting active command...")
             val rootPid = processPid(process)
             val descendants = rootPid?.let(::descendantPids).orEmpty()
@@ -2809,8 +2850,6 @@ $stagedProfile
             descendants.asReversed().forEach { pid -> android.os.Process.sendSignal(pid, 9) }
             if (process.isAlive) process.destroyForcibly()
         }
-        activeCommandProcess = null
-        activeCommandAcceptsInput = false
     }
 
     private fun processPid(process: Process): Int? = runCatching {

@@ -214,7 +214,7 @@ class LinuxEnvironmentManagerTest {
         adapters: List<EnvironmentAdapter>,
         capabilities: RuntimeCapabilities = capabilities(),
         selection: FakeSelectionStore = FakeSelectionStore(),
-        legacySelection: () -> EnvironmentKind? = { null },
+        legacySelection: (RuntimeCapabilities) -> EnvironmentKind? = { null },
     ) = LinuxEnvironmentManager(
         adapters = adapters,
         capabilities = { capabilities },

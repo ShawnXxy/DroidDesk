@@ -206,24 +206,7 @@ class AndroidRuntimeCapabilitySource(
 
     override fun probeClipboard(): CapabilityEvidence = linuxRuntime.probeClipboard()
 
-    override fun probeChroot(): CapabilityEvidence = when {
-        !chrootRuntime.hasRoot() -> CapabilityEvidence(
-            EvidenceState.UNAVAILABLE,
-            "Root access is unavailable",
-        )
-        !chrootRuntime.isRootfsReady() -> CapabilityEvidence(
-            EvidenceState.PRESENT_UNVERIFIED,
-            "Root is available but the chroot rootfs is not installed",
-        )
-        chrootRuntime.isDesktopInstalled() -> CapabilityEvidence(
-            EvidenceState.SUPPORTED_AND_PROBED,
-            "Root, rootfs, and the chroot desktop are available",
-        )
-        else -> CapabilityEvidence(
-            EvidenceState.PRESENT_UNVERIFIED,
-            "Root and rootfs are present but the desktop is not installed",
-        )
-    }
+    override fun probeChroot(): CapabilityEvidence = chrootRuntime.probeFunctionality()
 
     override fun probeRenderer(): RendererProbe = linuxRuntime.probeRenderer()
 

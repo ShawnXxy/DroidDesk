@@ -6,7 +6,7 @@ internal class LinuxEnvironmentManager(
     adapters: List<EnvironmentAdapter>,
     private val capabilities: () -> RuntimeCapabilities,
     private val selectionStore: EnvironmentSelectionStore,
-    private val legacySelection: () -> EnvironmentKind? = { null },
+    private val legacySelection: (RuntimeCapabilities) -> EnvironmentKind? = { null },
 ) {
     private val adaptersInOrder = adapters.toList()
     private val adaptersByKind = adapters.associateBy(EnvironmentAdapter::kind)
@@ -19,10 +19,20 @@ internal class LinuxEnvironmentManager(
     }
 
     fun recommendedKind(): EnvironmentKind {
-        selectedKindOrNull()?.let { return it }
+        persistedKindOrNull()?.let { return it }
         val detected = capabilities()
+        val migrated = legacySelection(detected)?.takeIf(adaptersByKind::containsKey)
+        if (migrated != null) {
+            selectionStore.write(migrated)
+            return migrated
+        }
+        return recommendedKind(detected)
+    }
+
+    private fun recommendedKind(detected: RuntimeCapabilities): EnvironmentKind {
         return when {
             detected.chroot.state == EvidenceState.SUPPORTED_AND_PROBED &&
+                !detected.x11.blocksProvisioning &&
                 adaptersByKind.containsKey(EnvironmentKind.CHROOT_UBUNTU) ->
                 EnvironmentKind.CHROOT_UBUNTU
             detected.prootCandidate && adaptersByKind.containsKey(EnvironmentKind.PROOT_DEBIAN) ->
@@ -34,8 +44,9 @@ internal class LinuxEnvironmentManager(
     }
 
     fun status(): EnvironmentStatus {
-        val kind = selectedKindOrNull() ?: recommendedKind()
-        return adapter(kind).status(capabilities())
+        val detected = capabilities()
+        val kind = selectedKindOrNull(detected) ?: recommendedKind(detected)
+        return adapter(kind).status(detected)
     }
 
     fun provision(
@@ -114,17 +125,25 @@ internal class LinuxEnvironmentManager(
     fun paths(kind: EnvironmentKind = activeKind()): EnvironmentPaths =
         adapter(kind).paths()
 
-    fun activeKind(): EnvironmentKind = selectedKindOrNull() ?: recommendedKind()
+    fun activeKind(): EnvironmentKind {
+        return persistedKindOrNull() ?: recommendedKind()
+    }
 
-    private fun selectedKindOrNull(): EnvironmentKind? {
-        val persisted = selectionStore.read()
-        if (persisted != null) {
-            return EnvironmentKind.fromWire(persisted)
-                ?: throw IllegalStateException("Unknown persisted Linux environment: $persisted")
-        }
-        val migrated = legacySelection()?.takeIf(adaptersByKind::containsKey) ?: return null
+    private fun selectedKindOrNull(
+        detected: RuntimeCapabilities? = null,
+    ): EnvironmentKind? {
+        persistedKindOrNull()?.let { return it }
+        val migrated = legacySelection(detected ?: capabilities())
+            ?.takeIf(adaptersByKind::containsKey)
+            ?: return null
         selectionStore.write(migrated)
         return migrated
+    }
+
+    private fun persistedKindOrNull(): EnvironmentKind? {
+        val persisted = selectionStore.read() ?: return null
+        return EnvironmentKind.fromWire(persisted)
+            ?: throw IllegalStateException("Unknown persisted Linux environment: $persisted")
     }
 
     private fun adapter(kind: EnvironmentKind): EnvironmentAdapter =
@@ -175,9 +194,10 @@ internal fun createLinuxEnvironmentManager(
         ),
         capabilities = probe::probe,
         selectionStore = SharedPreferencesEnvironmentSelectionStore(context.applicationContext),
-        legacySelection = {
+        legacySelection = { detected ->
             when {
-                chrootRuntime.hasRoot() &&
+                detected.chroot.state == EvidenceState.SUPPORTED_AND_PROBED &&
+                    !detected.x11.blocksProvisioning &&
                     chrootRuntime.isRootfsReady() &&
                     chrootRuntime.isDesktopInstalled() ->
                     EnvironmentKind.CHROOT_UBUNTU

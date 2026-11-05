@@ -60,6 +60,7 @@ class DesktopActivity : Activity() {
     private var lorieView: LorieView? = null
     private var connectionRequested = false
     private var shouldStartSession = false
+    private var sessionStartPending = false
     private var sessionMode = "termux"
     private var desktopEnv = "xfce4"
     private lateinit var linuxRuntime: LinuxRuntime
@@ -431,7 +432,6 @@ class DesktopActivity : Activity() {
         lorieView?.requestFocus()
         inputController?.reacquireFocus()
         applyWindowGeometry()
-        waitForDesktopAndReveal()
     }
 
     private fun currentProfileKind(): ProfileKind = DisplayProfilePolicy.classify(
@@ -519,9 +519,12 @@ class DesktopActivity : Activity() {
         if (inputController != null && LorieView.connected()) {
             if (displayCoordinator.consumeSessionStart(lease)) {
                 shouldStartSession = true
+                sessionStartPending = true
                 view.postDelayed({
                     if (isCurrentRenderer()) startDesktopSessionIfRequested()
                 }, 250)
+            } else if (!sessionStartPending && !desktopReady && !desktopRevealed) {
+                waitForDesktopAndReveal()
             }
             displayCoordinator.onAttached(lease, displayRequestId, content)
         }
@@ -958,13 +961,19 @@ class DesktopActivity : Activity() {
                 )
                 Handler(Looper.getMainLooper()).post {
                     coordinator.sessionStarted(epoch, outcome)
-                    activity.get()?.takeIf { it.isCurrentRenderer() }?.waitForDesktopAndReveal()
+                    activity.get()?.takeIf { it.isCurrentRenderer() }?.let {
+                        it.sessionStartPending = false
+                        it.waitForDesktopAndReveal()
+                    }
                 }
             } catch (error: Exception) {
                 Log.e(TAG, "Desktop session failed", error)
                 Handler(Looper.getMainLooper()).post {
                     coordinator.sessionStarted(epoch, Result.failure(error))
-                    activity.get()?.takeIf { it.isCurrentRenderer() }?.revealDesktop(false)
+                    activity.get()?.takeIf { it.isCurrentRenderer() }?.let {
+                        it.sessionStartPending = false
+                        it.revealDesktop(false)
+                    }
                 }
             }
         }
@@ -1148,6 +1157,7 @@ class DesktopActivity : Activity() {
     private fun detachRenderer() {
         if (rendererReleased) return
         rendererReleased = true
+        sessionStartPending = false
         profileRevision++
         desktopReady = false
         val ownedLease = rendererLease

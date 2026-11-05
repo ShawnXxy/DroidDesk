@@ -82,7 +82,15 @@ internal class ChrootUbuntuEnvironment(
             override fun executeShell(
                 command: String,
                 onOutput: ((String) -> Unit)?,
+                interactive: Boolean,
+                stdin: Boolean,
             ): ExecutionResult {
+                if (stdin) {
+                    return ExecutionResult(
+                        1,
+                        "Error: Interactive stdin is unavailable for the rooted chroot terminal",
+                    )
+                }
                 val wasRunning = runtime.isRunning()
                 if (!wasRunning) runtime.ensureMounts()
                 return try {

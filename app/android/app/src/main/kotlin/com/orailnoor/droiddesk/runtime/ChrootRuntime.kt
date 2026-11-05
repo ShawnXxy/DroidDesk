@@ -29,6 +29,8 @@ class ChrootRuntime(
     companion object {
         private const val TAG = "ChrootRuntime"
         private const val CHROOT_DE_MARKER = ".chroot_de_installed"
+        private const val CHROOT_PROBE_TIMEOUT_MS = 750L
+        private const val CHROOT_PROBE_CLEANUP_TIMEOUT_MS = 250L
 
         // Ubuntu 24.04 ARM64 minimal rootfs
         const val ROOTFS_URL =
@@ -60,6 +62,60 @@ class ChrootRuntime(
     fun isDesktopInstalled(): Boolean {
         return File(rootfsDir, CHROOT_DE_MARKER).exists() ||
                 File(rootfsDir, "usr/bin/startxfce4").exists()
+    }
+
+    fun probeFunctionality(): CapabilityEvidence {
+        if (!hasRoot()) {
+            return CapabilityEvidence(EvidenceState.UNAVAILABLE, "Root access is unavailable")
+        }
+        if (!isRootfsReady()) {
+            return CapabilityEvidence(
+                EvidenceState.PRESENT_UNVERIFIED,
+                "Root is available but the chroot rootfs is not installed",
+            )
+        }
+        if (!isDesktopInstalled()) {
+            return CapabilityEvidence(
+                EvidenceState.PRESENT_UNVERIFIED,
+                "Root and rootfs are present but the desktop is not installed",
+            )
+        }
+        val probeRoot = File(context.cacheDir, "chroot-capability-probe")
+        val source = File(probeRoot, "source")
+        val target = File(probeRoot, "target")
+        val cleanup = "umount -l ${shellQuote(target.absolutePath)} 2>/dev/null || true; " +
+            "rm -rf ${shellQuote(probeRoot.absolutePath)}"
+        val command = """
+            set -eu
+            $cleanup
+            mkdir -p ${shellQuote(source.absolutePath)} ${shellQuote(target.absolutePath)}
+            trap ${shellQuote(cleanup)} EXIT
+            printf droiddesk > ${shellQuote(File(source, "token").absolutePath)}
+            mount --bind ${shellQuote(source.absolutePath)} ${shellQuote(target.absolutePath)}
+            test "${'$'}(cat ${shellQuote(File(target, "token").absolutePath)})" = droiddesk
+            chroot ${shellQuote(rootfsDir.absolutePath)} /bin/bash -c \
+                'test "${'$'}(id -u)" = 0 && test -x /usr/bin/startxfce4'
+        """.trimIndent()
+        val result = try {
+            rootShell.execBounded(command, CHROOT_PROBE_TIMEOUT_MS)
+        } finally {
+            runCatching { rootShell.execBounded(cleanup, CHROOT_PROBE_CLEANUP_TIMEOUT_MS) }
+        }
+        return when {
+            result.exitCode == 0 ->
+                CapabilityEvidence(EvidenceState.SUPPORTED_AND_PROBED)
+            result.exitCode == 124 ->
+                CapabilityEvidence(
+                    EvidenceState.FAILED_SELF_TEST,
+                    "Rooted chroot functional probe timed out",
+                )
+            else ->
+                CapabilityEvidence(
+                    EvidenceState.FAILED_SELF_TEST,
+                    "Rooted chroot functional probe exited ${result.exitCode}" +
+                        result.output.trim().takeIf(String::isNotEmpty)?.let { ": $it" }.orEmpty(),
+                )
+        }
     }
 
     fun isRunning(): Boolean = sessionProcess?.isAlive == true
@@ -197,7 +253,10 @@ class ChrootRuntime(
 
         thread(name = "chroot-de-install") {
             try {
-                onProgress(0.0, "Mounting rootfs...")
+                onProgress(0.0, "Installing Android audio bridge...")
+                linuxRuntime.ensureHostAudio(onLog).getOrThrow()
+
+                onProgress(0.03, "Mounting rootfs...")
                 ensureMounts()
 
                 onProgress(0.05, "Fixing Android network permissions...")
@@ -399,7 +458,10 @@ class ChrootRuntime(
             }.onFailure { Log.w(TAG, "Android desktop launchers could not be refreshed", it) }
         }
 
-        val audioReady = linuxRuntime.startPulseAudio()
+        val audioReady = linuxRuntime.startPulseAudio().recoverCatching {
+            linuxRuntime.ensureHostAudio().getOrThrow()
+            linuxRuntime.startPulseAudio().getOrThrow()
+        }
         if (audioReady.isFailure) {
             Log.w(TAG, "Host audio is unavailable for the chroot desktop", audioReady.exceptionOrNull())
         }

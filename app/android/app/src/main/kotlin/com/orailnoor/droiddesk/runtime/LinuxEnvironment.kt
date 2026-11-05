@@ -70,6 +70,7 @@ data class EnvironmentPaths(
     val packageStatusFiles: List<File>,
     val snapshotMode: String,
     val guestHome: String = home.absolutePath,
+    val homeBindSources: Map<String, File> = emptyMap(),
 )
 
 data class ProvisionRequest(

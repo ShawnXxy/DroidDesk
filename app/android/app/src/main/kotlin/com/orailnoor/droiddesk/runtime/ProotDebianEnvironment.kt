@@ -83,6 +83,7 @@ interface ProotDebianHost : ProotProvisioningHost, ProotDesktopSessionHost {
     fun isRunning(): Boolean
     fun rootfsPath(): File
     fun rootfsSizeBytes(): Long
+    fun sharedHomeDirectories(): Map<String, File> = emptyMap()
     fun optionalAppsStatus(): Map<String, Boolean>
     fun executeActive(
         user: String,
@@ -221,6 +222,7 @@ internal class ProotDebianEnvironment(
             packageStatusFiles = listOf(File(rootfs, "var/lib/dpkg/status")),
             snapshotMode = "proot-debian",
             guestHome = "/home/droiddesk",
+            homeBindSources = host.sharedHomeDirectories(),
         )
     }
 }
@@ -440,6 +442,9 @@ internal class AndroidProotDebianHost(
 
     override fun rootfsPath(): File = containerRootfs(ProotDebianProvisioner.ACTIVE_CONTAINER)
 
+    override fun sharedHomeDirectories(): Map<String, File> =
+        SHARED_HOME_DIRECTORIES.associateWith { File(hostHome, it) }
+
     override fun rootfsSizeBytes(): Long {
         val rootfs = rootfsPath()
         if (!rootfs.isDirectory) {
@@ -608,11 +613,8 @@ internal class AndroidProotDebianHost(
         )
     }
 
-    private fun sharedFolderBinds(): List<ProotBind> = listOf(
-            "Downloads",
-            "Documents",
-            "Pictures",
-        ).map { name ->
+    private fun sharedFolderBinds(): List<ProotBind> =
+        SHARED_HOME_DIRECTORIES.map { name ->
             File(hostHome, name).mkdirs()
             ProotBind(File(hostHome, name), "/home/droiddesk/$name")
         }
@@ -636,6 +638,7 @@ internal class AndroidProotDebianHost(
         const val KEY_ROOTFS_SIZE_BYTES = "rootfs_size_bytes"
         const val KEY_ROOTFS_SIZE_REFRESHED_AT = "rootfs_size_refreshed_at"
         const val ROOTFS_SIZE_CACHE_TTL_MS = 10 * 60 * 1000L
+        val SHARED_HOME_DIRECTORIES = listOf("Downloads", "Documents", "Pictures")
         val ROOTFS_SIZE_EXECUTOR = Executors.newSingleThreadExecutor { task ->
             Thread(task, "ProotRootfsSize").apply { isDaemon = true }
         }

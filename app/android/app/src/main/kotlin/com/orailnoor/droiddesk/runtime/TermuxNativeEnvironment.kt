@@ -21,7 +21,12 @@ internal interface LegacyRuntimePort {
 
     fun start(desktop: String, profile: DisplayProfile?): Result<Unit>
     fun stop(): Result<Unit>
-    fun executeShell(command: String, onOutput: ((String) -> Unit)?): ExecutionResult
+    fun executeShell(
+        command: String,
+        onOutput: ((String) -> Unit)?,
+        interactive: Boolean,
+        stdin: Boolean,
+    ): ExecutionResult
     fun executeDesktop(command: String): Result<Unit>
     fun installOptionalApp(
         appId: String,
@@ -68,7 +73,12 @@ internal abstract class LegacyEnvironmentAdapter(
     override fun stop(): Result<Unit> = port.stop()
 
     override fun execute(request: ExecutionRequest): ExecutionResult = when (request) {
-        is ExecutionRequest.Shell -> port.executeShell(request.command, request.onOutput)
+        is ExecutionRequest.Shell -> port.executeShell(
+            request.command,
+            request.onOutput,
+            request.interactive,
+            request.stdin,
+        )
         is ExecutionRequest.Desktop -> {
             val result = port.executeDesktop(request.command)
             ExecutionResult(
@@ -165,8 +175,15 @@ internal class TermuxNativeEnvironment(
             override fun executeShell(
                 command: String,
                 onOutput: ((String) -> Unit)?,
+                interactive: Boolean,
+                stdin: Boolean,
             ): ExecutionResult {
-                val output = runtime.executeCommand(command, onOutput)
+                val output = runtime.executeCommand(
+                    command,
+                    onOutput,
+                    interactive,
+                    command.takeIf { stdin },
+                )
                 return ExecutionResult(if (output.startsWith("Error:")) 1 else 0, output)
             }
 
