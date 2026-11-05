@@ -29,6 +29,7 @@ class ChrootRuntime(
     companion object {
         private const val TAG = "ChrootRuntime"
         private const val CHROOT_DE_MARKER = ".chroot_de_installed"
+        private const val CHROOT_PROBE_ROOT_AUTH_TIMEOUT_MS = 750L
         private const val CHROOT_PROBE_TIMEOUT_MS = 750L
         private const val CHROOT_PROBE_CLEANUP_TIMEOUT_MS = 250L
 
@@ -57,6 +58,8 @@ class ChrootRuntime(
 
     fun hasRoot(): Boolean = rootShell.hasRoot()
 
+    fun resetRootAccessProbe() = rootShell.resetCache()
+
     fun isRootfsReady(): Boolean = rootfsManager.isRootfsReady()
 
     fun isDesktopInstalled(): Boolean {
@@ -65,8 +68,11 @@ class ChrootRuntime(
     }
 
     fun probeFunctionality(): CapabilityEvidence {
-        if (!hasRoot()) {
-            return CapabilityEvidence(EvidenceState.UNAVAILABLE, "Root access is unavailable")
+        if (!rootShell.hasRoot(CHROOT_PROBE_ROOT_AUTH_TIMEOUT_MS)) {
+            return CapabilityEvidence(
+                EvidenceState.UNAVAILABLE,
+                "Root access is unavailable or authorization timed out",
+            )
         }
         if (!isRootfsReady()) {
             return CapabilityEvidence(
@@ -99,7 +105,9 @@ class ChrootRuntime(
         val result = try {
             rootShell.execBounded(command, CHROOT_PROBE_TIMEOUT_MS)
         } finally {
+            val interrupted = Thread.interrupted()
             runCatching { rootShell.execBounded(cleanup, CHROOT_PROBE_CLEANUP_TIMEOUT_MS) }
+            if (interrupted) Thread.currentThread().interrupt()
         }
         return when {
             result.exitCode == 0 ->

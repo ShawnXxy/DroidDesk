@@ -4,6 +4,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.util.concurrent.Executor
 
 class RuntimeCapabilityProbeTest {
 
@@ -183,6 +184,25 @@ class RuntimeCapabilityProbeTest {
         assertEquals(EvidenceState.SUPPORTED_AND_PROBED, capabilities.proot.state)
     }
 
+    @Test
+    fun capabilityCacheReturnsPendingEvidenceUntilBackgroundRefreshRuns() {
+        val probe = RuntimeCapabilityProbe(
+            source = FakeCapabilitySource(),
+            requiredBytes = GIB,
+        )
+        val queued = QueuedExecutor()
+        val cache = RuntimeCapabilityCache(
+            load = probe::probe,
+            initial = probe.pending(),
+            executor = queued,
+            refreshIntervalMillis = Long.MAX_VALUE,
+        )
+
+        assertEquals(EvidenceState.PRESENT_UNVERIFIED, cache.current().proot.state)
+        queued.runAll()
+        assertEquals(EvidenceState.SUPPORTED_AND_PROBED, cache.current().proot.state)
+    }
+
     private class FakeCapabilitySource(
         override val apiLevel: Int = 36,
         override val abi: String = "arm64-v8a",
@@ -231,5 +251,17 @@ class RuntimeCapabilityProbeTest {
     private companion object {
         const val MIB = 1024L * 1024L
         const val GIB = 1024L * MIB
+    }
+
+    private class QueuedExecutor : Executor {
+        private val tasks = mutableListOf<Runnable>()
+
+        override fun execute(command: Runnable) {
+            tasks += command
+        }
+
+        fun runAll() {
+            while (tasks.isNotEmpty()) tasks.removeAt(0).run()
+        }
     }
 }

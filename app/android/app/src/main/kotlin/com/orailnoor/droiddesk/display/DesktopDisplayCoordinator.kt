@@ -77,6 +77,7 @@ class DesktopDisplayCoordinator(
     private var stoppingTarget: DesktopStartupTarget? = null
     private var stopFailed = false
     private var needsSessionStart = false
+    private var sessionStartClaim: Long? = null
     private var sessionStarting = false
     private var cancelAutomaticTimer: (() -> Unit)? = null
     private var automaticTargetKey: String? = null
@@ -126,6 +127,7 @@ class DesktopDisplayCoordinator(
         desktopEnv = desktop
         if (start) {
             needsSessionStart = true
+            sessionStartClaim = null
             sessionStarting = true
             profileRefresher?.invoke {}
         }
@@ -166,14 +168,26 @@ class DesktopDisplayCoordinator(
 
     fun consumeSessionStart(lease: RendererLease): Boolean {
         assertMainThread()
-        if (!isCurrent(lease) || !needsSessionStart) return false
-        needsSessionStart = false
+        if (!isCurrent(lease) || !needsSessionStart || sessionStartClaim != null) return false
+        sessionStartClaim = lease.generation
         return true
+    }
+
+    fun beginSessionStart(lease: RendererLease): Long? {
+        assertMainThread()
+        if (!isCurrent(lease) || !needsSessionStart || sessionStartClaim != lease.generation) {
+            return null
+        }
+        needsSessionStart = false
+        sessionStartClaim = null
+        return sessionGeneration
     }
 
     fun sessionStarted(epoch: Long, result: Result<Unit>) {
         assertMainThread()
         if (!isSessionCurrent(epoch)) return
+        needsSessionStart = false
+        sessionStartClaim = null
         sessionStarting = false
         result.exceptionOrNull()?.let {
             reportError(DesktopDisplayException("SESSION_STOPPED", it.message ?: "Linux session failed to start"))
@@ -215,6 +229,7 @@ class DesktopDisplayCoordinator(
         val previous = owner
         owner = null
         profileRefresher = null
+        releaseSessionStartClaim(previous?.lease)
         previous?.detach?.invoke()
         if (move == null) previous?.finish?.invoke()
         check(!isStopped) { "SESSION_STOPPED" }
@@ -248,6 +263,7 @@ class DesktopDisplayCoordinator(
         if (current.lease != lease) return
         owner = null
         profileRefresher = null
+        releaseSessionStartClaim(current.lease)
         current.detach()
         appliedKind = null
         renderSize = null
@@ -264,6 +280,7 @@ class DesktopDisplayCoordinator(
         sessionGeneration++
         generation++
         needsSessionStart = false
+        sessionStartClaim = null
         sessionStarting = false
         stopFailed = false
         val pending = move
@@ -872,6 +889,12 @@ class DesktopDisplayCoordinator(
         error = failure
         if (!isStopped) phase = "error"
         publish()
+    }
+
+    private fun releaseSessionStartClaim(lease: RendererLease?) {
+        if (lease != null && sessionStartClaim == lease.generation) {
+            sessionStartClaim = null
+        }
     }
 
     private fun publish() {

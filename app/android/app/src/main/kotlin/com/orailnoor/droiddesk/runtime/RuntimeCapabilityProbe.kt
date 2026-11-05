@@ -4,10 +4,12 @@ import android.content.Context
 import android.content.pm.PackageManager
 import android.os.Build
 import java.util.concurrent.Callable
+import java.util.concurrent.Executor
 import java.util.concurrent.Executors
 import java.util.concurrent.Future
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.TimeoutException
+import java.util.concurrent.atomic.AtomicBoolean
 
 interface RuntimeCapabilitySource {
     val apiLevel: Int
@@ -31,6 +33,52 @@ class RuntimeCapabilityProbe(
     private val requiredBytes: Long = DEFAULT_REQUIRED_BYTES,
     private val timeoutMillis: Long = DEFAULT_TIMEOUT_MILLIS,
 ) {
+    fun pending(): RuntimeCapabilities {
+        val pending = CapabilityEvidence(
+            EvidenceState.PRESENT_UNVERIFIED,
+            "Capability probe is pending",
+        )
+        val avfPresent = source.hasAvfFeature()
+        val avfFeature = if (avfPresent) {
+            CapabilityEvidence(
+                EvidenceState.PRESENT_UNVERIFIED,
+                "Android Virtualization Framework is present but is not a DroidDesk runtime",
+            )
+        } else {
+            CapabilityEvidence(EvidenceState.UNAVAILABLE, "AVF system feature is absent")
+        }
+        val avfPermission = when {
+            !avfPresent -> CapabilityEvidence(
+                EvidenceState.UNAVAILABLE,
+                "AVF system feature is absent",
+            )
+            source.hasVmPermissions() -> CapabilityEvidence(EvidenceState.SUPPORTED_AND_PROBED)
+            else -> CapabilityEvidence(
+                EvidenceState.BLOCKED_BY_PERMISSION,
+                "The app lacks platform VM management permissions",
+            )
+        }
+        return RuntimeCapabilities(
+            hostApiLevel = source.apiLevel,
+            abi = source.abi,
+            host = hostEvidence(),
+            localExecution = pending,
+            proot = pending,
+            x11 = pending,
+            audio = pending,
+            clipboard = pending,
+            chroot = pending,
+            avfFeature = avfFeature,
+            avfPermission = avfPermission,
+            renderer = pending,
+            rendererBackend = RendererBackend.UNKNOWN,
+            storage = storageEvidence(),
+            availableBytes = source.availableBytes,
+            requiredBytes = requiredBytes,
+            distribution = distributionContract(),
+        )
+    }
+
     fun probe(): RuntimeCapabilities {
         val executor = Executors.newCachedThreadPool()
         try {
@@ -75,15 +123,6 @@ class RuntimeCapabilityProbe(
                     "The app lacks platform VM management permissions",
                 )
             }
-            val storage = if (source.availableBytes >= requiredBytes) {
-                CapabilityEvidence(EvidenceState.SUPPORTED_AND_PROBED)
-            } else {
-                CapabilityEvidence(
-                    EvidenceState.BLOCKED_BY_POLICY,
-                    "Requires $requiredBytes bytes but only ${source.availableBytes} are available",
-                )
-            }
-
             return RuntimeCapabilities(
                 hostApiLevel = source.apiLevel,
                 abi = source.abi,
@@ -98,14 +137,10 @@ class RuntimeCapabilityProbe(
                 avfPermission = avfPermission,
                 renderer = rendererProbe.evidence,
                 rendererBackend = rendererProbe.backend,
-                storage = storage,
+                storage = storageEvidence(),
                 availableBytes = source.availableBytes,
                 requiredBytes = requiredBytes,
-                distribution = DistributionContract(
-                    channel = DistributionChannel.SIDELOAD_LOCAL_LINUX,
-                    targetSdk = source.targetSdk,
-                    requiresAppPrivateElfExecution = true,
-                ),
+                distribution = distributionContract(),
             )
         } finally {
             executor.shutdownNow()
@@ -127,6 +162,22 @@ class RuntimeCapabilityProbe(
         )
         else -> CapabilityEvidence(EvidenceState.SUPPORTED_AND_PROBED)
     }
+
+    private fun storageEvidence(): CapabilityEvidence =
+        if (source.availableBytes >= requiredBytes) {
+            CapabilityEvidence(EvidenceState.SUPPORTED_AND_PROBED)
+        } else {
+            CapabilityEvidence(
+                EvidenceState.BLOCKED_BY_POLICY,
+                "Requires $requiredBytes bytes but only ${source.availableBytes} are available",
+            )
+        }
+
+    private fun distributionContract() = DistributionContract(
+        channel = DistributionChannel.SIDELOAD_LOCAL_LINUX,
+        targetSdk = source.targetSdk,
+        requiresAppPrivateElfExecution = true,
+    )
 
     private fun awaitEvidence(
         future: Future<CapabilityEvidence>,
@@ -179,6 +230,44 @@ class RuntimeCapabilityProbe(
         const val LOCAL_LINUX_TARGET_SDK = 28
         const val DEFAULT_TIMEOUT_MILLIS = 1_000L
         const val DEFAULT_REQUIRED_BYTES = 2L * 1024L * 1024L * 1024L
+    }
+}
+
+internal class RuntimeCapabilityCache(
+    private val load: () -> RuntimeCapabilities,
+    initial: RuntimeCapabilities,
+    private val executor: Executor = Executors.newSingleThreadExecutor { task ->
+        Thread(task, "RuntimeCapabilityProbe").apply { isDaemon = true }
+    },
+    private val refreshIntervalMillis: Long = 10_000L,
+) {
+    @Volatile private var cached = initial
+    @Volatile private var refreshedAt = 0L
+    private val refreshInFlight = AtomicBoolean(false)
+
+    init {
+        refresh()
+    }
+
+    fun current(): RuntimeCapabilities {
+        if (System.currentTimeMillis() - refreshedAt >= refreshIntervalMillis) {
+            refresh()
+        }
+        return cached
+    }
+
+    fun refresh() {
+        if (!refreshInFlight.compareAndSet(false, true)) return
+        executor.execute {
+            try {
+                runCatching(load).onSuccess {
+                    cached = it
+                }
+            } finally {
+                refreshedAt = System.currentTimeMillis()
+                refreshInFlight.set(false)
+            }
+        }
     }
 }
 

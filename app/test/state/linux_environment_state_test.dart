@@ -31,6 +31,7 @@ void main() {
 
   test('failed PRoot probe preselects Native and retains the reason', () async {
     native.runtimeStatus = environmentStatusPayload(
+      kind: 'termuxNative',
       prootCandidate: false,
       prootState: 'FAILED_SELF_TEST',
     );
@@ -69,6 +70,15 @@ void main() {
     await state.refreshStatus();
 
     expect(state.selectedEnvironment, LinuxEnvironmentKind.termuxNative);
+  });
+
+  test('root availability does not override the native recommendation', () async {
+    native.runtimeStatus = environmentStatusPayload(kind: 'prootDebian')
+      ..['hasRoot'] = true;
+
+    await state.refreshStatus();
+
+    expect(state.selectedEnvironment, LinuxEnvironmentKind.prootDebian);
   });
 
   test('switching a running environment stops before provisioning', () async {

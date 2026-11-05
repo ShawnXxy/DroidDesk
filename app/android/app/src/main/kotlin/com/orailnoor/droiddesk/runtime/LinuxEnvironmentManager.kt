@@ -174,10 +174,15 @@ internal fun createLinuxEnvironmentManager(
     context: Context,
     linuxRuntime: LinuxRuntime = LinuxRuntime(context.applicationContext),
     chrootRuntime: ChrootRuntime = ChrootRuntime(context.applicationContext, linuxRuntime),
+    capabilities: (() -> RuntimeCapabilities)? = null,
 ): LinuxEnvironmentManager {
     val probe = RuntimeCapabilityProbe(
         AndroidRuntimeCapabilitySource(context.applicationContext, linuxRuntime, chrootRuntime),
     )
+    val capabilityProvider = capabilities ?: RuntimeCapabilityCache(
+        probe::probe,
+        probe.pending(),
+    )::current
     return LinuxEnvironmentManager(
         adapters = listOf(
             TermuxNativeEnvironment(context.applicationContext, linuxRuntime),
@@ -192,7 +197,7 @@ internal fun createLinuxEnvironmentManager(
             },
             ChrootUbuntuEnvironment(context.applicationContext, chrootRuntime),
         ),
-        capabilities = probe::probe,
+        capabilities = capabilityProvider,
         selectionStore = SharedPreferencesEnvironmentSelectionStore(context.applicationContext),
         legacySelection = { detected ->
             when {

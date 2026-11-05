@@ -494,14 +494,8 @@ class AppState extends ChangeNotifier {
       _hasRoot = status.hasRoot;
       _installedDistro = status.distro;
       _installedDE = status.desktop;
-      if (status.installed) {
+      if (status.installed || !_environmentSelectionExplicit) {
         _selectedEnvironment = status.kind;
-      } else if (!_environmentSelectionExplicit) {
-        _selectedEnvironment = status.hasRoot
-            ? LinuxEnvironmentKind.chrootUbuntu
-            : status.capabilities.prootInstallable
-                ? LinuxEnvironmentKind.prootDebian
-                : LinuxEnvironmentKind.termuxNative;
       }
 
       if (_installedDE.isNotEmpty) {

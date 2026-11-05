@@ -521,7 +521,10 @@ class DesktopActivity : Activity() {
                 shouldStartSession = true
                 sessionStartPending = true
                 view.postDelayed({
-                    if (isCurrentRenderer()) startDesktopSessionIfRequested()
+                    if (!isCurrentRenderer()) return@postDelayed
+                    val startEpoch = displayCoordinator.beginSessionStart(lease)
+                        ?: return@postDelayed
+                    startDesktopSessionIfRequested(startEpoch)
                 }, 250)
             } else if (!sessionStartPending && !desktopReady && !desktopRevealed) {
                 waitForDesktopAndReveal()
@@ -904,8 +907,7 @@ class DesktopActivity : Activity() {
         }
     }
 
-    private fun startDesktopSessionIfRequested() {
-        if (!shouldStartSession) return
+    private fun startDesktopSessionIfRequested(startEpoch: Long) {
         shouldStartSession = false
         desktopReady = false
         appliedUiProfile = null
@@ -924,7 +926,7 @@ class DesktopActivity : Activity() {
             loadingMessageHandler.postDelayed(loadingMessageTicker, 5_000)
             loadingMessageHandler.postDelayed(loadingEstimateTicker, 1_000)
         }
-        val epoch = sessionEpoch
+        val epoch = startEpoch
         val coordinator = displayCoordinator
         val rooted = chrootRuntime
         val mode = sessionMode

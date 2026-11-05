@@ -62,6 +62,7 @@ class MainActivity : FlutterActivity() {
     private lateinit var chrootRuntime: ChrootRuntime
     private lateinit var desktopIntegration: DesktopIntegration
     private lateinit var runtimeCapabilityProbe: RuntimeCapabilityProbe
+    private lateinit var runtimeCapabilityCache: com.orailnoor.droiddesk.runtime.RuntimeCapabilityCache
     private lateinit var environmentManager: LinuxEnvironmentManager
     private var displayStateSubscription: (() -> Unit)? = null
 
@@ -108,10 +109,15 @@ class MainActivity : FlutterActivity() {
         runtimeCapabilityProbe = RuntimeCapabilityProbe(
             AndroidRuntimeCapabilitySource(applicationContext, linuxRuntime, chrootRuntime),
         )
+        runtimeCapabilityCache = com.orailnoor.droiddesk.runtime.RuntimeCapabilityCache(
+            runtimeCapabilityProbe::probe,
+            runtimeCapabilityProbe.pending(),
+        )
         environmentManager = createLinuxEnvironmentManager(
             applicationContext,
             linuxRuntime,
             chrootRuntime,
+            runtimeCapabilityCache::current,
         )
         desktopIntegration = DesktopIntegration(this)
         DesktopDisplayCoordinator.shared.initialize(applicationContext)
@@ -431,7 +437,7 @@ class MainActivity : FlutterActivity() {
 
                 // ── Device Info ──
                 "getDeviceInfo" -> {
-                    val capabilities = runtimeCapabilityProbe.probe()
+                    val capabilities = runtimeCapabilityCache.current()
                     result.success(mapOf(
                         "model" to Build.MODEL,
                         "brand" to Build.BRAND,
@@ -448,6 +454,7 @@ class MainActivity : FlutterActivity() {
                 // ── Root checks ──
                 "checkRoot" -> {
                     thread {
+                        chrootRuntime.resetRootAccessProbe()
                         val ok = chrootRuntime.hasRoot()
                         runOnUiThread { result.success(ok) }
                     }
