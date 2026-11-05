@@ -20,12 +20,18 @@ import com.orailnoor.droiddesk.display.DisplayProfilePolicy
  * real chroot. X11 output is sent to the app's embedded LorieView X server
  * through a bind-mounted Unix socket.
  */
-class ChrootRuntime(context: Context) {
+class ChrootRuntime(
+    context: Context,
+    private val linuxRuntime: LinuxRuntime = LinuxRuntime(context.applicationContext),
+) {
     private val context = context.applicationContext
 
     companion object {
         private const val TAG = "ChrootRuntime"
         private const val CHROOT_DE_MARKER = ".chroot_de_installed"
+        private const val CHROOT_PROBE_ROOT_AUTH_TIMEOUT_MS = 750L
+        private const val CHROOT_PROBE_TIMEOUT_MS = 750L
+        private const val CHROOT_PROBE_CLEANUP_TIMEOUT_MS = 250L
 
         // Ubuntu 24.04 ARM64 minimal rootfs
         const val ROOTFS_URL =
@@ -45,16 +51,81 @@ class ChrootRuntime(context: Context) {
     private val rootfsDir: File get() = File(baseDir, "rootfs")
     private val tmpDir: File get() = File(baseDir, "tmp")
     private val x11HostDir: File get() = File(tmpDir, ".X11-unix")
+    private val pulseCookie: File get() = File(baseDir, "home/.config/pulse/cookie")
 
     // ── Status ──
 
     fun hasRoot(): Boolean = rootShell.hasRoot()
+
+    fun resetRootAccessProbe() = rootShell.resetCache()
 
     fun isRootfsReady(): Boolean = rootfsManager.isRootfsReady()
 
     fun isDesktopInstalled(): Boolean {
         return File(rootfsDir, CHROOT_DE_MARKER).exists() ||
                 File(rootfsDir, "usr/bin/startxfce4").exists()
+    }
+
+    fun probeFunctionality(): CapabilityEvidence {
+        if (!rootShell.hasRoot(CHROOT_PROBE_ROOT_AUTH_TIMEOUT_MS)) {
+            return CapabilityEvidence(
+                EvidenceState.UNAVAILABLE,
+                "Root access is unavailable or authorization timed out",
+            )
+        }
+        if (!isRootfsReady()) {
+            return CapabilityEvidence(
+                EvidenceState.PRESENT_UNVERIFIED,
+                "Root is available but the chroot rootfs is not installed",
+            )
+        }
+        if (!isDesktopInstalled()) {
+            return CapabilityEvidence(
+                EvidenceState.PRESENT_UNVERIFIED,
+                "Root and rootfs are present but the desktop is not installed",
+            )
+        }
+        val probeRoot = File(
+            context.cacheDir,
+            "chroot-capability-probe-${UUID.randomUUID()}",
+        )
+        val source = File(probeRoot, "source")
+        val target = File(probeRoot, "target")
+        val cleanup = "umount -l ${shellQuote(target.absolutePath)} 2>/dev/null || true; " +
+            "rm -rf ${shellQuote(probeRoot.absolutePath)}"
+        val command = """
+            set -eu
+            $cleanup
+            mkdir -p ${shellQuote(source.absolutePath)} ${shellQuote(target.absolutePath)}
+            trap ${shellQuote(cleanup)} EXIT
+            printf droiddesk > ${shellQuote(File(source, "token").absolutePath)}
+            mount --bind ${shellQuote(source.absolutePath)} ${shellQuote(target.absolutePath)}
+            test "${'$'}(cat ${shellQuote(File(target, "token").absolutePath)})" = droiddesk
+            chroot ${shellQuote(rootfsDir.absolutePath)} /bin/bash -c \
+                'test "${'$'}(id -u)" = 0 && test -x /usr/bin/startxfce4'
+        """.trimIndent()
+        val result = try {
+            rootShell.execBounded(command, CHROOT_PROBE_TIMEOUT_MS)
+        } finally {
+            val interrupted = Thread.interrupted()
+            runCatching { rootShell.execBounded(cleanup, CHROOT_PROBE_CLEANUP_TIMEOUT_MS) }
+            if (interrupted) Thread.currentThread().interrupt()
+        }
+        return when {
+            result.exitCode == 0 ->
+                CapabilityEvidence(EvidenceState.SUPPORTED_AND_PROBED)
+            result.exitCode == 124 ->
+                CapabilityEvidence(
+                    EvidenceState.FAILED_SELF_TEST,
+                    "Rooted chroot functional probe timed out",
+                )
+            else ->
+                CapabilityEvidence(
+                    EvidenceState.FAILED_SELF_TEST,
+                    "Rooted chroot functional probe exited ${result.exitCode}" +
+                        result.output.trim().takeIf(String::isNotEmpty)?.let { ": $it" }.orEmpty(),
+                )
+        }
     }
 
     fun isRunning(): Boolean = sessionProcess?.isAlive == true
@@ -131,6 +202,8 @@ class ChrootRuntime(context: Context) {
                 #!/bin/bash
                 # DroidDesk portable graphics environment
                 export DISPLAY=:0
+                export PULSE_SERVER=tcp:127.0.0.1
+                export PULSE_COOKIE=/root/.config/pulse/cookie
                 export XDG_RUNTIME_DIR=/tmp/runtime-root
                 export XDG_SESSION_TYPE=x11
                 export XDG_DATA_DIRS=/usr/share:/usr/local/share
@@ -190,7 +263,10 @@ class ChrootRuntime(context: Context) {
 
         thread(name = "chroot-de-install") {
             try {
-                onProgress(0.0, "Mounting rootfs...")
+                onProgress(0.0, "Installing Android audio bridge...")
+                linuxRuntime.ensureHostAudio(onLog).getOrThrow()
+
+                onProgress(0.03, "Mounting rootfs...")
                 ensureMounts()
 
                 onProgress(0.05, "Fixing Android network permissions...")
@@ -392,8 +468,17 @@ class ChrootRuntime(context: Context) {
             }.onFailure { Log.w(TAG, "Android desktop launchers could not be refreshed", it) }
         }
 
+        val audioReady = linuxRuntime.startPulseAudio().recoverCatching {
+            linuxRuntime.ensureHostAudio().getOrThrow()
+            linuxRuntime.startPulseAudio().getOrThrow()
+        }
+        if (audioReady.isFailure) {
+            Log.w(TAG, "Host audio is unavailable for the chroot desktop", audioReady.exceptionOrNull())
+        }
+
         ensureMounts()
         bindX11Socket()
+        if (audioReady.isSuccess) sharePulseAudioCookie()
 
         if (!File(rootfsDir, "usr/bin/xclip").canExecute()) {
             Log.i(TAG, "Installing the chroot clipboard compatibility helper")
@@ -442,6 +527,8 @@ class ChrootRuntime(context: Context) {
             {
                 printf 'export HOME=%q\n' "${'$'}HOME"
                 printf 'export DISPLAY=%q\n' "${'$'}DISPLAY"
+                printf 'export PULSE_SERVER=%q\n' "${'$'}PULSE_SERVER"
+                printf 'export PULSE_COOKIE=%q\n' "${'$'}PULSE_COOKIE"
                 printf 'export DBUS_SESSION_BUS_ADDRESS=%q\n' "${'$'}DBUS_SESSION_BUS_ADDRESS"
                 printf 'export XDG_CONFIG_HOME=%q\n' "${'$'}XDG_CONFIG_HOME"
                 printf 'export XDG_RUNTIME_DIR=%q\n' "${'$'}XDG_RUNTIME_DIR"
@@ -467,6 +554,8 @@ class ChrootRuntime(context: Context) {
 
             # Source DroidDesk environment
             . /etc/profile.d/droiddesk-ha.sh 2>/dev/null || true
+            export PULSE_SERVER=tcp:127.0.0.1
+            export PULSE_COOKIE=/root/.config/pulse/cookie
 
             # Make sure X11 socket dir exists in case bind mount was late
             mkdir -p /tmp/.X11-unix
@@ -687,6 +776,8 @@ DROIDDESK_SESSION
             if (code != 0) Log.w("DesktopDisplay", "Could not remove retired chroot session metadata")
         }
         unmountAll()
+        linuxRuntime.stopPulseAudio()
+            .onFailure { Log.w(TAG, "Could not stop host audio after the chroot session", it) }
         Log.i(TAG, "Chroot session stopped")
     }
 
@@ -802,6 +893,19 @@ DROIDDESK_SESSION
         Log.i(TAG, "Bound X11 socket: $hostX11 -> $chrootX11")
     }
 
+    private fun sharePulseAudioCookie() {
+        if (!pulseCookie.isFile) {
+            Log.w(TAG, "PulseAudio cookie is unavailable; chroot audio authentication may fail")
+            return
+        }
+        val target = File(rootfsDir, "root/.config/pulse/cookie").absolutePath
+        rootShell.exec(
+            "mkdir -p ${shellQuote(File(target).parentFile!!.absolutePath)} && " +
+                "cp -f ${shellQuote(pulseCookie.absolutePath)} ${shellQuote(target)} && " +
+                "chmod 0600 ${shellQuote(target)}",
+        )
+    }
+
     /**
      * Unmount all DroidDesk-related mounts.
      */
@@ -809,14 +913,14 @@ DROIDDESK_SESSION
         if (!hasRoot()) return
         val mounts = rootShell.exec("mount").lines()
         val targets = listOf(
-            File(rootfsDir, "tmp/.X11-unix").absolutePath,
-            File(rootfsDir, "dev/pts").absolutePath,
-            File(rootfsDir, "dev/shm").absolutePath,
             File(rootfsDir, "dev").absolutePath,
             File(rootfsDir, "proc").absolutePath,
             File(rootfsDir, "sys").absolutePath,
             File(rootfsDir, "run").absolutePath,
-            File(rootfsDir, "tmp").absolutePath
+            File(rootfsDir, "tmp").absolutePath,
+            File(rootfsDir, "dev/pts").absolutePath,
+            File(rootfsDir, "dev/shm").absolutePath,
+            File(rootfsDir, "tmp/.X11-unix").absolutePath,
         )
         // Unmount in reverse order, be tolerant of busy mounts
         targets.reversed().forEach { target ->

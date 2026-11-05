@@ -13,6 +13,7 @@ import 'package:droiddesk/screens/apps/app_catalog_screen.dart';
 import 'package:droiddesk/screens/desktop_tools_screen.dart';
 import 'package:droiddesk/screens/display_settings_screen.dart';
 import 'package:droiddesk/models/desktop_display.dart';
+import 'package:droiddesk/models/linux_environment.dart';
 
 /// Home dashboard — shown after setup is complete.
 /// Central hub for launching the desktop, terminal, and managing the environment.
@@ -65,23 +66,32 @@ class HomeScreen extends StatelessWidget {
                         ),
                       ),
                       const SizedBox(width: 12),
-                      Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text('DroidDesk', style: DroidTheme.headingMd),
-                          Text(
-                            state.isRunning
-                                ? 'Desktop Environment is running'
-                                : 'Desktop Environment',
-                            style: DroidTheme.bodySm.copyWith(
-                              color: state.isRunning
-                                  ? DroidTheme.accent
-                                  : DroidTheme.textMuted,
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              'DroidDesk',
+                              style: DroidTheme.headingMd,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
                             ),
-                          ),
-                        ],
+                            Text(
+                              state.isRunning
+                                  ? 'Desktop Environment is running'
+                                  : 'Desktop Environment',
+                              style: DroidTheme.bodySm.copyWith(
+                                color: state.isRunning
+                                    ? DroidTheme.accent
+                                    : DroidTheme.textMuted,
+                              ),
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          ],
+                        ),
                       ),
-                      const Spacer(),
+                      const SizedBox(width: 8),
                       Container(
                         decoration: BoxDecoration(
                           color: DroidTheme.surfaceLight,
@@ -513,6 +523,9 @@ class HomeScreen extends StatelessWidget {
         return 'Kali Linux';
       case 'termux-native':
         return 'Termux Native';
+      case 'debian':
+      case 'debian-bookworm':
+        return 'Debian Bookworm (PRoot)';
       default:
         return distro;
     }
@@ -993,7 +1006,8 @@ class _TerminalSheetState extends State<_TerminalSheet> {
   @override
   Widget build(BuildContext context) {
     final state = widget.state;
-    final runtime = state.isProotTerminal
+    final runtime = state.selectedEnvironment == LinuxEnvironmentKind.prootDebian ||
+        state.isProotTerminal
         ? 'Debian PRoot'
         : state.hasRoot
             ? 'chroot · ${_distroLabel(state.installedDistro)}'
@@ -1265,6 +1279,9 @@ class _TerminalSheetState extends State<_TerminalSheet> {
         return 'Ubuntu 24.04';
       case 'termux-native':
         return 'Termux';
+      case 'debian':
+      case 'debian-bookworm':
+        return 'Debian Bookworm';
       default:
         return distro;
     }

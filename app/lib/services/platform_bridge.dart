@@ -169,6 +169,17 @@ class DroidDeskPlatform {
     return result as bool? ?? false;
   }
 
+  static Future<bool> provisionEnvironment({
+    required String kind,
+    String de = 'xfce4',
+  }) async {
+    return await _channel.invokeMethod<bool>('provisionEnvironment', {
+          'kind': kind,
+          'de': de,
+        }) ??
+        false;
+  }
+
   // ── Root / chroot support ──
 
   static Future<bool> checkRoot() async {
@@ -437,9 +448,10 @@ class DroidDeskPlatform {
     await _channel.invokeMethod('launchDesktopActivity');
   }
 
-  static Future<String> executeCommand(String command) async {
+  static Future<String> executeCommand(String command, {bool stdin = false}) async {
     final result = await _channel.invokeMethod('executeCommand', {
       'command': command,
+      'stdin': stdin,
     });
     return result as String? ?? '';
   }

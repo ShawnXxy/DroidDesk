@@ -15,29 +15,39 @@ import java.util.zip.ZipInputStream
 import java.util.zip.ZipOutputStream
 
 /** Shared desktop conveniences that are independent of the active Linux mode. */
-class DesktopIntegration(private val context: Context) {
+class DesktopIntegration private constructor(
+    private val context: Context?,
+    private val snapshotsDir: File,
+) {
     companion object {
         private const val TAG = "DesktopIntegration"
     }
 
-    private val snapshotsDir = File(context.filesDir, "snapshots").apply { mkdirs() }
+    constructor(context: Context) : this(
+        context.applicationContext,
+        File(context.applicationContext.filesDir, "snapshots"),
+    )
 
-    fun search(query: String, rooted: Boolean, limit: Int = 80): List<Map<String, String>> {
+    internal constructor(snapshotsDir: File) : this(null, snapshotsDir)
+
+    init {
+        snapshotsDir.mkdirs()
+    }
+
+    fun search(
+        query: String,
+        paths: EnvironmentPaths,
+        limit: Int = 80,
+    ): List<Map<String, String>> {
         val needle = query.trim().lowercase()
         val results = mutableListOf<Map<String, String>>()
-        AndroidAppBridge.listApps(context).forEach { app ->
+        AndroidAppBridge.listApps(checkNotNull(context)).forEach { app ->
             if (needle.isEmpty() || app.values.any { it.lowercase().contains(needle) }) {
                 results += app + mapOf("kind" to "android", "id" to app.getValue("package"))
             }
         }
 
-        val home = linuxHome(rooted)
-        val appDirs = if (rooted) {
-            listOf(File(context.filesDir, "rootfs/usr/share/applications"), File(home, ".local/share/applications"))
-        } else {
-            listOf(File(context.filesDir, "usr/share/applications"), File(home, ".local/share/applications"))
-        }
-        appDirs.filter(File::isDirectory).flatMap { directory ->
+        paths.applicationDirectories.filter(File::isDirectory).flatMap { directory ->
             directory.walkTopDown().maxDepth(2).filter { it.isFile && it.extension == "desktop" }.toList()
         }.filterNot { desktopFile ->
             desktopFile.parentFile?.name in setOf("droiddesk-android", "droiddesk-tools")
@@ -76,18 +86,27 @@ class DesktopIntegration(private val context: Context) {
             .take(limit)
     }
 
-    fun createSnapshot(rooted: Boolean): Map<String, Any> {
+    fun createSnapshot(paths: EnvironmentPaths): Map<String, Any> {
         val stamp = SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US).format(Date())
         val output = File(snapshotsDir, "DroidDesk-$stamp.zip")
-        val home = linuxHome(rooted)
+        val home = paths.home
+        val homeBindSources = validatedHomeBindSources(paths)
         ZipOutputStream(BufferedOutputStream(FileOutputStream(output))).use { zip ->
             zip.putNextEntry(ZipEntry("snapshot.properties"))
-            zip.write("version=1\nmode=${if (rooted) "chroot" else "native"}\ncreated=${System.currentTimeMillis()}\n".toByteArray())
+            zip.write(
+                "version=2\nmode=${paths.snapshotMode}\ncreated=${System.currentTimeMillis()}\n"
+                    .toByteArray(),
+            )
             zip.closeEntry()
             zip.putNextEntry(ZipEntry("packages.txt"))
-            zip.write(installedPackages(rooted).joinToString("\n", postfix = "\n").toByteArray())
+            zip.write(installedPackages(paths).joinToString("\n", postfix = "\n").toByteArray())
             zip.closeEntry()
-            if (home.isDirectory) addDirectory(zip, home, "home")
+            if (home.isDirectory) {
+                addDirectory(zip, home, "home", homeBindSources.keys)
+            }
+            homeBindSources.forEach { (name, source) ->
+                if (source.isDirectory) addDirectory(zip, source, "home/$name")
+            }
         }
         return snapshotInfo(output)
     }
@@ -97,25 +116,36 @@ class DesktopIntegration(private val context: Context) {
         ?.map(::snapshotInfo)
         .orEmpty()
 
-    fun restoreSnapshot(name: String, rooted: Boolean): List<String> {
+    fun restoreSnapshot(name: String, paths: EnvironmentPaths): List<String> {
         val archive = safeSnapshot(name)
-        val home = linuxHome(rooted)
-        val rollback = File(home.parentFile, "${home.name}.before-restore")
-        if (rollback.exists()) rollback.deleteRecursively()
-        if (home.exists() && !home.renameTo(rollback)) error("Could not preserve the current Linux home")
-        home.mkdirs()
+        val home = paths.home
+        val homeBindSources = validatedHomeBindSources(paths)
+        val metadata = readSnapshotMetadata(archive)
+        require(metadata.mode == paths.snapshotMode) {
+            "This snapshot belongs to a different Linux runtime mode"
+        }
+        val restoredHomeBindSources =
+            if (metadata.version >= 2) homeBindSources else emptyMap()
+        val restoreRoots = (
+            listOf(home) + restoredHomeBindSources.values
+            ).distinctBy { it.canonicalPath }
+            .map { root -> RestoreRoot(root, File(root.parentFile, "${root.name}.before-restore")) }
+        val preparedRoots = mutableListOf<RestoreRoot>()
         val packages = mutableListOf<String>()
-        var snapshotMode: String? = null
         try {
+            restoreRoots.forEach { restoreRoot ->
+                if (restoreRoot.rollback.exists()) restoreRoot.rollback.deleteRecursively()
+                if (restoreRoot.root.exists() && !restoreRoot.root.renameTo(restoreRoot.rollback)) {
+                    error("Could not preserve ${restoreRoot.root.absolutePath}")
+                }
+                restoreRoot.root.mkdirs()
+                preparedRoots += restoreRoot
+            }
             ZipInputStream(BufferedInputStream(FileInputStream(archive))).use { zip ->
                 var entry = zip.nextEntry
                 while (entry != null) {
                     when {
-                        entry.name == "snapshot.properties" -> {
-                            snapshotMode = zip.readBytes().toString(Charsets.UTF_8)
-                                .lineSequence().firstOrNull { it.startsWith("mode=") }
-                                ?.substringAfter('=')
-                        }
+                        entry.name == "snapshot.properties" -> zip.readBytes()
                         entry.name == "packages.txt" -> {
                             packages += zip.readBytes().toString(Charsets.UTF_8)
                                 .lineSequence().filter(::safePackageName)
@@ -123,9 +153,14 @@ class DesktopIntegration(private val context: Context) {
                         entry.name.startsWith("home/") -> {
                             val relative = entry.name.removePrefix("home/")
                             if (relative.isNotEmpty()) {
-                                val target = File(home, relative)
-                                check(target.canonicalPath.startsWith(home.canonicalPath + File.separator))
-                                if (entry.isDirectory) target.mkdirs() else {
+                                val target = restoreTarget(
+                                    relative,
+                                    home,
+                                    restoredHomeBindSources,
+                                )
+                                if (entry.isDirectory) {
+                                    target.mkdirs()
+                                } else {
                                     target.parentFile?.mkdirs()
                                     FileOutputStream(target).use { zip.copyTo(it) }
                                 }
@@ -136,41 +171,28 @@ class DesktopIntegration(private val context: Context) {
                     entry = zip.nextEntry
                 }
             }
-            val expectedMode = if (rooted) "chroot" else "native"
-            require(snapshotMode == expectedMode) {
-                "This snapshot belongs to a different Linux runtime mode"
-            }
-            rollback.deleteRecursively()
+            preparedRoots.forEach { it.rollback.deleteRecursively() }
             return packages.distinct()
         } catch (error: Throwable) {
-            home.deleteRecursively()
-            rollback.renameTo(home)
+            preparedRoots.asReversed().forEach { restoreRoot ->
+                restoreRoot.root.deleteRecursively()
+                if (restoreRoot.rollback.exists()) {
+                    restoreRoot.rollback.renameTo(restoreRoot.root)
+                }
+            }
             throw error
         }
     }
 
     fun deleteSnapshot(name: String): Boolean = safeSnapshot(name).delete()
 
-    fun missingPackages(packages: List<String>, rooted: Boolean): List<String> {
-        val installed = installedPackages(rooted).toSet()
+    fun missingPackages(packages: List<String>, paths: EnvironmentPaths): List<String> {
+        val installed = installedPackages(paths).toSet()
         return packages.filter(::safePackageName).distinct().filterNot(installed::contains)
     }
 
-    private fun linuxHome(rooted: Boolean): File = if (rooted) {
-        File(context.filesDir, "rootfs/root")
-    } else {
-        File(context.filesDir, "home")
-    }
-
-    private fun installedPackages(rooted: Boolean): List<String> {
-        val status = if (rooted) {
-            File(context.filesDir, "rootfs/var/lib/dpkg/status")
-        } else {
-            listOf(
-                File(context.filesDir, "usr/var/lib/dpkg/status"),
-                File(context.filesDir, "dpkgroot/var/lib/dpkg/status"),
-            ).firstOrNull(File::isFile) ?: return emptyList()
-        }
+    private fun installedPackages(paths: EnvironmentPaths): List<String> {
+        val status = paths.packageStatusFiles.firstOrNull(File::isFile) ?: return emptyList()
         if (!status.isFile) return emptyList()
         return status.readText().split("\n\n").mapNotNull { block ->
             val fields = block.lineSequence().mapNotNull { line ->
@@ -181,10 +203,19 @@ class DesktopIntegration(private val context: Context) {
         }.sorted()
     }
 
-    private fun addDirectory(zip: ZipOutputStream, root: File, prefix: String) {
-        root.walkTopDown().forEach { file ->
+    private fun addDirectory(
+        zip: ZipOutputStream,
+        root: File,
+        prefix: String,
+        excludedTopLevel: Set<String> = emptySet(),
+    ) {
+        root.walkTopDown().onEnter { directory ->
+            directory == root ||
+                directory.relativeTo(root).path.substringBefore(File.separator) !in excludedTopLevel
+        }.forEach { file ->
             if (file == root || file.isSymbolicLink()) return@forEach
             val relative = file.relativeTo(root).invariantSeparatorsPath
+            if (relative.substringBefore('/') in excludedTopLevel) return@forEach
             val name = "$prefix/$relative${if (file.isDirectory) "/" else ""}"
             var entryOpen = false
             runCatching {
@@ -195,6 +226,64 @@ class DesktopIntegration(private val context: Context) {
                 .also { if (entryOpen) runCatching { zip.closeEntry() } }
         }
     }
+
+    private fun validatedHomeBindSources(paths: EnvironmentPaths): Map<String, File> =
+        paths.homeBindSources.onEach { (name, source) ->
+            require(name.matches(Regex("[A-Za-z0-9._-]+")) && name != "." && name != "..") {
+                "Invalid home bind path: $name"
+            }
+            require(source.canonicalPath != paths.home.canonicalPath) {
+                "A home bind source cannot replace the entire Linux home"
+            }
+        }
+
+    private fun restoreTarget(
+        relative: String,
+        home: File,
+        homeBindSources: Map<String, File>,
+    ): File {
+        val normalized = relative.replace('\\', '/')
+        val topLevel = normalized.substringBefore('/')
+        val bindSource = homeBindSources[topLevel]
+        val root = bindSource ?: home
+        val nested = if (bindSource == null) normalized else normalized.substringAfter('/', "")
+        val target = if (nested.isEmpty()) root else File(root, nested)
+        val rootPath = root.canonicalPath
+        val targetPath = target.canonicalPath
+        check(targetPath == rootPath || targetPath.startsWith(rootPath + File.separator)) {
+            "Snapshot entry escapes its Linux home root"
+        }
+        return target
+    }
+
+    private fun readSnapshotMetadata(archive: File): SnapshotMetadata {
+        ZipInputStream(BufferedInputStream(FileInputStream(archive))).use { zip ->
+            var entry = zip.nextEntry
+            while (entry != null) {
+                if (entry.name == "snapshot.properties") {
+                    val properties = zip.readBytes().toString(Charsets.UTF_8)
+                        .lineSequence()
+                        .mapNotNull { line ->
+                            val split = line.indexOf('=')
+                            if (split <= 0) null
+                            else line.substring(0, split) to line.substring(split + 1)
+                        }
+                        .toMap()
+                    val version = properties["version"]?.toIntOrNull()
+                        ?: error("Snapshot version is missing")
+                    val mode = properties["mode"]
+                        ?: error("Snapshot runtime mode is missing")
+                    return SnapshotMetadata(version, mode)
+                }
+                zip.closeEntry()
+                entry = zip.nextEntry
+            }
+        }
+        error("Snapshot metadata is missing")
+    }
+
+    private data class RestoreRoot(val root: File, val rollback: File)
+    private data class SnapshotMetadata(val version: Int, val mode: String)
 
     private fun File.isSymbolicLink(): Boolean = runCatching {
         canonicalFile != absoluteFile

@@ -164,6 +164,7 @@ object XfceMobileProfile {
             <property name="wrap_windows" type="bool" value="false"/>
             <property name="easy_click" type="string" value="Alt"/>
             <property name="show_dock_shadow" type="bool" value="false"/>
+            <property name="use_compositing" type="bool" value="false"/>
           </property>
         </channel>
     """.trimIndent() + "\n"
@@ -180,7 +181,7 @@ object XfceMobileProfile {
           </property>
           <property name="Net" type="empty">
             <property name="ThemeName" type="string" value="Adwaita"/>
-            <property name="IconThemeName" type="string" value="Papirus"/>
+            <property name="IconThemeName" type="string" value="Adwaita"/>
             <property name="CursorSize" type="int" value="32"/>
           </property>
           <property name="Gtk" type="empty">

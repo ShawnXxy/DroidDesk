@@ -12,8 +12,36 @@ import java.util.zip.ZipEntry
 import java.util.zip.ZipInputStream
 import java.util.UUID
 import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 import com.orailnoor.droiddesk.display.DisplayProfile
 import com.orailnoor.droiddesk.display.DisplayProfilePolicy
+
+internal const val GUEST_PULSE_SERVER = "tcp:127.0.0.1"
+
+internal fun hostPulseAudioLibraryPath(
+    sdkInt: Int,
+    prefixLibraryPath: String,
+): String =
+    if (sdkInt <= Build.VERSION_CODES.R) {
+        "/system/lib64:$prefixLibraryPath"
+    } else {
+        prefixLibraryPath
+    }
+
+internal fun stopHostProcessWithFallback(
+    processName: String,
+    isAlive: () -> Boolean,
+    terminate: (force: Boolean) -> Unit,
+    awaitExit: (timeoutMillis: Long) -> Boolean,
+) {
+    if (!isAlive()) return
+    terminate(false)
+    if (awaitExit(2_000L)) return
+    terminate(true)
+    check(awaitExit(2_000L)) {
+        "Timed out stopping host process: $processName"
+    }
+}
 
 internal fun nativeDesktopBusSocket(directory: File): File =
     File(directory, UUID.randomUUID().toString().replace("-", ""))
@@ -34,6 +62,19 @@ class LinuxRuntime(context: Context) {
         private const val SHEBANG_MARKER = ".relocated_text_paths_v4"
         private const val ELF_PATCH_MARKER = ".elf_runpaths_patched"
         private const val DE_MARKER = ".de_installed"
+        private const val PROBE_PROCESS_TIMEOUT_MILLIS = 750L
+        private const val PINNED_PROOT_VERSION = "5.1.107.102"
+        private const val PINNED_PROOT_DISTRO_VERSION = "5.10.3"
+        private const val PINNED_PROOT_SHA256 =
+            "10a394b585c2fc2b2c8502544f4e5f1be581dc8bfff79e8ba62f16207423e030"
+        private const val PINNED_PROOT_DISTRO_SHA256 =
+            "049dbfd7cb6701925002133b19785213bda59f912784f885fc339ab092afc1e1"
+        private const val PINNED_PROOT_URL =
+            "https://packages.termux.dev/apt/termux-main/pool/main/p/proot/" +
+                "proot_5.1.107.102_aarch64.deb"
+        private const val PINNED_PROOT_DISTRO_URL =
+            "https://packages.termux.dev/apt/termux-main/pool/main/p/proot-distro/" +
+                "proot-distro_5.10.3_all.deb"
 
         // ELF64 constants
         private const val ELFMAG0: Byte = 0x7f
@@ -83,7 +124,7 @@ class LinuxRuntime(context: Context) {
         private var displayProfiles: DesktopProfileExecutor? = null
     }
 
-    @Volatile private var activeCommandProcess: Process? = null
+    private val activeCommands = CommandOwnership<Process>()
     @Volatile private var installLogSink: ((String) -> Unit)? = null
     @Volatile private var packageOperationCancelled = false
 
@@ -94,7 +135,7 @@ class LinuxRuntime(context: Context) {
     fun beginPackageOperation() {
         // A previous App Store screen may have been closed while apt was still
         // running. Stop that process before accepting a new transaction.
-        if (activeCommandProcess?.isAlive == true) interruptCommand()
+        if (activeCommands.isBusy()) interruptCommand()
         packageOperationCancelled = false
         clearStalePackageLocks()
     }
@@ -105,7 +146,7 @@ class LinuxRuntime(context: Context) {
 
     fun cancelPackageOperation(): Boolean {
         packageOperationCancelled = true
-        val wasRunning = activeCommandProcess?.isAlive == true
+        val wasRunning = activeCommands.isBusy()
         interruptCommand()
         return wasRunning
     }
@@ -154,6 +195,319 @@ class LinuxRuntime(context: Context) {
         } else {
             "Software (llvmpipe)"
         }
+    }
+
+    fun probeAppPrivateExecution(): CapabilityEvidence {
+        val bash = File(binDir, "bash")
+        if (!bash.canExecute()) {
+            return CapabilityEvidence(
+                EvidenceState.PRESENT_UNVERIFIED,
+                "The native bootstrap is not installed",
+            )
+        }
+        return probeProcess(listOf(bash.absolutePath, "-c", "exit 0"))
+            .toEvidence("App-private bash")
+    }
+
+    fun probeProot(): CapabilityEvidence {
+        val proot = File(binDir, "proot")
+        if (!proot.canExecute()) {
+            return CapabilityEvidence(
+                EvidenceState.PRESENT_UNVERIFIED,
+                "PRoot is not installed",
+            )
+        }
+        val prootTmp = File(tmpDir, "proot").apply { mkdirs() }
+        val result = probeProcess(
+            listOf(
+                proot.absolutePath,
+                "-0",
+                "-r",
+                "/",
+                "/system/bin/id",
+                "-u",
+            ),
+            mapOf(
+                "PROOT_TMP_DIR" to prootTmp.absolutePath,
+                "PROOT_LOADER" to File(prefixDir, "libexec/proot/loader").absolutePath,
+                "PROOT_LOADER_32" to File(prefixDir, "libexec/proot/loader32").absolutePath,
+            ),
+        )
+        return when {
+            result == null -> CapabilityEvidence(
+                EvidenceState.FAILED_SELF_TEST,
+                "PRoot functional probe timed out or could not start",
+            )
+            result.exitCode != 0 -> CapabilityEvidence(
+                EvidenceState.FAILED_SELF_TEST,
+                "PRoot functional probe exited ${result.exitCode}" +
+                    result.output.trim().takeIf(String::isNotEmpty)?.let { ": $it" }.orEmpty(),
+            )
+            result.output.trim() != "0" -> CapabilityEvidence(
+                EvidenceState.FAILED_SELF_TEST,
+                "PRoot root-id translation returned ${result.output.trim()}",
+            )
+            else -> CapabilityEvidence(EvidenceState.SUPPORTED_AND_PROBED)
+        }
+    }
+
+    fun probeX11(): CapabilityEvidence {
+        val socket = File(tmpDir, ".X11-unix/X0")
+        val xdpyinfo = File(binDir, "xdpyinfo")
+        if (!socket.exists() || !xdpyinfo.canExecute()) {
+            return CapabilityEvidence(
+                EvidenceState.PRESENT_UNVERIFIED,
+                "The X11 session is not ready",
+            )
+        }
+        return probeProcess(
+            listOf(xdpyinfo.absolutePath),
+            mapOf("DISPLAY" to ":0"),
+        ).toEvidence("X11")
+    }
+
+    fun probeAudio(): CapabilityEvidence {
+        val pactl = File(binDir, "pactl")
+        if (!pactl.canExecute()) {
+            return CapabilityEvidence(
+                EvidenceState.PRESENT_UNVERIFIED,
+                "PulseAudio tools are not installed",
+            )
+        }
+        val socket = File(tmpDir, "pulse/native")
+        if (!socket.exists()) {
+            return CapabilityEvidence(
+                EvidenceState.PRESENT_UNVERIFIED,
+                "PulseAudio is installed and will be verified when a desktop session starts",
+            )
+        }
+        return probeProcess(
+            listOf(pactl.absolutePath, "-s", "unix:${socket.absolutePath}", "info"),
+        )
+            .toEvidence("PulseAudio")
+    }
+
+    fun startPulseAudio(): Result<Unit> = runCatching {
+        extractBootstrapIfNeeded(context)
+        check(File(binDir, "pulseaudio").canExecute()) {
+            "The host PulseAudio package is unavailable"
+        }
+        val audioLibraryPath = hostPulseAudioLibraryPath(
+            sdkInt = Build.VERSION.SDK_INT,
+            prefixLibraryPath = libDir.absolutePath,
+        )
+        val output = executeCommand(
+            """
+            set -e
+            export LD_LIBRARY_PATH='$audioLibraryPath'
+            limit() {
+                if command -v timeout >/dev/null 2>&1; then timeout "${'$'}@"; else shift; "${'$'}@"; fi
+            }
+            pkill -9 -x pulseaudio >/dev/null 2>&1 || true
+            if ! limit 10 pulseaudio --start --exit-idle-time=-1 \
+                --load=module-aaudio-sink >/dev/null 2>&1; then
+                pkill -9 -x pulseaudio >/dev/null 2>&1 || true
+                limit 10 pulseaudio --start --exit-idle-time=-1 >/dev/null 2>&1
+            fi
+            for attempt in 1 2 3 4 5 6 7 8 9 10; do
+                if limit 2 pactl info >/dev/null 2>&1; then break; fi
+                sleep 0.1
+            done
+            limit 2 pactl info >/dev/null 2>&1
+            pactl load-module module-native-protocol-tcp \
+                listen=127.0.0.1 \
+                auth-cookie='${File(homeDir, ".config/pulse/cookie").absolutePath}' \
+                >/dev/null
+            PULSE_SERVER=$GUEST_PULSE_SERVER \
+                PULSE_COOKIE='${File(homeDir, ".config/pulse/cookie").absolutePath}' \
+                limit 2 pactl info >/dev/null 2>&1
+            """.trimIndent(),
+        )
+        check(!output.startsWith("Error:")) { output }
+    }
+
+    fun ensureHostAudio(onLog: (String) -> Unit = {}): Result<Unit> = runCatching {
+        extractBootstrapIfNeeded(context)
+        setInstallLogSink(onLog)
+        try {
+            if (!isDpkgPackageInstalled("pulseaudio")) {
+                check(installOptionalPackages(listOf("pulseaudio"))) {
+                    "Could not install the host PulseAudio package"
+                }
+            }
+            check(File(binDir, "pulseaudio").canExecute()) {
+                "The host PulseAudio daemon is unavailable after installation"
+            }
+            check(File(binDir, "pactl").canExecute()) {
+                "The host PulseAudio control tool is unavailable after installation"
+            }
+        } finally {
+            setInstallLogSink(null)
+        }
+    }
+
+    fun stopPulseAudio(): Result<Unit> = runCatching {
+        stopHostProcess("pulseaudio").getOrThrow()
+    }
+
+    fun stopHostProcess(processName: String): Result<Unit> = runCatching {
+        require(processName.matches(Regex("[a-zA-Z0-9._-]+"))) {
+            "Invalid host process name: $processName"
+        }
+        val pkill = File(binDir, "pkill")
+        check(pkill.canExecute()) { "Host process terminator is unavailable" }
+        stopHostProcessWithFallback(
+            processName = processName,
+            isAlive = { hostProcessAlive(processName) },
+            terminate = { force ->
+                val process = ProcessBuilder(
+                    pkill.absolutePath,
+                    if (force) "-9" else "-15",
+                    "-x",
+                    processName,
+                )
+                    .directory(prefixDir)
+                    .redirectErrorStream(true)
+                    .also { builder ->
+                        builder.environment().clear()
+                        builder.environment().putAll(getTermuxEnv())
+                    }
+                    .start()
+                check(process.waitFor(3, TimeUnit.SECONDS)) {
+                    process.destroyForcibly()
+                    "Timed out signalling host process: $processName"
+                }
+                val output = process.inputStream.bufferedReader().readText().trim()
+                check(process.exitValue() in 0..1) {
+                    "Could not signal host process $processName: $output"
+                }
+            },
+            awaitExit = { timeoutMillis ->
+                waitForHostProcessExit(processName, timeoutMillis)
+            }
+        )
+    }
+
+    fun hostProcessesAlive(processNames: Collection<String>): Boolean {
+        return processNames.all(::hostProcessAlive)
+    }
+
+    private fun hostProcessAlive(processName: String): Boolean {
+        require(processName.matches(Regex("[a-zA-Z0-9._-]+"))) {
+            "Invalid host process name: $processName"
+        }
+        val pgrep = File(binDir, "pgrep")
+        if (!pgrep.canExecute()) return false
+        return probeProcess(listOf(pgrep.absolutePath, "-x", processName))?.exitCode == 0
+    }
+
+    private fun waitForHostProcessExit(
+        processName: String,
+        timeoutMillis: Long,
+    ): Boolean {
+        val deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMillis)
+        do {
+            if (!hostProcessAlive(processName)) return true
+            Thread.sleep(50)
+        } while (System.nanoTime() < deadline)
+        return !hostProcessAlive(processName)
+    }
+
+    fun probeClipboard(): CapabilityEvidence {
+        val xclip = File(binDir, "xclip")
+        val socket = File(tmpDir, ".X11-unix/X0")
+        return if (xclip.canExecute() && socket.exists()) {
+            CapabilityEvidence(
+                EvidenceState.PRESENT_UNVERIFIED,
+                "Foreground bidirectional clipboard needs an active desktop round-trip",
+            )
+        } else {
+            CapabilityEvidence(
+                EvidenceState.PRESENT_UNVERIFIED,
+                "Clipboard tools or the X11 session are not ready",
+            )
+        }
+    }
+
+    fun probeRenderer(): RendererProbe {
+        val socket = File(tmpDir, ".X11-unix/X0")
+        val glxinfo = File(binDir, "glxinfo")
+        if (!socket.exists() || !glxinfo.canExecute()) {
+            return RendererProbe(
+                CapabilityEvidence(
+                    EvidenceState.PRESENT_UNVERIFIED,
+                    "No active GL renderer can be queried",
+                ),
+                RendererBackend.UNKNOWN,
+            )
+        }
+        val result = probeProcess(
+            listOf(glxinfo.absolutePath, "-B"),
+            mapOf("DISPLAY" to ":0"),
+        )
+        if (result == null || result.exitCode != 0) {
+            return RendererProbe(
+                CapabilityEvidence(
+                    EvidenceState.FAILED_SELF_TEST,
+                    "Renderer probe failed${result?.output?.let { ": ${it.trim()}" }.orEmpty()}",
+                ),
+                RendererBackend.UNKNOWN,
+            )
+        }
+        val output = result.output.lowercase()
+        val backend = when {
+            "llvmpipe" in output -> RendererBackend.SOFTWARE_LLVMPIPE
+            "virgl" in output || "virpipe" in output -> RendererBackend.PROOT_VIRGL_VTEST
+            "turnip" in output || "zink" in output -> RendererBackend.NATIVE_TURNIP_KGSL
+            "freedreno" in output || "adreno" in output -> RendererBackend.PROOT_DRM_MSM
+            else -> RendererBackend.UNKNOWN
+        }
+        val evidence = if (backend == RendererBackend.UNKNOWN) {
+            CapabilityEvidence(
+                EvidenceState.PRESENT_UNVERIFIED,
+                "GL responded but its renderer was not recognized",
+            )
+        } else {
+            CapabilityEvidence(EvidenceState.SUPPORTED_AND_PROBED)
+        }
+        return RendererProbe(evidence, backend)
+    }
+
+    private data class ProbeProcessResult(val exitCode: Int, val output: String)
+
+    private fun probeProcess(
+        command: List<String>,
+        environment: Map<String, String> = emptyMap(),
+    ): ProbeProcessResult? = runCatching {
+        val process = ProcessBuilder(command)
+            .directory(prefixDir)
+            .redirectErrorStream(true)
+            .also { builder ->
+                builder.environment().putAll(getTermuxEnv())
+                builder.environment().putAll(environment)
+            }
+            .start()
+        if (!process.waitFor(PROBE_PROCESS_TIMEOUT_MILLIS, TimeUnit.MILLISECONDS)) {
+            process.destroy()
+            if (!process.waitFor(100, TimeUnit.MILLISECONDS)) process.destroyForcibly()
+            return null
+        }
+        ProbeProcessResult(
+            exitCode = process.exitValue(),
+            output = process.inputStream.bufferedReader().readText(),
+        )
+    }.getOrNull()
+
+    private fun ProbeProcessResult?.toEvidence(name: String): CapabilityEvidence = when {
+        this == null -> CapabilityEvidence(
+            EvidenceState.FAILED_SELF_TEST,
+            "$name probe timed out or could not start",
+        )
+        exitCode == 0 -> CapabilityEvidence(EvidenceState.SUPPORTED_AND_PROBED)
+        else -> CapabilityEvidence(
+            EvidenceState.FAILED_SELF_TEST,
+            "$name exited $exitCode${output.trim().takeIf(String::isNotEmpty)?.let { ": $it" }.orEmpty()}",
+        )
     }
 
     fun getOptionalAppsStatus(): Map<String, Boolean> = mapOf(
@@ -278,9 +632,11 @@ class LinuxRuntime(context: Context) {
             // Refresh wrapper/config in case the app was updated
             createAptConfigOverride()
             ensureAptDirectories()
+            ensureAptMethodExecutables()
             wrapDpkgForPath()
             wrapUpdateAlternatives()
             ensureSocketHookPrebuilt()
+            patchShebangs()
             return
         }
 
@@ -324,6 +680,7 @@ class LinuxRuntime(context: Context) {
 
         // Ensure apt cache/state directories exist (bootstrap zip may omit empty dirs)
         ensureAptDirectories()
+        ensureAptMethodExecutables()
 
         // Set executable permissions on binaries
         setExecutableRecursively(binDir)
@@ -339,9 +696,25 @@ class LinuxRuntime(context: Context) {
         // Copy prebuilt socket hook from jniLibs to prefix/lib
         ensureSocketHookPrebuilt()
 
+        // Fresh bootstrap scripts still reference Termux's original package
+        // prefix. Relocate them before the first apt invocation (apt-key is a
+        // script and otherwise cannot verify the repository signature).
+        patchShebangs()
+
         marker.writeText("DroidDesk native bootstrap\n")
         tmpZip.delete()
         Log.i(TAG, "Bootstrap extraction complete")
+    }
+
+    private fun ensureAptMethodExecutables() {
+        File(prefixDir, "lib/apt/methods")
+            .listFiles()
+            ?.filterNot(File::isDirectory)
+            ?.forEach { method ->
+                check(method.setExecutable(true, true) || method.canExecute()) {
+                    "Could not make apt method executable: ${method.absolutePath}"
+                }
+            }
     }
 
     private fun ensureSocketHookPrebuilt() {
@@ -349,26 +722,43 @@ class LinuxRuntime(context: Context) {
             val libDir = File(prefixDir, "lib")
             libDir.mkdirs()
             val destHook = File(libDir, "libsocket_hook.so")
-            if (destHook.exists()) return
+            val packagedMarker = File(libDir, ".socket_hook_prebuilt.sha256")
 
             // Find the hook in jniLibs
-            val abi = android.os.Build.SUPPORTED_ABIS.firstOrNull() ?: "arm64-v8a"
             val jniDir = File(context.applicationInfo.nativeLibraryDir)
             val srcHook = File(jniDir, "libsocket_hook.so")
             if (srcHook.exists()) {
+                val packagedHash = sha256(srcHook)
+                if (destHook.isFile && packagedMarker.readTextOrNull() == packagedHash) return
+
                 srcHook.inputStream().use { input ->
                     destHook.outputStream().use { output ->
                         input.copyTo(output)
                     }
                 }
                 destHook.setExecutable(true, false)
-                Log.i(TAG, "Copied prebuilt socket hook to ${destHook.absolutePath}")
+                packagedMarker.writeText(packagedHash)
+                File(libDir, ".socket_hook_build").delete()
+                Log.i(TAG, "Installed current prebuilt socket hook at ${destHook.absolutePath}")
             } else {
                 Log.w(TAG, "Prebuilt socket hook not found in jniLibs at ${srcHook.absolutePath}")
             }
         } catch (e: Exception) {
             Log.e(TAG, "Failed to copy prebuilt socket hook: ${e.message}")
         }
+    }
+
+    private fun sha256(file: File): String {
+        val digest = java.security.MessageDigest.getInstance("SHA-256")
+        file.inputStream().use { input ->
+            val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+            while (true) {
+                val count = input.read(buffer)
+                if (count < 0) break
+                digest.update(buffer, 0, count)
+            }
+        }
+        return digest.digest().joinToString("") { "%02x".format(it) }
     }
 
     private fun extractZip(zipFile: File, destDir: File) {
@@ -713,7 +1103,10 @@ class LinuxRuntime(context: Context) {
                             "service", "desktop", "conf", "xml", "pc", "cmake",
                             "la", "prl", "sh", "pl", "py", "rb", "json", "ini",
                         )
-                        if (isScript || isPathConfig) {
+                        if (
+                            file.name != "droiddesk-relocate-shebangs" &&
+                            (isScript || isPathConfig)
+                        ) {
                             val content = file.readText()
                             if (content.contains(oldPrefix)) {
                                 val updated = content.replace(oldPrefix, newPrefix)
@@ -1106,6 +1499,7 @@ class LinuxRuntime(context: Context) {
 
         env["DISPLAY"] = ":0"
         env["XDG_RUNTIME_DIR"] = tmpDir.absolutePath
+        env["PULSE_COOKIE"] = File(homeDir, ".config/pulse/cookie").absolutePath
 
         env["PERL5LIB"] = "${prefixDir.absolutePath}/lib/perl5/core_perl:${prefixDir.absolutePath}/lib/perl5/site_perl:${prefixDir.absolutePath}/lib/perl5/vendor_perl:${prefixDir.absolutePath}/lib/perl5"
         env["PYTHONHOME"] = prefixDir.absolutePath
@@ -1467,6 +1861,152 @@ class LinuxRuntime(context: Context) {
         clearProotDownloadCache()
         onProgress?.invoke(1.0, "Minimal Debian compatibility is ready")
         return isMinimalDebianInstalled()
+    }
+
+    fun ensureProotToolchain(
+        onProgress: (Double, String) -> Unit,
+        onLog: (String) -> Unit,
+    ): Result<ProotToolchainVersions> = runCatching {
+        extractBootstrapIfNeeded(context)
+        setInstallLogSink(onLog)
+        try {
+            onProgress(0.08, "Installing PRoot toolchain")
+            val downloadDir = File(prefixDir, "tmp/droiddesk-proot-toolchain").apply { mkdirs() }
+            val prootDeb = File(downloadDir, "proot_$PINNED_PROOT_VERSION.aarch64.deb")
+            val distroDeb = File(
+                downloadDir,
+                "proot-distro_$PINNED_PROOT_DISTRO_VERSION.all.deb",
+            )
+            val download = executeCommand(
+                """
+                set -e
+                curl -L --fail --retry 3 -o '${prootDeb.absolutePath}' '$PINNED_PROOT_URL'
+                curl -L --fail --retry 3 -o '${distroDeb.absolutePath}' '$PINNED_PROOT_DISTRO_URL'
+                printf '%s  %s\n' '$PINNED_PROOT_SHA256' '${prootDeb.absolutePath}' | sha256sum -c -
+                printf '%s  %s\n' '$PINNED_PROOT_DISTRO_SHA256' '${distroDeb.absolutePath}' | sha256sum -c -
+                """.trimIndent(),
+            )
+            check(!download.startsWith("Error:")) { "Pinned PRoot download or checksum failed" }
+            val dependencyDir = File(downloadDir, "dependencies").apply {
+                mkdirs()
+                File(this, "partial").mkdirs()
+            }
+            val dependencies = executeCommand(
+                """
+                set -e
+                apt-get update
+                apt-get -o Dir::Cache::archives='${dependencyDir.absolutePath}' \
+                    install -y --download-only --no-install-recommends \
+                    libandroid-shmem libtalloc python python-pip pulseaudio
+                for deb in '${dependencyDir.absolutePath}'/*.deb; do
+                    [ -e "${'$'}deb" ] || continue
+                    dpkg --unpack "${'$'}deb"
+                done
+                dpkg --unpack '${prootDeb.absolutePath}' '${distroDeb.absolutePath}'
+                """.trimIndent(),
+            )
+            check(!dependencies.startsWith("Error:")) {
+                "PRoot dependency download or unpack failed"
+            }
+            patchShebangs(force = true)
+            val configured = executeCommand(
+                "DEBIAN_FRONTEND=noninteractive dpkg --configure -a",
+            )
+            check(!configured.startsWith("Error:")) {
+                "PRoot package configuration failed"
+            }
+            relocateProotExecutable()
+            val prootRun = executeCommand("proot --version")
+            check(!prootRun.startsWith("Error:")) { prootRun }
+            val distroRun = executeCommand("proot-distro help")
+            check(!distroRun.startsWith("Error:")) { distroRun }
+            val prootVersion = executeCommand(
+                "dpkg-query -W -f='${'$'}{Version}' proot",
+            ).trim()
+            val distroVersion = executeCommand(
+                "dpkg-query -W -f='${'$'}{Version}' proot-distro",
+            ).trim()
+            ProotToolchainVersions(
+                proot = prootVersion,
+                prootDistro = distroVersion,
+            ).also {
+                check(it.proot == PINNED_PROOT_VERSION) {
+                    "Unexpected PRoot version: ${it.proot}"
+                }
+                check(it.prootDistro == PINNED_PROOT_DISTRO_VERSION) {
+                    "Unexpected PRoot-Distro version: ${it.prootDistro}"
+                }
+            }
+        } finally {
+            setInstallLogSink(null)
+        }
+    }
+
+    fun executeCommandArgs(
+        command: List<String>,
+        onOutput: ((String) -> Unit)? = null,
+        interactive: Boolean = false,
+        stdin: String? = null,
+    ): ExecutionResult {
+        if (packageOperationCancelled) {
+            return ExecutionResult(1, "Error: Package operation cancelled")
+        }
+        if (!isBootstrapped()) {
+            return ExecutionResult(1, "Error: Runtime not bootstrapped")
+        }
+        if (stdin != null) {
+            val input = activeCommands.input()
+            return when (input.state) {
+                CommandInputState.READY -> try {
+                    input.process!!.outputStream.apply {
+                        write((stdin + "\n").toByteArray())
+                        flush()
+                    }
+                    ExecutionResult(0, "")
+                } catch (error: Exception) {
+                    ExecutionResult(1, "Error: ${error.message}")
+                }
+                CommandInputState.STARTING ->
+                    ExecutionResult(1, "Error: The interactive command is still starting")
+                CommandInputState.NOT_INTERACTIVE ->
+                    ExecutionResult(1, "Error: The active command does not accept terminal input")
+                CommandInputState.ABSENT ->
+                    ExecutionResult(1, "Error: No interactive command is running")
+            }
+        }
+        val lease = activeCommands.reserve(interactive)
+            ?: return ExecutionResult(1, "Error: Another command is already running")
+        var process: Process? = null
+        return try {
+            process = ProcessBuilder(command)
+                .directory(prefixDir)
+                .redirectErrorStream(true)
+                .also { builder ->
+                    builder.environment().clear()
+                    builder.environment().putAll(getTermuxEnv())
+                }
+                .start()
+            if (!activeCommands.attach(lease, process)) {
+                process.destroyForcibly()
+                return ExecutionResult(1, "Error: Command was cancelled before it started")
+            }
+            val output = StringBuilder()
+            val reader = InputStreamReader(process.inputStream)
+            val buffer = CharArray(1024)
+            var charsRead: Int
+            while (reader.read(buffer).also { charsRead = it } != -1) {
+                val chunk = String(buffer, 0, charsRead)
+                output.append(chunk)
+                installLogSink?.invoke(chunk)
+                onOutput?.invoke(chunk)
+            }
+            process.waitFor()
+            ExecutionResult(process.exitValue(), output.toString())
+        } catch (error: Exception) {
+            ExecutionResult(1, "Error: ${error.message}")
+        } finally {
+            activeCommands.release(lease)
+        }
     }
 
     fun installDesktopEnvironmentNative(
@@ -2284,26 +2824,39 @@ $stagedProfile
 
     // ── Command Execution ──
 
-    fun executeCommand(command: String, onOutput: ((String) -> Unit)? = null): String {
+    fun executeCommand(
+        command: String,
+        onOutput: ((String) -> Unit)? = null,
+        interactive: Boolean = false,
+        stdin: String? = null,
+    ): String {
         if (packageOperationCancelled) return "Error: Package operation cancelled"
-        activeCommandProcess?.let { process ->
-            try {
-                Log.d(TAG, "Routing input to active command: $command")
-                val os = process.outputStream
-                os.write((command + "\n").toByteArray())
-                os.flush()
-                return ""
-            } catch (e: Exception) {
-                Log.w(TAG, "Active process closed or failed to receive input: ${e.message}")
+        if (!isBootstrapped()) return "Error: Runtime not bootstrapped"
+        if (stdin != null) {
+            val input = activeCommands.input()
+            return when (input.state) {
+                CommandInputState.READY -> try {
+                    input.process!!.outputStream.apply {
+                        write((stdin + "\n").toByteArray())
+                        flush()
+                    }
+                    ""
+                } catch (error: Exception) {
+                    "Error: ${error.message}"
+                }
+                CommandInputState.STARTING -> "Error: The interactive command is still starting"
+                CommandInputState.NOT_INTERACTIVE ->
+                    "Error: The active command does not accept terminal input"
+                CommandInputState.ABSENT -> "Error: No interactive command is running"
             }
         }
-
-        if (!isBootstrapped()) return "Error: Runtime not bootstrapped"
 
         compileSocketHook()
 
         val bashBin = File(prefixDir, "bin/bash").absolutePath
         val fullCommand = listOf(bashBin, "-c", command)
+        val lease = activeCommands.reserve(interactive)
+            ?: return "Error: Another command is already running"
 
         return try {
             Log.d(TAG, "Executing command natively: $command")
@@ -2317,7 +2870,10 @@ $stagedProfile
                 }
                 .start()
 
-            activeCommandProcess = process
+            if (!activeCommands.attach(lease, process)) {
+                process.destroyForcibly()
+                return "Error: Command was cancelled before it started"
+            }
 
             val output = StringBuilder()
             val reader = java.io.InputStreamReader(process.inputStream)
@@ -2331,23 +2887,23 @@ $stagedProfile
                 onOutput?.invoke(chunk)
             }
             process.waitFor()
-            activeCommandProcess = null
             Log.d(TAG, "Command finished with exit code: ${process.exitValue()}")
 
             if (process.exitValue() != 0) {
-                throw Exception("Command failed with exit code ${process.exitValue()}. Output: \n$output")
+                throw Exception("Command failed with exit code ${process.exitValue()}. Output: $output")
             }
 
             output.toString()
         } catch (e: Exception) {
-            activeCommandProcess = null
             Log.e(TAG, "Command execution failed: ${e.message}")
             "Error: ${e.message}"
+        } finally {
+            activeCommands.release(lease)
         }
     }
 
     fun interruptCommand() {
-        activeCommandProcess?.let { process ->
+        activeCommands.cancel()?.let { process ->
             Log.d(TAG, "Interrupting active command...")
             val rootPid = processPid(process)
             val descendants = rootPid?.let(::descendantPids).orEmpty()
@@ -2361,7 +2917,6 @@ $stagedProfile
             descendants.asReversed().forEach { pid -> android.os.Process.sendSignal(pid, 9) }
             if (process.isAlive) process.destroyForcibly()
         }
-        activeCommandProcess = null
     }
 
     private fun processPid(process: Process): Int? = runCatching {

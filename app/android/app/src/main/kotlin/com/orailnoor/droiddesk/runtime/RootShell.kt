@@ -3,6 +3,8 @@ package com.orailnoor.droiddesk.runtime
 import android.content.Context
 import android.util.Log
 import java.io.File
+import java.util.concurrent.TimeUnit
+import kotlin.concurrent.thread
 
 /**
  * Generic root command executor.
@@ -14,6 +16,7 @@ class RootShell(private val context: Context) {
 
     companion object {
         private const val TAG = "RootShell"
+        private const val DEFAULT_ROOT_AUTH_TIMEOUT_MS = 15_000L
 
         // Common su paths, ordered by likelihood
         private val SU_PATHS = listOf(
@@ -69,13 +72,12 @@ class RootShell(private val context: Context) {
     /**
      * Returns true if root access is available and granted.
      */
-    fun hasRoot(): Boolean {
+    fun hasRoot(timeoutMs: Long = DEFAULT_ROOT_AUTH_TIMEOUT_MS): Boolean {
         cachedRootState?.let { return it }
-        val su = findSuPath() ?: return false
-        val result = execSync(su, "id -u")
-        val hasRoot = result.trim() == "0"
+        val result = execBounded("id -u", timeoutMs)
+        val hasRoot = result.exitCode == 0 && result.output.trim() == "0"
         cachedRootState = hasRoot
-        Log.i(TAG, "Root check: $hasRoot (su=$su)")
+        Log.i(TAG, "Root check: $hasRoot (exit=${result.exitCode})")
         return hasRoot
     }
 
@@ -93,6 +95,40 @@ class RootShell(private val context: Context) {
     fun exec(command: String, onOutput: (String) -> Unit): Int {
         val su = findSuPath() ?: throw RootException("No su binary found. Is this device rooted?")
         return execStream(su, command, onOutput)
+    }
+
+    fun execBounded(command: String, timeoutMs: Long): ExecutionResult {
+        val su = findSuPath()
+            ?: return ExecutionResult(127, "No su binary found. Is this device rooted?")
+        val process = ProcessBuilder(su, "-c", command)
+            .redirectErrorStream(true)
+            .start()
+        val output = StringBuffer()
+        val reader = thread(name = "root-command-output", isDaemon = true) {
+            process.inputStream.bufferedReader().use { stream ->
+                val buffer = CharArray(1024)
+                var read: Int
+                while (stream.read(buffer).also { read = it } != -1) {
+                    output.append(buffer, 0, read)
+                }
+            }
+        }
+        try {
+            if (!process.waitFor(timeoutMs, TimeUnit.MILLISECONDS)) {
+                process.destroyForcibly()
+                process.waitFor(500, TimeUnit.MILLISECONDS)
+                reader.join(500)
+                return ExecutionResult(124, output.toString())
+            }
+        } catch (_: InterruptedException) {
+            process.destroyForcibly()
+            process.waitFor(500, TimeUnit.MILLISECONDS)
+            reader.join(500)
+            Thread.currentThread().interrupt()
+            return ExecutionResult(130, output.toString())
+        }
+        reader.join(500)
+        return ExecutionResult(process.exitValue(), output.toString())
     }
 
     /**
@@ -139,4 +175,5 @@ class RootShell(private val context: Context) {
     }
 
     class RootException(message: String) : Exception(message)
+
 }

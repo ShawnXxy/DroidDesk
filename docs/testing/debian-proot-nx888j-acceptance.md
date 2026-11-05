@@ -1,0 +1,177 @@
+# Debian PRoot Acceptance — Nubia NX888J
+
+Date: 2026-11-05
+
+## Device and build
+
+| Field | Result |
+|---|---|
+| Model | Nubia NX888J |
+| Device | PQ85A02 |
+| Android | 16 / API 36 |
+| ABI | `arm64-v8a` |
+| Root | Unavailable (`su` is not installed) |
+| Hardware VM device | `/dev/kvm` unavailable |
+| Test package | `com.orailnoor.droiddesk.monitoracceptance` |
+| Test isolation | Installed beside the production DroidDesk package |
+
+This acceptance pass validates the non-root Debian PRoot path. It does not
+validate AVF/Gunyah or rooted chroot operation.
+
+## Provisioning
+
+| Check | Result |
+|---|---|
+| PRoot | `5.1.107.102` |
+| PRoot-Distro | `5.10.3` |
+| Debian image | Pinned ARM64 digest `sha256:99c0b25c46d0214d5a2091092e7908907dcaecd6a962cde0ac700acee222b6f3` |
+| Registry recovery | Docker Hub was unreachable; the same digest succeeded from `public.ecr.aws/docker/library/debian` |
+| Debian packages | USTC mirror preferred with official Debian fallback |
+| Final successful pass | Approximately 6 minutes from restart to ready |
+| Ready marker | Package set version 5 |
+| Architecture | `dpkg --print-architecture` returned `arm64` |
+
+The mirror comparison downloaded 764,600 bytes from `deb.debian.org` in 20
+seconds versus 1 MiB from USTC in approximately 0.46 seconds on the same
+connection.
+
+The base XFCE rootfs previously measured approximately 501 MiB in `/usr`, 34
+MiB in `/var`, and 1.4 MiB in `/etc`. After installing official VS Code,
+`/usr` measured approximately 1.44 GiB. Setup enforces a 2 GiB transaction
+minimum and recommends 6 GiB free for downloads, staging, rollback, upgrades,
+and safety margin; neither number is the final base install size.
+
+## Desktop and interaction
+
+| Check | Result |
+|---|---|
+| XFCE first frame | Passed |
+| Embedded X11 | Passed at `DISPLAY=:0` |
+| Phone viewport | Passed at 360 × 800 logical / 1260 × 2800 physical |
+| Background and return | Same XFCE session resumed through **Return to Desktop** |
+| Android render-rate request | `mActiveRenderFrameRate=60.000004` while `DesktopActivity` was focused |
+| Audio | Debian connected to the host PulseAudio AAudio/OpenSL ES path through cookie-authenticated loopback TCP |
+| Android → X11 clipboard | Android Notes token was read unchanged by Debian `xclip -selection clipboard -o` |
+| X11 → Android clipboard | Debian `xclip` token pasted unchanged into Android Notes |
+
+Clipboard acceptance covers foreground plain text. Rich text, images,
+background clipboard access, and clipboard-manager interoperability were not
+tested.
+
+## External display
+
+The current review head was validated on the connected `RTK FHD` HDMI display.
+The logical display ID is assigned dynamically; the current run used
+`displayId=27` rather than the earlier run's `displayId=25`.
+
+| Field | Result |
+|---|---|
+| Tested commit | `3022b81` |
+| Android display | `displayId=27` |
+| Mode | 2160 × 1440 at 60 Hz |
+| Placement | Generic secondary-display `ActivityOptions` path |
+| X11 surface | 2160 × 1440 shared buffer at 60 Hz |
+| Input | Physical mouse movement/click and physical keyboard text input passed |
+| Audio | Cookie-authenticated TCP, `AAudio_sink`, live stereo 44.1 kHz sink input, audible output |
+| VS Code | `1.145.0` Welcome window rendered and accepted mouse/keyboard input |
+| Background/return | Home reported **Desktop active** and returned to the same XFCE session |
+| Stop/recovery | PRoot, XFCE, D-Bus, PulseAudio, VS Code, crashpad, and the temporary Pulse cookie were absent after **Stop Server** |
+
+Two external-display defects were found and fixed:
+
+1. Android kept the physical mouse cursor on display 0. DroidDesk now enables
+   pointer capture automatically for a non-default display and releases it
+   when that view closes.
+2. A concurrent display-profile command could make the guest `pgrep` status
+   query return busy, incorrectly marking the live XFCE session as failed.
+   Required desktop processes are now probed through an independent host
+   process instead of the shared command channel.
+
+Android routed media to the `Smartisan TNT go` USB audio device. At its saved
+per-device media volume of 8/15, the authenticated PulseAudio stream and sink
+input were healthy but the test tone was inaudible. Raising that Android route
+to 15/15 made the same WAV audible; the setting was restored to 8/15 after the
+test. This confirms an Android/dock/display gain issue rather than PulseAudio
+attenuation. DroidDesk does not override the user's media or display-speaker
+volume.
+
+## Official Microsoft VS Code
+
+| Check | Result |
+|---|---|
+| Package | `code` ARM64 |
+| Version | `1.145.0-1793748906` |
+| CLI | `1.145.0`, commit `a717861c07586a53d83b80d742cd3f59b20a6273`, `arm64` |
+| GUI | Welcome window rendered in XFCE |
+| Launch flags | `--no-sandbox --disable-gpu --disable-dev-shm-usage` |
+| Download | Approximately 233 MiB and 12 minutes from `packages.microsoft.com` |
+| Process-group RSS | 776,932 KiB (approximately 759 MiB) during the acceptance run |
+
+The Electron system-DBus and udev warnings observed at first launch did not
+prevent the GUI from opening.
+
+## Review-fix regression retest
+
+The post-review build was installed over the existing acceptance package
+without clearing its 1.5 GiB Debian rootfs.
+
+- Cold startup restored `xfce4-session`, `xfce4-panel`, `xfwm4`, and
+  `xfdesktop`, then revealed the desktop without a readiness/profile error.
+- The Debian terminal reported Bookworm and identified itself as
+  **Debian PRoot** instead of Native Termux.
+- `pactl info` connected through cookie-authenticated `tcp:127.0.0.1` and
+  reported `AAudio_sink`; playback of a generated stereo WAV created a live
+  PulseAudio sink input.
+- An interactive `head -n 1` command received a later
+  `stdin-token-20261105` submission and echoed the token before exiting.
+- Snapshot format v2 included the bound
+  `home/Downloads/nubia-audio-test.wav`; deleting the source and restoring the
+  snapshot recreated it in the host-backed Downloads directory.
+- The previously installed VS Code remained available as `1.145.0`, commit
+  `a717861c07586a53d83b80d742cd3f59b20a6273`, `arm64`.
+- **Stop Server** removed PRoot, XFCE, D-Bus, PulseAudio, and the temporary
+  shared PulseAudio cookie; only the main Android activity process remained.
+- To exercise failed-start cleanup on the real device, the test temporarily
+  renamed the host `proot-distro` launcher after installation. PulseAudio
+  started, profile application failed with the original `No such file or
+  directory` error, and the controller removed PulseAudio and the shared
+  cookie before revealing the failure. The launcher was restored in a
+  `finally` block and a subsequent normal desktop start passed.
+
+## Lifecycle cleanup
+
+After **Stop Server**, the following were verified absent:
+
+- `proot` and the PRoot shared-memory helper;
+- `xfce4-session`, `xfce4-panel`, `xfdesktop`, and `xfwm4`;
+- the session `dbus-daemon`;
+- host `pulseaudio`;
+- DroidDesk and X11 foreground services.
+
+The final cleanup fix avoids routing daemon-termination commands into a
+concurrent PRoot status process. Selected-environment cleanup is also executed
+when the desktop root process has already exited.
+
+## Performance and thermal observations
+
+- PRoot overhead is most visible during archive extraction, package
+  configuration, and operations over many small files.
+- Papirus was replaced by Adwaita because theme extraction added roughly 208
+  MiB and icon-cache generation was disproportionately slow under PRoot.
+- With VS Code open and idle, a short sample reported maximum CPU 32.5°C,
+  maximum GPU 32.4°C, and skin 31.2°C.
+- These values are not a long-duration thermal soak and must not be used as a
+  sustained-load guarantee.
+
+## Known limits and remaining acceptance
+
+- Software rendering is the guaranteed PRoot renderer; hardware acceleration
+  is not claimed.
+- PRoot does not provide real root, `systemd`, Docker, cgroups, kernel modules,
+  `iptables`, or privileged mounts.
+- VS Code installation is validated manually through Debian `apt`; the product
+  optional-app UI does not install it yet.
+- Rootfs backup/import and GUI `.deb` import are not implemented.
+- Long-duration thermal and battery soak testing remains follow-up work.
+- The R2/TNT external-display regression must still be repeated on the exact
+  final review head.

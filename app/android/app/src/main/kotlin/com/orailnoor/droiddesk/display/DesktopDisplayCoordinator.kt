@@ -21,7 +21,8 @@ data class DesktopLaunchRequest(
 )
 
 interface DesktopDisplayHost {
-    fun currentDisplayId(): Int? = null
+    fun currentDisplay(): DesktopDisplay? = null
+    fun currentDisplayId(): Int? = currentDisplay()?.id
     fun bindActivity(activity: Activity) {}
     fun unbindActivity(activity: Activity) {}
     fun displays(): List<DesktopDisplay>
@@ -77,6 +78,7 @@ class DesktopDisplayCoordinator(
     private var stoppingTarget: DesktopStartupTarget? = null
     private var stopFailed = false
     private var needsSessionStart = false
+    private var sessionStartClaim: Long? = null
     private var sessionStarting = false
     private var cancelAutomaticTimer: (() -> Unit)? = null
     private var automaticTargetKey: String? = null
@@ -118,12 +120,15 @@ class DesktopDisplayCoordinator(
         if (expectedEpoch != null && !isSessionCurrent(expectedEpoch)) {
             throw DesktopDisplayException("SESSION_STOPPED", "The deferred desktop action belongs to a stopped session")
         }
-        require(mode == "termux" || mode == "chroot") { "Invalid Linux runtime" }
+        require(mode == "termux" || mode == "proot" || mode == "chroot") {
+            "Invalid Linux runtime"
+        }
         val epoch = beginSession()
         sessionMode = mode
         desktopEnv = desktop
         if (start) {
             needsSessionStart = true
+            sessionStartClaim = null
             sessionStarting = true
             profileRefresher?.invoke {}
         }
@@ -164,14 +169,26 @@ class DesktopDisplayCoordinator(
 
     fun consumeSessionStart(lease: RendererLease): Boolean {
         assertMainThread()
-        if (!isCurrent(lease) || !needsSessionStart) return false
-        needsSessionStart = false
+        if (!isCurrent(lease) || !needsSessionStart || sessionStartClaim != null) return false
+        sessionStartClaim = lease.generation
         return true
+    }
+
+    fun beginSessionStart(lease: RendererLease): Long? {
+        assertMainThread()
+        if (!isCurrent(lease) || !needsSessionStart || sessionStartClaim != lease.generation) {
+            return null
+        }
+        needsSessionStart = false
+        sessionStartClaim = null
+        return sessionGeneration
     }
 
     fun sessionStarted(epoch: Long, result: Result<Unit>) {
         assertMainThread()
         if (!isSessionCurrent(epoch)) return
+        needsSessionStart = false
+        sessionStartClaim = null
         sessionStarting = false
         result.exceptionOrNull()?.let {
             reportError(DesktopDisplayException("SESSION_STOPPED", it.message ?: "Linux session failed to start"))
@@ -213,6 +230,7 @@ class DesktopDisplayCoordinator(
         val previous = owner
         owner = null
         profileRefresher = null
+        releaseSessionStartClaim(previous?.lease)
         previous?.detach?.invoke()
         if (move == null) previous?.finish?.invoke()
         check(!isStopped) { "SESSION_STOPPED" }
@@ -246,6 +264,7 @@ class DesktopDisplayCoordinator(
         if (current.lease != lease) return
         owner = null
         profileRefresher = null
+        releaseSessionStartClaim(current.lease)
         current.detach()
         appliedKind = null
         renderSize = null
@@ -262,6 +281,7 @@ class DesktopDisplayCoordinator(
         sessionGeneration++
         generation++
         needsSessionStart = false
+        sessionStartClaim = null
         sessionStarting = false
         stopFailed = false
         val pending = move
@@ -407,7 +427,16 @@ class DesktopDisplayCoordinator(
         return { sessionStartListeners.remove(listener) }
     }
 
-    fun displays(): List<DesktopDisplay> = checkNotNull(host) { "Display discovery is not initialized" }.displays()
+    fun displays(): List<DesktopDisplay> {
+        val platform = checkNotNull(host) { "Display discovery is not initialized" }
+        val discovered = platform.displays()
+        val current = platform.currentDisplay()
+        return if (current != null && discovered.none { it.id == current.id }) {
+            discovered + current
+        } else {
+            discovered
+        }
+    }
 
     fun snapshot(): Map<String, Any?> {
         assertMainThread()
@@ -570,7 +599,7 @@ class DesktopDisplayCoordinator(
 
     fun startupTarget(displayId: Int): DesktopStartupTarget {
         assertMainThread()
-        val display = displays().firstOrNull { it.id == displayId && it.eligible }
+        val display = displays().firstOrNull { it.id == displayId && canLaunch(it) }
             ?: throw DesktopDisplayException("DISPLAY_UNAVAILABLE", "The app's current display is not available")
         return DesktopStartupTarget(display.id, display.key, environmentPolicy.environmentFor(display.id))
     }
@@ -593,7 +622,7 @@ class DesktopDisplayCoordinator(
             }
             return
         }
-        val actual = owner?.actualDisplay?.invoke()
+        val actual = owner?.actualDisplay?.invoke() ?: host?.currentDisplayId()
         val target = current.firstOrNull { it.id == actual }
             ?: current.firstOrNull { it.key == lastTarget?.key }
             ?: current.firstOrNull { it.isDefault }
@@ -633,7 +662,7 @@ class DesktopDisplayCoordinator(
             isStopped || (!sessionStarting && !platform.sessionRunning()) ->
                 DesktopDisplayException("SESSION_STOPPED", "Start the Linux desktop before moving its view")
             move != null -> DesktopDisplayException("INVALID_ARGUMENT", "A desktop move is already in progress")
-            !target.eligible -> DesktopDisplayException("DISPLAY_NOT_ALLOWED", target.reason ?: "Android denied this display")
+            !canLaunch(target) -> DesktopDisplayException("DISPLAY_NOT_ALLOWED", target.reason ?: "Android denied this display")
             else -> null
         }
         if (failure != null) {
@@ -674,7 +703,7 @@ class DesktopDisplayCoordinator(
         assertMainThread()
         if (!isSessionCurrent(epoch)) return false
         val target = displays().firstOrNull { it.id == displayId && it.key == displayKey } ?: return false
-        if (!target.eligible) return false
+        if (!canLaunch(target)) return false
         val pending = move
         return if (pending != null) {
             pending.request.requestId == requestId && pending.request.display.key == target.key
@@ -704,7 +733,7 @@ class DesktopDisplayCoordinator(
         }
         val target = pending.request.display
         if (pending.request.requestId != requestId || lease.displayId != target.id || owner?.actualDisplay?.invoke() != target.id ||
-            displays().none { it.id == target.id && it.key == target.key && it.eligible }) return
+            displays().none { it.id == target.id && it.key == target.key && canLaunch(it) }) return
         move = null
         pending.cancelTimeout()
         lastTarget = target
@@ -750,7 +779,7 @@ class DesktopDisplayCoordinator(
         }
         if (pending != null && current.none { it.key == pending.request.display.key }) {
             onDisplayRemoved(pending.request.display.id)
-        } else if (pending != null && current.any { it.key == pending.request.display.key && !it.eligible }) {
+        } else if (pending != null && current.any { it.key == pending.request.display.key && !canLaunch(it) }) {
             failMove(DesktopDisplayException("DISPLAY_NOT_ALLOWED", "Display placement permission changed"), true)
         } else if (pending == null) {
             lastTarget?.takeIf { target -> current.none { it.key == target.key } }?.let { onDisplayRemoved(it.id) }
@@ -759,6 +788,9 @@ class DesktopDisplayCoordinator(
         publish()
         refreshAutomaticOpening()
     }
+
+    private fun canLaunch(display: DesktopDisplay): Boolean =
+        display.eligible || host?.currentDisplayId() == display.id
 
     private fun automaticOpeningEnabled(): Boolean =
         environmentPolicy.allowCrossDisplayMoves && (settingsStore?.loadAutoOpenOnMonitor() ?: true)
@@ -870,6 +902,12 @@ class DesktopDisplayCoordinator(
         error = failure
         if (!isStopped) phase = "error"
         publish()
+    }
+
+    private fun releaseSessionStartClaim(lease: RendererLease?) {
+        if (lease != null && sessionStartClaim == lease.generation) {
+            sessionStartClaim = null
+        }
     }
 
     private fun publish() {
