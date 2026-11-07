@@ -113,7 +113,12 @@ class _DisplaySettingsScreenState extends State<DisplaySettingsScreen> {
     });
   }
 
-  void _edit({DesktopRenderPolicy? render, String? scale, int? mode}) {
+  void _edit({
+    DesktopRenderPolicy? render,
+    String? scale,
+    int? mode,
+    DesktopExternalInputRoute? inputRoute,
+  }) {
     final settings = _settings;
     if (settings == null) return;
     setState(() {
@@ -126,6 +131,7 @@ class _DisplaySettingsScreenState extends State<DisplaySettingsScreen> {
             ? null
             : int.parse(scale),
         inputMode: mode ?? settings.inputMode,
+        inputRoute: inputRoute ?? settings.inputRoute,
       );
       _dirty = true;
     });
@@ -194,7 +200,8 @@ class _DisplaySettingsScreenState extends State<DisplaySettingsScreen> {
               'Linux is not started automatically. Multiple monitors require selection.',
             ),
             value: snapshot.autoOpenOnMonitor,
-            onChanged: state.desktopDisplayBusy || !snapshot.crossDisplayMovesAllowed
+            onChanged:
+                state.desktopDisplayBusy || !snapshot.crossDisplayMovesAllowed
                 ? null
                 : state.setAutoOpenOnMonitor,
           ),
@@ -259,7 +266,9 @@ class _DisplaySettingsScreenState extends State<DisplaySettingsScreen> {
           if (snapshot.monitors.isEmpty)
             const Text('No independently launchable display detected'),
           if (selected != null && !selected.isDefault)
-            const Text('Monitor preferences apply to all monitors.'),
+            const Text(
+              'Render, scale, and input-mode preferences apply to all monitors. Input routing is stored for the selected monitor.',
+            ),
           if (selected?.reason != null) Text(selected!.reason!),
           if (_loadingSettings) const LinearProgressIndicator(),
           const SizedBox(height: 20),
@@ -333,6 +342,39 @@ class _DisplaySettingsScreenState extends State<DisplaySettingsScreen> {
                     }
                   : null,
             ),
+            if (selected != null && !selected.isDefault) ...[
+              const SizedBox(height: 14),
+              DropdownButtonFormField<DesktopExternalInputRoute>(
+                key: const Key('desktop-external-input-route'),
+                initialValue: settings.inputRoute,
+                decoration: const InputDecoration(
+                  labelText: 'External input route',
+                ),
+                items: const [
+                  DropdownMenuItem(
+                    value: DesktopExternalInputRoute.automatic,
+                    child: Text('Automatic'),
+                  ),
+                  DropdownMenuItem(
+                    value: DesktopExternalInputRoute.native,
+                    child: Text('Android native'),
+                  ),
+                  DropdownMenuItem(
+                    value: DesktopExternalInputRoute.phoneRelay,
+                    child: Text('Phone relay'),
+                  ),
+                ],
+                onChanged: enabled
+                    ? (route) {
+                        if (route != null) _edit(inputRoute: route);
+                      }
+                    : null,
+              ),
+              const SizedBox(height: 8),
+              const Text(
+                'Automatic preserves native desktop input when Android exposes it, and uses the phone relay when external input remains on the phone.',
+              ),
+            ],
             const SizedBox(height: 16),
             FilledButton(
               key: const Key('desktop-save-settings'),
@@ -359,7 +401,10 @@ class _DisplaySettingsScreenState extends State<DisplaySettingsScreen> {
           ),
           const SizedBox(height: 8),
           OutlinedButton.icon(
-            onPressed: snapshot.crossDisplayMovesAllowed && !state.desktopDisplayBusy && state.isRunning
+            onPressed:
+                snapshot.crossDisplayMovesAllowed &&
+                    !state.desktopDisplayBusy &&
+                    state.isRunning
                 ? state.moveDesktopToPhone
                 : null,
             icon: const Icon(Icons.phone_android),

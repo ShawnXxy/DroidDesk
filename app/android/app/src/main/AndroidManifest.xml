@@ -72,6 +72,14 @@
             android:windowSoftInputMode="adjustResize"
             android:configChanges="orientation|keyboardHidden|keyboard|screenSize|smallestScreenSize|locale|layoutDirection|fontScale|screenLayout|density|uiMode" />
 
+        <activity
+            android:name=".view.ExternalInputRelayActivity"
+            android:excludeFromRecents="true"
+            android:exported="false"
+            android:launchMode="singleTask"
+            android:taskAffinity="${applicationId}.externalinput"
+            android:theme="@android:style/Theme.NoTitleBar.Fullscreen" />
+
         <!-- The native X server must have a different Linux process and FD table than LorieView. -->
         <service
             android:name=".x11.X11ServerService"

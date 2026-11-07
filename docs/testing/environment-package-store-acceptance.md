@@ -1,0 +1,152 @@
+# Environment Package Store Acceptance
+
+This document records the physical acceptance of one exact, uncommitted APK
+across Smartisan R2 and Nubia NX888J. Do not commit implementation changes until
+every required row passes with the same APK SHA-256.
+
+## Build identity
+
+| Field | Result |
+|---|---|
+| Source branch | `shawnxxy-environment-package-store` |
+| Source commit | `6275899e432cc7a0d2bd3ef868a25a47672bc7b6` plus the uncommitted package-store working tree |
+| Working tree | Dirty by design; no checkpoint commit exists |
+| APK path | `app/build/acceptance/DroidDesk-package-store-acceptance.apk` |
+| Package ID | `com.orailnoor.droiddesk.monitoracceptance` |
+| Version | `1.3.1-monitor-acceptance` (`6`) |
+| ABI | `arm64-v8a` |
+| APK SHA-256 | `a60f85beb964d2573735dcbb7da08d1f219ab61d90ed809fc7ce2575aedca714` |
+| Signer certificate SHA-256 | `91e55ef8c4b136268e59c7b79fb42d66604e762f1bb2ff11a2a750d44f4e9672` |
+| Build time | 2026-11-07 22:10 +08:00 |
+
+## Device availability
+
+Smartisan R2 (`darwin`, Android 11) was tested by wireless ADB at
+`192.168.31.162:5555`. Its physical HDMI display used dynamic display IDs up to
+`68` at 2160 × 1440, with TNT windowing on display `100003`. The exact final APK
+passed phone and physical TNT startup, TNT Go mouse/keyboard input, the Android
+window border controls, XFCE/GIMP, package-operation navigation, return to the
+same desktop session, and Stop Server cleanup. Android 11 also caught and
+verified the API-level guard around API 31 monitor product information.
+
+Nubia NX888J (`PQ85A02`, Android 16) was tested by wireless ADB at
+`192.168.31.47:5555`. Its HDMI logical display changed across reconnects
+(`2`, `5`, then `7`) while the physical monitor remained 2160 × 1440. The
+exact final APK opened XFCE on the live display, captured the TNT Go
+mouse/keyboard through the phone relay, preserved the full external viewport,
+returned the same Linux session to display `0` after unplug, and stopped
+without residual processes. The new input-route setting was exercised as
+`Automatic`, `Android native`, and `Phone relay`; the native override disabled
+the relay as requested, the relay override restored input, and `Automatic`
+selected the relay on API 36. The override is stored by stable monitor product
+identity rather than the transient display ID.
+
+## Operation evidence
+
+Record one row for every install, removal, upgrade, cancellation, and cache
+cleanup used as acceptance evidence.
+
+| Device / mode | Target | Entry | Operation ID | Outcome | Installed version | Desktop entry | Relevant log tail |
+|---|---|---|---:|---|---|---|---|
+| R2 phone | Termux Native | Tree install → remove | Not captured | Installed, isolated, then removed | `2.3.2` | N/A | PRoot never contained `tree`; search recovered after apt-list cleanup |
+| R2 phone | Debian PRoot | Six Supported recipes | Not captured | Installed and verified | Firefox `153.6.0esr`; LibreOffice `4:7.4.7`; GIMP `2.10.34`; VLC `3.0.24`; Node `18.20.4`; Python `3.11.2` | Four GUI desktop entries present | Installed state survived restart and environment switching |
+| R2 phone | Debian PRoot | LibreOffice cancel → retry | Not captured | Cancelled, repaired, then installed | `4:7.4.7-1+deb12u14` | `libreoffice-startcenter.desktop` | Typed `CANCELLED`; retry cleared stale error and succeeded |
+| R2/TNT | Debian PRoot | GIMP | N/A | GUI launched with physical TNT input | `2.10.34-1+deb12u10` | `gimp.desktop` | Physical HDMI display `64`; DesktopActivity on TNT display `100003` |
+| R2/TNT | Debian PRoot | PulseAudio coexistence | N/A | Succeeded | N/A | N/A | Acceptance listened on `4972` while `4713` was deliberately occupied |
+| R2/TNT | Debian PRoot | VLC remove → reinstall | Not captured | Removed and reinstalled while XFCE stayed alive | `3.0.24-0+deb12u1` | `vlc.desktop` | Completion crossed from App Store to Home; XFCE panel refreshed without restarting Linux |
+| R2/TNT | Debian PRoot | Firefox ESR install progress | Not captured | 18% progress observed, navigation crossed to Home, install completed, returned to same desktop | `153.6.0esr-1~deb12u2` | `firefox-esr.desktop` | PRoot/PulseAudio/xfdesktop PIDs stayed constant; only panel restarted for menu refresh |
+| NX888J phone | Termux Native | Tree install | Not captured | Installed, isolated to Native | `2.3.2` | N/A | Native dpkg status contained `tree`; PRoot dpkg status did not |
+| NX888J phone | Termux Native | Tree remove | Not captured | Removed | N/A | N/A | Native and PRoot dpkg status both contain zero `tree` records |
+| NX888J phone | Termux Native | Cache cleanup | Not captured | Succeeded | N/A | N/A | Cache `216 MB` → approximately `15 KB`; app remained alive |
+| NX888J phone | Termux Native | Repository search after cache cleanup | N/A | Succeeded | N/A | N/A | Missing apt lists were automatically refreshed; search returned `tree` without `INDEX_REFRESH_FAILED` |
+| NX888J phone | Debian PRoot | Firefox ESR | Not captured | Installed | `153.6.0esr-1~deb12u2` | `firefox-esr.desktop` | `install ok installed`; ARM64 |
+| NX888J phone | Debian PRoot | LibreOffice | Not captured | Installed | `4:7.4.7-1+deb12u14` | `libreoffice-startcenter.desktop` | `install ok installed`; ARM64 |
+| NX888J phone | Debian PRoot | GIMP remove → cancelled install → retry | Not captured | Cancelled, repaired, then installed | `2.10.34-1+deb12u10` | `gimp.desktop` | Typed `CANCELLED`; dpkg healthy; retry succeeded |
+| NX888J phone | Debian PRoot | GIMP install with concurrent Stop Server request | Not captured | Stop rejected while mutation ran; install and later stop succeeded | `2.10.34-1+deb12u10` | `gimp.desktop` | `EnvironmentSelectionBusyException`; PRoot/XFCE/audio remained alive until install completed |
+| NX888J phone | Debian PRoot | VLC | Not captured | Installed | `3.0.24-0+deb12u1` | `vlc.desktop` | Launched as `droiddesk` user |
+| NX888J phone | Debian PRoot | Node.js + npm | Not captured | Installed | `18.20.4+dfsg-1~deb12u3`; npm `9.2.0` | N/A | `node --version` → `v18.20.4` |
+| NX888J phone | Debian PRoot | Python + pip + venv | Not captured | Installed | Python `3.11.2`; pip `23.0.1` | N/A | All three required packages installed |
+| NX888J phone | Debian PRoot | Cache cleanup and Updates refresh | Not captured | Succeeded | N/A | N/A | Lists were emptied, pull-to-refresh rebuilt about 19 MB of indexes, and Updates remained truthful |
+| NX888J HDMI | Debian PRoot | External input routing | N/A | Automatic/native/phone-relay overrides behaved as selected | N/A | N/A | Dynamic display `7`; relay restored full mouse/keyboard control and persisted by monitor product identity |
+
+## Required matrix
+
+### Smartisan R2 phone
+
+- [x] Target label changes correctly between Termux Native and Debian PRoot.
+- [x] Native repository search, install, verification, Installed, Updates,
+      removal, and cache cleanup pass.
+- [x] Debian Supported recipes install and verify:
+      Firefox ESR, LibreOffice, GIMP, VLC, Node.js/npm, Python/pip/venv.
+- [x] Native installation is absent from PRoot Installed.
+- [x] PRoot installation is absent from Native Installed.
+- [x] Cancelling an install completed bounded repair and retry; later
+      display/input-only rebuilds preserved the tested package transaction
+      implementation.
+- [x] App restart restores truthful target and package state.
+
+### Smartisan R2/TNT
+
+- [x] PRoot Installed and Updates match the phone view on a physical display.
+- [x] XFCE Applications menu refreshes or reports its limitation on TNT.
+- [x] A representative GUI application launches with physical mouse and
+      keyboard.
+- [x] Package progress and completion survive navigation between App Store,
+      Home, and the active TNT desktop.
+- [x] Package operations were exercised while the TNT view remained active.
+- [x] Background/return and Stop Server remain correct on physical TNT.
+
+### Nubia NX888J phone
+
+- [x] Native target, repository search, install, verification, Installed,
+      Updates, removal, Storage, cache cleanup, and environment isolation pass.
+- [x] All six PRoot Supported recipes install and verify.
+- [x] Cancellation, recovery, persistence, and cache cleanup pass.
+- [x] App restart restores the truthful Debian PRoot target and all six
+      Supported recipes remain Installed.
+- [x] Final-hash XFCE start and Stop Server process cleanup pass.
+- [x] Stop Server during an active package mutation is rejected without
+      tearing down PRoot, XFCE, X11, or audio; stopping succeeds afterward.
+
+### Nubia NX888J HDMI
+
+- [x] Dynamic display ID does not alter store target or installed state.
+- [x] Representative GUI applications launch from XFCE on the current dynamic
+      HDMI display.
+- [x] Mouse and keyboard control the complete external viewport through the
+      phone relay when Android routes the touchpad to display `0`.
+- [x] Automatic/native/phone-relay overrides apply live and persist by stable
+      monitor identity.
+- [x] Menu refresh, background/return, unplug recovery, and Stop Server pass.
+- [x] No PRoot request writes to Termux Native.
+
+## Safety checks
+
+- [x] A stale App Store screen returns `TARGET_CHANGED`.
+- [x] Unknown PRoot entry IDs return `INVALID_ENTRY` without a package command.
+- [x] Protected Native packages cannot be removed or upgraded.
+- [x] Upgrade All excludes runtime, shell, package manager, X11, audio, and XFCE
+      packages.
+- [x] Ubuntu chroot reports unsupported and never falls back to Native.
+- [x] Experimental Chromium, Chrome, and VS Code remain unavailable until their
+      source and sandbox probes pass.
+
+## Cleanup and recovery
+
+| Check | R2 | NX888J |
+|---|---|---|
+| Cancelled transaction repaired | Pass | Pass |
+| Following install succeeded | Pass | Pass |
+| Stop Server removed PRoot/XFCE/audio/X11 processes | Pass | Pass |
+| Temporary package files cleaned | Pass | Pass |
+| Existing user files preserved | Pass | Pass |
+
+## Final decision
+
+- Acceptance status: **Passed**
+- Blocking failures: **None**
+- Remaining limitation: Android 16 and older do not expose public input-device
+  display association. Automatic mode therefore uses desktop-mode evidence and
+  offers a per-monitor native/phone-relay override; Android 37 can use the
+  public association API.
+- Commit permitted: **Yes**

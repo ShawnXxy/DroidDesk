@@ -2,6 +2,8 @@
 **/.DS_Store
 *.swp
 *.class
+*.py[cod]
+__pycache__/
 *.log
 *.apk
 *.aab
@@ -27,11 +29,6 @@ local.properties
 /.superpowers/
 /docs/superpower/
 /docs/superpowers/
-
-# Local-only validation, not runtime or current GitHub Actions.
-/app/android/app/src/androidTest/
-/app/android/app/src/test/
-/app/test/
 
 # Local diagnostics and one-off development artifacts.
 /.local-diagnostics/

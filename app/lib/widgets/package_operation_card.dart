@@ -1,3 +1,4 @@
+import 'package:droiddesk/models/linux_environment.dart';
 import 'package:droiddesk/state/app_state.dart';
 import 'package:droiddesk/theme/droid_theme.dart';
 import 'package:droiddesk/widgets/linux_app_icon.dart';
@@ -54,7 +55,9 @@ class _PackageOperationCardState extends State<PackageOperationCard> {
         border: Border.all(color: DroidTheme.surfaceBorder),
         boxShadow: [
           BoxShadow(
-            color: Colors.black.withValues(alpha: DroidTheme.isDark ? 0.4 : 0.10),
+            color: Colors.black.withValues(
+              alpha: DroidTheme.isDark ? 0.4 : 0.10,
+            ),
             blurRadius: 24,
             offset: const Offset(0, 8),
           ),
@@ -68,7 +71,8 @@ class _PackageOperationCardState extends State<PackageOperationCard> {
     );
   }
 
-  Widget _icon(String package, List<String> iconNames) => package == AppState.updatesOperation
+  Widget _icon(String package, List<String> iconNames) =>
+      package == AppState.updatesOperation
       ? Container(
           width: 42,
           height: 42,
@@ -76,26 +80,30 @@ class _PackageOperationCardState extends State<PackageOperationCard> {
             color: DroidTheme.primary.withValues(alpha: 0.14),
             borderRadius: BorderRadius.circular(12),
           ),
-          child: const Icon(Icons.system_update_alt_rounded, color: DroidTheme.primary, size: 21),
-        )
-      : LinuxAppIcon(
-        package: package,
-        iconNames: iconNames,
-        size: 42,
-        fallback: Container(
-          width: 42,
-          height: 42,
-          decoration: BoxDecoration(
-            color: DroidTheme.primary.withValues(alpha: 0.14),
-            borderRadius: BorderRadius.circular(12),
-          ),
           child: const Icon(
-            Icons.inventory_2_rounded,
+            Icons.system_update_alt_rounded,
             color: DroidTheme.primary,
             size: 21,
           ),
-        ),
-      );
+        )
+      : LinuxAppIcon(
+          package: package,
+          iconNames: iconNames,
+          size: 42,
+          fallback: Container(
+            width: 42,
+            height: 42,
+            decoration: BoxDecoration(
+              color: DroidTheme.primary.withValues(alpha: 0.14),
+              borderRadius: BorderRadius.circular(12),
+            ),
+            child: const Icon(
+              Icons.inventory_2_rounded,
+              color: DroidTheme.primary,
+              size: 21,
+            ),
+          ),
+        );
 
   Widget _roundButton({
     required IconData icon,
@@ -118,7 +126,10 @@ class _PackageOperationCardState extends State<PackageOperationCard> {
             child: busy
                 ? Padding(
                     padding: const EdgeInsets.all(9),
-                    child: CircularProgressIndicator(strokeWidth: 2, color: color),
+                    child: CircularProgressIndicator(
+                      strokeWidth: 2,
+                      color: color,
+                    ),
                   )
                 : Icon(
                     icon,
@@ -136,10 +147,17 @@ class _PackageOperationCardState extends State<PackageOperationCard> {
     final verb = state.packageCancelling
         ? 'Cancelling'
         : state.packageRemoving
-            ? 'Removing'
-            : state.isUpdatingAll
-                ? 'Updating'
-                : 'Installing';
+        ? 'Removing'
+        : state.isUpdatingAll
+        ? 'Updating'
+        : 'Installing';
+    final target = switch (state.activePackageEnvironment) {
+      LinuxEnvironmentKind.termuxNative => 'Termux Native',
+      LinuxEnvironmentKind.prootDebian => 'Debian PRoot',
+      LinuxEnvironmentKind.chrootUbuntu => 'Ubuntu chroot',
+      null => 'Linux',
+    };
+    final phase = state.activePackagePhase?.wireValue ?? 'preparing';
     final log = state.packageLog
         .replaceAll(RegExp(r'\x1B\[[0-?]*[ -/]*[@-~]'), '')
         .split('\n')
@@ -170,7 +188,7 @@ class _PackageOperationCardState extends State<PackageOperationCard> {
                       ),
                       const SizedBox(height: 2),
                       Text(
-                        state.packageStatus,
+                        '$target · $phase · ${state.packageStatus}',
                         style: DroidTheme.bodySm,
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
@@ -192,7 +210,7 @@ class _PackageOperationCardState extends State<PackageOperationCard> {
                   color: DroidTheme.error,
                   tooltip: 'Cancel',
                   busy: state.packageCancelling,
-                  onTap: state.packageCancelling || state.packageRemoving
+                  onTap: state.packageCancelling || !state.packageCancellable
                       ? null
                       : state.cancelPackageOperation,
                 ),
@@ -261,13 +279,13 @@ class _PackageOperationCardState extends State<PackageOperationCard> {
     );
   }
 
-  Widget _finished(AppState state, PackageOperationResult result) {
+  Widget _finished(AppState state, PackageOperationPresentationResult result) {
     final success = result.ok && !result.cancelled;
     final color = success
         ? DroidTheme.accent
         : result.cancelled
-            ? DroidTheme.warning
-            : DroidTheme.error;
+        ? DroidTheme.warning
+        : DroidTheme.error;
     return _shell(
       child: Padding(
         padding: const EdgeInsets.fromLTRB(14, 12, 12, 12),
@@ -287,7 +305,11 @@ class _PackageOperationCardState extends State<PackageOperationCard> {
                   ),
                   const SizedBox(height: 2),
                   Text(
-                    !result.isUpdateAll && success && !result.removed
+                    result.result.error != null
+                        ? '${result.result.error!.code}: ${result.result.error!.message}'
+                        : result.result.warnings.isNotEmpty
+                        ? result.result.warnings.first.message
+                        : !result.isUpdateAll && success && !result.removed
                         ? 'Find it in the desktop app menu'
                         : 'Open the App Store for details',
                     style: DroidTheme.bodySm,

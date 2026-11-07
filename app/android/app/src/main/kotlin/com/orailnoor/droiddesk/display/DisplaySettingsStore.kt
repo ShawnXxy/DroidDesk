@@ -47,7 +47,7 @@ class DisplaySettingsStore(
         }
     }
 
-    fun load(kind: ProfileKind): DisplaySettings? {
+    fun load(kind: ProfileKind, displaySettingsKey: String? = null): DisplaySettings? {
         ensureSchema()
         if (kind == ProfileKind.PHONE && preferences.read("phone.inputMigrated") != true) {
             val changes = mutableMapOf<String, Any?>("phone.inputMigrated" to true)
@@ -63,7 +63,13 @@ class DisplaySettingsStore(
         val renderValue = preferences.read("$prefix.renderPolicy")
         val scaleValue = preferences.read("$prefix.uiScalePercent")
         val inputValue = preferences.read("$prefix.inputMode")
-        if (renderValue == null && scaleValue == null && inputValue == null) return null
+        val routeKey = displaySettingsKey
+            ?.takeIf { kind == ProfileKind.MONITOR }
+            ?.let { "display.$it.inputRoute" }
+        val routeValue = routeKey?.let(preferences::read)
+        if (renderValue == null && scaleValue == null && inputValue == null && routeValue == null) {
+            return null
+        }
 
         val defaults = DisplayProfilePolicy.defaults(kind)
         val repairs = mutableMapOf<String, Any?>()
@@ -84,11 +90,23 @@ class DisplaySettingsStore(
                 repairs["$prefix.inputMode"] = it
             }
         }
+        val route = ExternalInputRoutePreference.fromWire(routeValue as? String)
+            ?: ExternalInputRoutePreference.AUTOMATIC.also {
+                if (routeValue != null) {
+                    val invalidRouteKey = checkNotNull(routeKey)
+                    diagnostic("Invalid $invalidRouteKey; restoring Automatic")
+                    repairs[invalidRouteKey] = null
+                }
+            }
         if (repairs.isNotEmpty()) preferences.write(repairs)
-        return DisplaySettings(render, scale, input)
+        return DisplaySettings(render, scale, input, route)
     }
 
-    fun save(kind: ProfileKind, settings: DisplaySettings) {
+    fun save(
+        kind: ProfileKind,
+        settings: DisplaySettings,
+        displaySettingsKey: String? = null,
+    ) {
         ensureSchema()
         val prefix = kind.wireName
         val changes = mutableMapOf<String, Any?>(
@@ -96,6 +114,12 @@ class DisplaySettingsStore(
             "$prefix.uiScalePercent" to settings.uiScalePercent,
             "$prefix.inputMode" to settings.inputMode,
         )
+        if (kind == ProfileKind.MONITOR && displaySettingsKey != null) {
+            changes["display.$displaySettingsKey.inputRoute"] =
+                settings.inputRoute.takeUnless {
+                    it == ExternalInputRoutePreference.AUTOMATIC
+                }?.wireName
+        }
         if (kind == ProfileKind.PHONE) changes["phone.inputMigrated"] = true
         preferences.write(changes)
     }

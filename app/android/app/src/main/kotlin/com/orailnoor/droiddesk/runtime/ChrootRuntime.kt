@@ -151,13 +151,6 @@ class ChrootRuntime(
         true
     }.getOrDefault(false)
 
-    fun getOptionalAppsStatus(): Map<String, Boolean> = mapOf(
-        "firefox" to File(rootfsDir, "usr/bin/firefox").exists(),
-        "code_oss" to (File(rootfsDir, "usr/bin/code").exists() || File(rootfsDir, "usr/bin/code-oss").exists()),
-        "nodejs" to (File(rootfsDir, "usr/bin/node").exists() && File(rootfsDir, "usr/bin/npm").exists()),
-        "imagemagick" to (File(rootfsDir, "usr/bin/convert").exists() || File(rootfsDir, "usr/bin/magick").exists()),
-    )
-
     // ── Rootfs setup ──
 
     /**
@@ -367,61 +360,6 @@ class ChrootRuntime(
                 Log.e(TAG, "DE install failed", e)
                 onProgress(-1.0, "Installation failed: ${e.message}")
             }
-        }
-    }
-
-    fun installOptionalApp(
-        appId: String,
-        onProgress: (Double, String) -> Unit = { _, _ -> },
-        onLog: (String) -> Unit = {},
-    ): Boolean {
-        if (!hasRoot() || !isDesktopInstalled()) return false
-        if (getOptionalAppsStatus()[appId] == true) {
-            onProgress(1.0, "Already installed")
-            return true
-        }
-
-        return try {
-            ensureMounts()
-            onProgress(0.05, "Repairing interrupted packages...")
-            execChroot("DEBIAN_FRONTEND=noninteractive dpkg --configure -a", onLog)
-
-            val command = when (appId) {
-                "firefox" -> """
-                    set -e
-                    export DEBIAN_FRONTEND=noninteractive
-                    apt-get install -y --no-install-recommends ca-certificates wget gpg
-                    install -d -m 0755 /etc/apt/keyrings
-                    wget -q https://packages.mozilla.org/apt/repo-signing-key.gpg -O /etc/apt/keyrings/packages.mozilla.org.asc
-                    echo 'deb [signed-by=/etc/apt/keyrings/packages.mozilla.org.asc] https://packages.mozilla.org/apt mozilla main' > /etc/apt/sources.list.d/mozilla.list
-                    printf 'Package: *\nPin: origin packages.mozilla.org\nPin-Priority: 1000\n' > /etc/apt/preferences.d/mozilla
-                    apt-get update -y
-                    apt-get install -y --no-install-recommends firefox
-                """.trimIndent()
-                "code_oss" -> """
-                    set -e
-                    export DEBIAN_FRONTEND=noninteractive
-                    apt-get install -y --no-install-recommends ca-certificates wget gpg apt-transport-https
-                    install -d -m 0755 /etc/apt/keyrings
-                    wget -qO- https://packages.microsoft.com/keys/microsoft.asc | gpg --dearmor -o /etc/apt/keyrings/packages.microsoft.gpg
-                    echo 'deb [arch=arm64 signed-by=/etc/apt/keyrings/packages.microsoft.gpg] https://packages.microsoft.com/repos/code stable main' > /etc/apt/sources.list.d/vscode.list
-                    apt-get update -y
-                    apt-get install -y --no-install-recommends code
-                """.trimIndent()
-                "nodejs" -> "DEBIAN_FRONTEND=noninteractive apt-get update -y && apt-get install -y --no-install-recommends nodejs npm"
-                "imagemagick" -> "DEBIAN_FRONTEND=noninteractive apt-get update -y && apt-get install -y --no-install-recommends imagemagick"
-                else -> return false
-            }
-
-            onProgress(0.25, "Installing optional application...")
-            val exitCode = execChroot(command, onLog)
-            if (exitCode != 0) throw IllegalStateException("Package manager exited with code $exitCode")
-            onProgress(1.0, "Installation complete")
-            true
-        } catch (error: Exception) {
-            Log.e(TAG, "Optional app installation failed: $appId", error)
-            onProgress(-1.0, "Installation failed: ${error.message}")
-            false
         }
     }
 

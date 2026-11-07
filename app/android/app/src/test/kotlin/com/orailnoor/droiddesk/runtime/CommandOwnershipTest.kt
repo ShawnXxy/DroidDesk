@@ -56,4 +56,37 @@ class CommandOwnershipTest {
         assertTrue(ownership.attach(nonInteractive, "profile"))
         assertEquals(CommandInputState.NOT_INTERACTIVE, ownership.input().state)
     }
+
+    @Test
+    fun persistentLaneCancelsOnlyItsCurrentCommandAndCanRunRepair() {
+        val ownership = CommandOwnership<String>()
+        val lane = ownership.reserveLane(acceptsInput = false)!!
+        assertTrue(ownership.beginCommand(lane))
+        assertTrue(ownership.attach(lane, "mutation"))
+
+        val cancelled = ownership.cancelProcess(lane)
+
+        assertTrue(cancelled.owned)
+        assertEquals("mutation", cancelled.process)
+        assertTrue(ownership.isBusy())
+        ownership.finishCommand(lane)
+        assertTrue(ownership.beginCommand(lane))
+        assertTrue(ownership.attach(lane, "repair"))
+        ownership.finishCommand(lane)
+        ownership.release(lane)
+        assertFalse(ownership.isBusy())
+    }
+
+    @Test
+    fun cancellingAStartingLaneCommandPreventsLateAttach() {
+        val ownership = CommandOwnership<String>()
+        val lane = ownership.reserveLane(acceptsInput = false)!!
+        assertTrue(ownership.beginCommand(lane))
+
+        val cancelled = ownership.cancelProcess(lane)
+
+        assertTrue(cancelled.owned)
+        assertNull(cancelled.process)
+        assertFalse(ownership.attach(lane, "late process"))
+    }
 }

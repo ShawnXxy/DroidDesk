@@ -474,14 +474,21 @@ class DesktopDisplayCoordinator(
         assertMainThread()
         val display = displays().firstOrNull { it.key == displayKey }
             ?: throw DesktopDisplayException("DISPLAY_UNAVAILABLE", "The selected connection is no longer available")
-        val settings = loadSettings(kindFor(display)) ?: DisplayProfilePolicy.defaults(kindFor(display))
+        val settings = checkNotNull(settingsStore).load(kindFor(display), display.settingsKey)
+            ?: DisplayProfilePolicy.defaults(kindFor(display))
         return mapOf(
             "displayKey" to display.key, "renderPolicy" to settings.renderPolicy.wireName,
             "uiScalePercent" to settings.uiScalePercent, "inputMode" to settings.inputMode,
+            "inputRoute" to settings.inputRoute.wireName,
         )
     }
 
-    fun loadSettings(kind: ProfileKind): DisplaySettings? = checkNotNull(settingsStore).load(kind)
+    fun loadSettings(kind: ProfileKind, displayId: Int? = null): DisplaySettings? {
+        val displaySettingsKey = displayId?.let { id ->
+            displays().firstOrNull { it.id == id }?.settingsKey
+        }
+        return checkNotNull(settingsStore).load(kind, displaySettingsKey)
+    }
 
     fun setAutoOpenOnMonitor(enabled: Boolean) {
         assertMainThread()
@@ -512,6 +519,13 @@ class DesktopDisplayCoordinator(
     ) {
         assertMainThread()
         checkNotNull(settingsStore).save(kind, settings)
+        applySavedProfile(kind, completion)
+    }
+
+    private fun applySavedProfile(
+        kind: ProfileKind,
+        completion: (Result<Unit>) -> Unit,
+    ) {
         if (appliedKind == kind && owner != null) {
             val refresh = profileRefresher
             if (refresh == null) completion(Result.failure(DesktopDisplayException(
@@ -542,9 +556,12 @@ class DesktopDisplayCoordinator(
     }
 
     fun saveSettingsFor(displayKey: String, settings: DisplaySettings, completion: (Result<Unit>) -> Unit) {
+        assertMainThread()
         val display = displays().firstOrNull { it.key == displayKey }
             ?: throw DesktopDisplayException("DISPLAY_UNAVAILABLE", "The selected display connection is unavailable")
-        saveProfileSettings(kindFor(display), settings, completion)
+        val kind = kindFor(display)
+        checkNotNull(settingsStore).save(kind, settings, display.settingsKey)
+        applySavedProfile(kind, completion)
     }
 
     fun profileApplied(lease: RendererLease, outcome: Result<Unit>) {

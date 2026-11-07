@@ -151,6 +151,7 @@ class FakeDesktopPlatform {
                         : 'native',
                     'uiScalePercent': key == 'phone-key' ? null : 200,
                     'inputMode': key == 'phone-key' ? 3 : 1,
+                    'inputRoute': 'automatic',
                   };
             case 'saveDesktopDisplaySettings':
               final arguments = Map<Object?, Object?>.from(
@@ -171,8 +172,6 @@ class FakeDesktopPlatform {
               return snapshot;
             case 'getRuntimeStatus':
               return runtimeStatus;
-            case 'getOptionalApps':
-              return <String, bool>{};
             case 'getDeviceInfo':
               return {
                 'model': 'Test phone',
@@ -232,12 +231,16 @@ class FakeDesktopPlatform {
               };
               return true;
             default:
-              throw PlatformException(
-                code: 'UNEXPECTED_TEST_METHOD',
-                message: call.method,
-              );
+              return handleAdditionalCall(call);
           }
         });
+  }
+
+  Future<Object?> handleAdditionalCall(MethodCall call) async {
+    throw PlatformException(
+      code: 'UNEXPECTED_TEST_METHOD',
+      message: call.method,
+    );
   }
 
   void uninstall() {
