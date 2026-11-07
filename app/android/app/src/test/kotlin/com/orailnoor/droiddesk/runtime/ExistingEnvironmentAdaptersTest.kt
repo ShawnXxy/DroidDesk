@@ -42,14 +42,13 @@ class ExistingEnvironmentAdaptersTest {
     }
 
     @Test
-    fun chrootAdapterMapsRootfsAndOptionalApps() {
+    fun chrootAdapterMapsRootfs() {
         val port = FakeLegacyRuntimePort(
             installed = true,
             running = false,
             desktop = "xfce4",
             rootfsPath = "/data/user/0/app/files/rootfs",
             rootfsSizeBytes = 4_294_967_296,
-            optionalApps = mapOf("firefox" to true, "code_oss" to false),
         )
         val adapter = ChrootUbuntuEnvironment(port)
 
@@ -59,9 +58,6 @@ class ExistingEnvironmentAdaptersTest {
         assertEquals("ubuntu-chroot", status.distro)
         assertEquals("/data/user/0/app/files/rootfs", status.rootfsPath)
         assertEquals(4_294_967_296, status.rootfsSizeBytes)
-        assertEquals(mapOf("firefox" to true, "code_oss" to false), adapter.optionalAppsStatus())
-        assertTrue(adapter.installOptionalApp("code_oss", { _, _ -> }, {}).isSuccess)
-        assertEquals(listOf("optional:code_oss"), port.calls)
     }
 
     @Test
@@ -176,7 +172,6 @@ class ExistingEnvironmentAdaptersTest {
         override var desktop: String = "",
         override var rootfsPath: String = "",
         override var rootfsSizeBytes: Long = 0,
-        override var optionalApps: Map<String, Boolean> = emptyMap(),
     ) : LegacyRuntimePort {
         val calls = mutableListOf<String>()
 
@@ -221,15 +216,6 @@ class ExistingEnvironmentAdaptersTest {
 
         override fun executeDesktop(command: String): Result<Unit> {
             calls += "desktop:$command"
-            return Result.success(Unit)
-        }
-
-        override fun installOptionalApp(
-            appId: String,
-            onProgress: (Double, String) -> Unit,
-            onLog: (String) -> Unit,
-        ): Result<Unit> {
-            calls += "optional:$appId"
             return Result.success(Unit)
         }
 

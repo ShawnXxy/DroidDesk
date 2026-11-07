@@ -10,6 +10,8 @@ import android.os.Build
 import android.os.PowerManager
 import android.content.Context
 import android.content.res.Configuration
+import android.view.KeyEvent
+import android.view.MotionEvent
 import android.net.Uri
 import android.provider.Settings
 import com.orailnoor.droiddesk.service.DroidDeskService
@@ -28,6 +30,7 @@ import com.orailnoor.droiddesk.runtime.ProvisionRequest
 import com.orailnoor.droiddesk.runtime.createLinuxEnvironmentManager
 import com.orailnoor.droiddesk.view.AndroidSurfaceViewFactory
 import com.orailnoor.droiddesk.x11.X11ServerService
+import com.orailnoor.droiddesk.x11.ExternalDesktopInputBridge
 import kotlin.concurrent.thread
 import android.util.Log
 import android.widget.Toast
@@ -35,8 +38,13 @@ import com.orailnoor.droiddesk.display.DesktopDisplayCoordinator
 import com.orailnoor.droiddesk.display.DesktopDisplayException
 import com.orailnoor.droiddesk.display.DesktopItemReadinessGate
 import com.orailnoor.droiddesk.display.DesktopLaunchReply
-import com.orailnoor.droiddesk.display.DisplaySettings
-import com.orailnoor.droiddesk.display.RenderPolicy
+import com.orailnoor.droiddesk.display.DisplayEnvironmentPolicy
+import com.orailnoor.droiddesk.display.shouldCaptureRelayedPointer
+import com.orailnoor.droiddesk.display.shouldAutoLaunchExternalDesktop
+import com.orailnoor.droiddesk.packages.PackageStoreException
+import com.orailnoor.droiddesk.packages.PackageStoreMethodHandler
+import com.orailnoor.droiddesk.packages.ProcessPackageStoreRegistry
+import com.orailnoor.droiddesk.packages.toWireMap
 
 internal object MainActivityLaunchPolicy {
     fun shouldHandleInitialIntent(restored: Boolean, firstActivityInProcess: Boolean): Boolean =
@@ -52,7 +60,6 @@ class MainActivity : FlutterActivity() {
         const val ACTION_OPEN_DESKTOP = "com.orailnoor.droiddesk.action.OPEN_DESKTOP"
         const val ACTION_RETURN_TO_PHONE = "com.orailnoor.droiddesk.action.RETURN_TO_PHONE"
         private val activityCreatedInProcess = java.util.concurrent.atomic.AtomicBoolean(false)
-        private val packageOperationRunning = java.util.concurrent.atomic.AtomicBoolean(false)
     }
 
     /** Icon lookups may download from the network; cap concurrency so a long list doesn't time out. */
@@ -63,12 +70,61 @@ class MainActivity : FlutterActivity() {
     private lateinit var desktopIntegration: DesktopIntegration
     private lateinit var runtimeCapabilityCache: RuntimeCapabilityCache
     private lateinit var environmentManager: LinuxEnvironmentManager
+    private lateinit var packageStoreHandler: PackageStoreMethodHandler
+    private lateinit var packageStoreManager: com.orailnoor.droiddesk.packages.PackageStoreManager
+    private var packageStoreSubscriberId: Long? = null
     private var displayStateSubscription: (() -> Unit)? = null
 
     private val mainHandler = android.os.Handler(android.os.Looper.getMainLooper())
     private val logBuffer = StringBuffer()
     private var lastLogFlushTime = 0L
     private val logFlushRunnable = Runnable { flushLogBuffer() }
+
+    override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        if (
+            event.device?.isExternal == true &&
+            ExternalDesktopInputBridge.dispatchKeyEvent(event)
+        ) {
+            return true
+        }
+        return super.dispatchKeyEvent(event)
+    }
+
+    override fun dispatchGenericMotionEvent(event: MotionEvent): Boolean {
+        if (event.device?.isExternal == true && ExternalDesktopInputBridge.isAttached()) {
+            maintainExternalPointerCapture()
+            ExternalDesktopInputBridge.dispatchMotionEvent(window.decorView, event)
+            return true
+        }
+        return super.dispatchGenericMotionEvent(event)
+    }
+
+    override fun dispatchTouchEvent(event: MotionEvent): Boolean {
+        if (event.device?.isExternal == true && ExternalDesktopInputBridge.isAttached()) {
+            maintainExternalPointerCapture()
+            ExternalDesktopInputBridge.dispatchMotionEvent(window.decorView, event)
+            return true
+        }
+        return super.dispatchTouchEvent(event)
+    }
+
+    override fun onPointerCaptureChanged(hasCapture: Boolean) {
+        super.onPointerCaptureChanged(hasCapture)
+        if (!hasCapture) window.decorView.postDelayed(::maintainExternalPointerCapture, 100)
+    }
+
+    private fun maintainExternalPointerCapture() {
+        if (
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
+            shouldCaptureRelayedPointer(
+                relayAttached = ExternalDesktopInputBridge.isAttached(),
+                hasFocus = hasWindowFocus(),
+            ) &&
+            !window.decorView.hasPointerCapture()
+        ) {
+            window.decorView.requestPointerCapture()
+        }
+    }
 
     private fun flushLogBuffer() {
         val text = synchronized(logBuffer) {
@@ -103,18 +159,37 @@ class MainActivity : FlutterActivity() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             window.setDecorFitsSystemWindows(false)
         }
-        linuxRuntime = LinuxRuntime(applicationContext)
-        chrootRuntime = ChrootRuntime(applicationContext)
-        runtimeCapabilityCache = RuntimeCapabilityRegistry.get(
+        val processRuntime = com.orailnoor.droiddesk.runtime
+            .ProcessLinuxEnvironmentRegistry.get(applicationContext)
+        linuxRuntime = processRuntime.linuxRuntime
+        chrootRuntime = processRuntime.chrootRuntime
+        runtimeCapabilityCache = processRuntime.capabilityCache
+        environmentManager = processRuntime.environmentManager
+        packageStoreManager = ProcessPackageStoreRegistry.getOrCreate(
             applicationContext,
+            environmentManager,
             linuxRuntime,
-            chrootRuntime,
         )
-        environmentManager = createLinuxEnvironmentManager(
-            applicationContext,
-            linuxRuntime,
-            chrootRuntime,
-            runtimeCapabilityCache::current,
+        packageStoreHandler = PackageStoreMethodHandler(packageStoreManager)
+        packageStoreSubscriberId = packageStoreManager.subscribe(
+            onEvent = { event ->
+                runOnUiThread {
+                    val engine = flutterEngine ?: return@runOnUiThread
+                    MethodChannel(
+                        engine.dartExecutor.binaryMessenger,
+                        CHANNEL,
+                    ).invokeMethod("onPackageStoreOperationEvent", event.toWireMap())
+                }
+            },
+            onResult = { operationResult ->
+                runOnUiThread {
+                    val engine = flutterEngine ?: return@runOnUiThread
+                    MethodChannel(
+                        engine.dartExecutor.binaryMessenger,
+                        CHANNEL,
+                    ).invokeMethod("onPackageStoreOperationResult", operationResult.toWireMap())
+                }
+            },
         )
         desktopIntegration = DesktopIntegration(this)
         DesktopDisplayCoordinator.shared.initialize(applicationContext)
@@ -136,6 +211,27 @@ class MainActivity : FlutterActivity() {
             handleHomeLaunch(intent)
             if (!intent.getBooleanExtra("autoSetup", false)) maybeAutoStartDesktop(intent)
         }
+        window.decorView.post {
+            if (!isDestroyed && !isFinishing) maybeAutoStartExternalDesktop()
+        }
+    }
+
+    private fun maybeAutoStartExternalDesktop() {
+        if (DesktopDisplayCoordinator.shared.isDisplayLocal) return
+        val displayId = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            display?.displayId ?: window.decorView.display?.displayId
+        } else {
+            window.decorView.display?.displayId
+        } ?: return
+        val environment = DisplayEnvironmentPolicy.forDevice(Build.DEVICE)
+            .environmentFor(displayId)
+        val status = environmentManager.status()
+        if (!shouldAutoLaunchExternalDesktop(environment, status.installed)) return
+        requestDesktop(
+            status.kind.sessionMode,
+            status.desktop,
+            !status.running,
+        )
     }
 
     /** Optional "Auto-Start Linux Desktop" setting: open the chroot desktop whenever the app starts. */
@@ -162,6 +258,15 @@ class MainActivity : FlutterActivity() {
         window.decorView.post {
             if (!isDestroyed && !isFinishing) {
                 DesktopDisplayCoordinator.shared.observeActivityEnvironment(this, DesktopDisplayCoordinator.shared.sessionGeneration)
+                if (
+                    Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
+                    shouldCaptureRelayedPointer(
+                        relayAttached = ExternalDesktopInputBridge.isAttached(),
+                        hasFocus = hasWindowFocus(),
+                    )
+                ) {
+                    maintainExternalPointerCapture()
+                }
             }
         }
         restoreSystemBars()
@@ -177,6 +282,8 @@ class MainActivity : FlutterActivity() {
     }
 
     override fun onDestroy() {
+        packageStoreSubscriberId?.let(packageStoreManager::unsubscribe)
+        packageStoreSubscriberId = null
         DesktopDisplayCoordinator.shared.unbindActivity(this)
         super.onDestroy()
     }
@@ -186,6 +293,15 @@ class MainActivity : FlutterActivity() {
         if (hasFocus) {
             restoreSystemBars()
             window.decorView.post { restoreSystemBars() }
+            if (
+                Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
+                shouldCaptureRelayedPointer(
+                    relayAttached = ExternalDesktopInputBridge.isAttached(),
+                    hasFocus = true,
+                )
+            ) {
+                maintainExternalPointerCapture()
+            }
         }
     }
 
@@ -381,17 +497,11 @@ class MainActivity : FlutterActivity() {
                 "saveDesktopDisplaySettings" -> {
                     val reply = DesktopLaunchReply(result, displays)
                     try {
-                        val arguments = call.arguments as? Map<*, *> ?: throw IllegalArgumentException("Settings are required")
-                        val key = arguments["displayKey"] as? String
-                        val policy = RenderPolicy.fromWire(arguments["renderPolicy"] as? String)
-                        val rawScale = arguments["uiScalePercent"]
-                        val mode = arguments["inputMode"] as? Int
-                        require(!key.isNullOrEmpty() && policy != null && mode != null) { "Invalid display settings" }
-                        require(arguments.containsKey("uiScalePercent") && (rawScale == null || rawScale is Int)) {
-                            "uiScalePercent must be an integer or Automatic"
+                        val update = com.orailnoor.droiddesk.display
+                            .parseDisplaySettingsUpdate(call.arguments)
+                        displays.saveSettingsFor(update.displayKey, update.settings) {
+                            replyDisplayState(reply, it)
                         }
-                        val settings = DisplaySettings(policy, rawScale as? Int, mode)
-                        displays.saveSettingsFor(key, settings) { replyDisplayState(reply, it) }
                     } catch (error: DesktopDisplayException) {
                         displayFailure(error, reply)
                     } catch (error: IllegalArgumentException) {
@@ -621,92 +731,51 @@ class MainActivity : FlutterActivity() {
                     }
                 }
 
-                "getOptionalApps" -> {
-                    result.success(environmentManager.optionalAppsStatus())
-                }
-
-                "installOptionalApp" -> {
-                    val appId = call.argument<String>("appId") ?: ""
-                    installThread("install-optional-app") {
-                        val logSink: (String) -> Unit = { chunk ->
-                            appendTerminalOutput(chunk)
+                // ── Environment-scoped package store ──
+                "queryPackageStore" -> {
+                    val arguments = call.arguments as? Map<*, *> ?: emptyMap<Any, Any>()
+                    thread(name = "package-store-query") {
+                        try {
+                            val response = packageStoreHandler.query(arguments)
+                            runOnUiThread { result.success(response) }
+                        } catch (error: Throwable) {
+                            runOnUiThread { packageStoreFailure(error, result) }
                         }
-                        val progressSink: (Double, String) -> Unit = { progress, status ->
-                            runOnUiThread {
-                                MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CHANNEL)
-                                    .invokeMethod(
-                                        "onOptionalInstallProgress",
-                                        mapOf("progress" to progress, "status" to status),
-                                    )
-                            }
+                    }
+                }
+
+                "runPackageStoreOperation" -> {
+                    val arguments = call.arguments as? Map<*, *> ?: emptyMap<Any, Any>()
+                    installThread("package-store-operation") {
+                        try {
+                            startForegroundService()
+                            val response = packageStoreHandler.execute(arguments, observer = {})
+                            runOnUiThread { result.success(response) }
+                        } catch (error: Throwable) {
+                            runOnUiThread { packageStoreFailure(error, result) }
                         }
-
-                        val outcome = environmentManager.installOptionalApp(
-                            appId = appId,
-                            onProgress = progressSink,
-                            onLog = logSink,
-                        )
-                        runOnUiThread { result.success(outcome.isSuccess) }
                     }
                 }
 
-                // ── Native package store ──
-                "searchNativePackages" -> {
-                    val query = call.argument<String>("query") ?: ""
-                    val limit = call.argument<Int>("limit") ?: 60
-                    thread(name = "package-search") {
-                        val packages = linuxRuntime.searchNativePackages(query, limit)
-                        runOnUiThread { result.success(packages) }
+                "cancelPackageStoreOperation" -> {
+                    val arguments = call.arguments as? Map<*, *> ?: emptyMap<Any, Any>()
+                    thread(name = "package-store-cancel") {
+                        try {
+                            val cancelled = packageStoreHandler.cancel(arguments)
+                            runOnUiThread { result.success(cancelled) }
+                        } catch (error: Throwable) {
+                            runOnUiThread { packageStoreFailure(error, result) }
+                        }
                     }
                 }
 
-                "getInstalledNativePackages" -> {
-                    thread(name = "installed-packages") {
-                        val packages = linuxRuntime.getInstalledNativePackages()
-                        runOnUiThread { result.success(packages) }
+                "acknowledgePackageStoreOperationResult" -> {
+                    val arguments = call.arguments as? Map<*, *> ?: emptyMap<Any, Any>()
+                    try {
+                        result.success(packageStoreHandler.acknowledge(arguments))
+                    } catch (error: Throwable) {
+                        packageStoreFailure(error, result)
                     }
-                }
-
-                "installNativePackage" -> {
-                    val packageName = call.argument<String>("package") ?: ""
-                    runPackageOperation(flutterEngine, result, packageName, remove = false)
-                }
-
-                "getUpgradablePackages" -> {
-                    val refresh = call.argument<Boolean>("refresh") ?: false
-                    thread(name = "upgradable-packages") {
-                        val packages = runCatching { linuxRuntime.getUpgradablePackages(refresh) }
-                            .getOrDefault(emptyList())
-                        runOnUiThread { result.success(packages) }
-                    }
-                }
-
-                "upgradeAllPackages" -> runPackageOperation(
-                    flutterEngine, result, "updates", remove = false,
-                ) { progress -> linuxRuntime.upgradeAllPackages(progress) }
-
-                "getStorageInfo" -> {
-                    thread(name = "storage-info") {
-                        val info = runCatching { linuxRuntime.getStorageInfo() }
-                            .getOrDefault(emptyMap())
-                        runOnUiThread { result.success(info) }
-                    }
-                }
-
-                "cleanPackageCache" -> {
-                    thread(name = "clean-package-cache") {
-                        val freed = runCatching { linuxRuntime.cleanPackageCache() }.getOrDefault(-1L)
-                        runOnUiThread { result.success(freed) }
-                    }
-                }
-
-                "removeNativePackage" -> {
-                    val packageName = call.argument<String>("package") ?: ""
-                    runPackageOperation(flutterEngine, result, packageName, remove = true)
-                }
-
-                "cancelNativePackageOperation" -> {
-                    result.success(linuxRuntime.cancelPackageOperation())
                 }
 
                 // ── Android + Linux desktop integration ──
@@ -1305,62 +1374,14 @@ class MainActivity : FlutterActivity() {
         else Toast.makeText(this, error.message ?: "Desktop placement failed", Toast.LENGTH_LONG).show()
     }
 
-    private fun runPackageOperation(
-        flutterEngine: FlutterEngine,
-        result: MethodChannel.Result,
-        packageName: String,
-        remove: Boolean,
-        operation: ((progress: (Double, String) -> Unit) -> Boolean)? = null,
-    ) {
-        if (!packageOperationRunning.compareAndSet(false, true)) {
-            MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CHANNEL).invokeMethod(
-                "onPackageOperationProgress",
-                mapOf(
-                    "progress" to -1.0,
-                    "status" to "Previous package operation is still stopping. Try again.",
-                ),
-            )
-            result.success(false)
-            return
-        }
-        installThread(if (remove) "package-remove" else "package-install") {
-            linuxRuntime.beginPackageOperation()
-            linuxRuntime.setInstallLogSink { chunk ->
-                runOnUiThread {
-                    MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CHANNEL).invokeMethod(
-                        "onPackageOperationLog",
-                        mapOf("text" to chunk),
-                    )
-                }
-            }
-            val progress: (Double, String) -> Unit = { value, status ->
-                runOnUiThread {
-                    MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CHANNEL).invokeMethod(
-                        "onPackageOperationProgress",
-                        mapOf("progress" to value, "status" to status),
-                    )
-                }
-            }
-            try {
-                startForegroundService()
-                val ok = if (operation != null) {
-                    operation(progress)
-                } else if (remove) {
-                    linuxRuntime.removeStorePackage(packageName, progress)
-                } else {
-                    linuxRuntime.installStorePackage(packageName, progress)
-                }
-                runOnUiThread { result.success(ok) }
-            } catch (error: Throwable) {
-                Log.e(TAG, "Package operation failed for $packageName", error)
-                progress(-1.0, error.message ?: "Package operation failed")
-                runOnUiThread { result.success(false) }
-            } finally {
-                linuxRuntime.setInstallLogSink(null)
-                linuxRuntime.finishPackageOperation()
-                packageOperationRunning.set(false)
-            }
-        }
+    private fun packageStoreFailure(error: Throwable, result: MethodChannel.Result) {
+        Log.e(TAG, "Package store operation failed", error)
+        val typed = error as? PackageStoreException
+        result.error(
+            typed?.code ?: "INTERNAL_ERROR",
+            error.message ?: "Package store operation failed",
+            null,
+        )
     }
 
     // ── Install wake lock ──

@@ -23,8 +23,6 @@ internal class ChrootUbuntuEnvironment(
             override val desktop: String get() = if (runtime.isDesktopInstalled()) "xfce4" else ""
             override val rootfsPath: String get() = runtime.getRootfsPath()
             override val rootfsSizeBytes: Long get() = runtime.getRootfsSizeMB() * 1024L * 1024L
-            override val optionalApps: Map<String, Boolean>
-                get() = runtime.getOptionalAppsStatus()
             override val paths: EnvironmentPaths
                 get() {
                     val rootfs = File(runtime.getRootfsPath())
@@ -103,14 +101,6 @@ internal class ChrootUbuntuEnvironment(
 
             override fun executeDesktop(command: String): Result<Unit> =
                 runtime.executeDesktopCommand(command)
-
-            override fun installOptionalApp(
-                appId: String,
-                onProgress: (Double, String) -> Unit,
-                onLog: (String) -> Unit,
-            ): Result<Unit> =
-                if (runtime.installOptionalApp(appId, onProgress, onLog)) Result.success(Unit)
-                else Result.failure(IllegalStateException("Optional app installation failed"))
 
             override fun waitForDesktopReady(desktop: String, timeoutMs: Long): Boolean =
                 runtime.waitForDesktopReady(desktop, timeoutMs)

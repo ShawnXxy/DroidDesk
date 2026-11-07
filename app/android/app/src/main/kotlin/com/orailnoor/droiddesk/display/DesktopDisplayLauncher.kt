@@ -94,6 +94,10 @@ internal class AndroidDesktopDisplayHost(
                 api30Display = { activity.display },
                 decorDisplay = { activity.window.decorView.display },
             ) ?: return@let null
+            val product = displayProductInfoForSdk(Build.VERSION.SDK_INT) {
+                display.deviceProductInfo
+            }
+            val mode = display.mode
             DesktopDisplay(
                 id = display.displayId,
                 key = "bound:${display.displayId}",
@@ -101,6 +105,14 @@ internal class AndroidDesktopDisplayHost(
                 isDefault = display.displayId == android.view.Display.DEFAULT_DISPLAY,
                 eligible = true,
                 reason = null,
+                settingsKey = stableDisplaySettingsKey(
+                    isDefault = display.displayId == android.view.Display.DEFAULT_DISPLAY,
+                    name = display.name,
+                    manufacturerPnpId = product?.manufacturerPnpId,
+                    productId = product?.productId,
+                    width = mode.physicalWidth,
+                    height = mode.physicalHeight,
+                ),
             )
         }
 

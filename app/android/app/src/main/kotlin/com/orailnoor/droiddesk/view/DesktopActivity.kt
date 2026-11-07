@@ -46,7 +46,12 @@ import com.orailnoor.droiddesk.runtime.XfceMobileProfile
 import com.orailnoor.droiddesk.runtime.XfceDisplayProfile
 import com.orailnoor.droiddesk.x11.X11ServiceClient
 import com.orailnoor.droiddesk.x11.X11InputController
+import com.orailnoor.droiddesk.x11.ExternalDesktopInputBridge
 import com.orailnoor.droiddesk.display.DesktopDisplayCoordinator
+import com.orailnoor.droiddesk.display.DisplayEnvironmentPolicy
+import com.orailnoor.droiddesk.display.ExternalInputRoute
+import com.orailnoor.droiddesk.display.externalInputRoute
+import com.orailnoor.droiddesk.display.usesRendererPointerCapture
 import com.orailnoor.droiddesk.display.RendererLease
 import com.orailnoor.droiddesk.display.DisplayProfile
 import com.orailnoor.droiddesk.display.DisplayProfilePolicy
@@ -169,13 +174,11 @@ class DesktopActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         displayCoordinator.initialize(applicationContext)
-        linuxRuntime = LinuxRuntime(applicationContext)
-        chrootRuntime = ChrootRuntime(applicationContext)
-        environmentManager = createLinuxEnvironmentManager(
-            applicationContext,
-            linuxRuntime,
-            chrootRuntime,
-        )
+        val processRuntime = com.orailnoor.droiddesk.runtime
+            .ProcessLinuxEnvironmentRegistry.get(applicationContext)
+        linuxRuntime = processRuntime.linuxRuntime
+        chrootRuntime = processRuntime.chrootRuntime
+        environmentManager = processRuntime.environmentManager
         displayRequestId = intent.getLongExtra("displayRequestId", 0L)
         sessionEpoch = intent.getLongExtra("sessionGeneration", 0L)
         val displayKey = intent.getStringExtra("displayKey")
@@ -317,6 +320,11 @@ class DesktopActivity : Activity() {
             explicitProfileRetry = true
             profileCompletions += completion
             scheduleGeometry()
+            placeholder.post {
+                if (!isDestroyed && !isFinishing && isCurrentRenderer()) {
+                    attachDesktopInput()
+                }
+            }
         }
 
         // Keep Android overlay controls above the X11 SurfaceView.
@@ -402,20 +410,63 @@ class DesktopActivity : Activity() {
     private fun attachDesktopInput() {
         val lease = rendererLease ?: return
         if (!isCurrentRenderer()) return
+        val environment = DisplayEnvironmentPolicy.forDevice(Build.DEVICE)
+            .environmentFor(lease.displayId)
+        val profileKind = currentProfileKind()
+        val settings = displayCoordinator.loadSettings(profileKind, lease.displayId)
+            ?: DisplayProfilePolicy.defaults(profileKind)
+        val pointerDisplayIds = if (Build.VERSION.SDK_INT >= 37) {
+            try {
+                val associatedDisplayId = android.view.InputDevice::class.java.getMethod(
+                    "getAssociatedDisplayId",
+                )
+                android.view.InputDevice.getDeviceIds()
+                    .asSequence()
+                    .mapNotNull { android.view.InputDevice.getDevice(it) }
+                    .filter { device ->
+                        device.isExternal &&
+                            (
+                                device.supportsSource(android.view.InputDevice.SOURCE_MOUSE) ||
+                                    device.supportsSource(android.view.InputDevice.SOURCE_TOUCHPAD)
+                                )
+                    }
+                    .map { device ->
+                        (associatedDisplayId.invoke(device) as Int).takeUnless {
+                            it == android.view.Display.INVALID_DISPLAY
+                        }
+                    }
+                    .toList()
+            } catch (error: ReflectiveOperationException) {
+                Log.e(TAG, "Android input display association lookup failed", error)
+                null
+            }
+        } else {
+            null
+        }
+        val inputRoute = externalInputRoute(
+            environment = environment,
+            targetDisplayId = lease.displayId,
+            desktopUiMode =
+                resources.configuration.uiMode and Configuration.UI_MODE_TYPE_MASK ==
+                    Configuration.UI_MODE_TYPE_DESK,
+            pointerDisplayIds = pointerDisplayIds,
+            preference = settings.inputRoute,
+        )
         val preferences = TermuxMainActivity.getPrefs().apply {
-            pointerCapture.put(lease.displayId != android.view.Display.DEFAULT_DISPLAY)
+            pointerCapture.put(
+                lease.displayId != android.view.Display.DEFAULT_DISPLAY &&
+                    usesRendererPointerCapture(inputRoute),
+            )
         }
         lorieView?.reloadPreferences(preferences)
         applyWindowGeometry()
         if (inputController == null) {
-            val settings = currentProfile?.settings
-                ?: displayCoordinator.loadSettings(currentProfileKind())
-                ?: DisplayProfilePolicy.defaults(currentProfileKind())
             inputController = X11InputController(
                 lorieView!!, lease.generation, settings.inputMode,
                 onModeChanged = { mode ->
                     val kind = currentProfileKind()
-                    val saved = displayCoordinator.loadSettings(kind) ?: DisplayProfilePolicy.defaults(kind)
+                    val saved = displayCoordinator.loadSettings(kind, lease.displayId)
+                        ?: DisplayProfilePolicy.defaults(kind)
                     displayCoordinator.saveProfileSettings(kind, saved.copy(inputMode = mode))
                 },
                 onThreeFingerTap = ::toggleKeyboard,
@@ -428,6 +479,15 @@ class DesktopActivity : Activity() {
                     scheduleGeometry()
                 },
             )
+        }
+        inputController?.let { controller ->
+            if (inputRoute == ExternalInputRoute.PHONE_RELAY) {
+                ExternalDesktopInputBridge.attach(controller)
+                ExternalInputRelayActivity.open(this)
+            } else {
+                ExternalDesktopInputBridge.detach(controller)
+                ExternalInputRelayActivity.finishIfOpen()
+            }
         }
         addDesktopControls()
         lorieView?.requestFocus()
@@ -510,7 +570,12 @@ class DesktopActivity : Activity() {
         )
         if (content.width <= 0 || content.height <= 0) return
         val kind = currentProfileKind()
-        val profile = DisplayProfilePolicy.resolve(kind, content, displayCoordinator.loadSettings(kind))
+        val displayId = view.display?.displayId ?: lease.displayId
+        val profile = DisplayProfilePolicy.resolve(
+            kind,
+            content,
+            displayCoordinator.loadSettings(kind, displayId),
+        )
         val render = DisplayProfilePolicy.renderSize(content, profile.settings.renderPolicy) ?: return
         applyDisplayProfile(profile)
         view.setDesktopRenderSize(render.width, render.height)
@@ -1213,7 +1278,11 @@ class DesktopActivity : Activity() {
         loadingMessageHandler.removeCallbacks(loadingEstimateTicker)
         surfaceCallback?.let { callback -> lorieView?.holder?.removeCallback(callback) }
         surfaceCallback = null
-        inputController?.dispose()
+        inputController?.let { controller ->
+            ExternalDesktopInputBridge.detach(controller)
+            controller.dispose()
+        }
+        ExternalInputRelayActivity.finishIfOpen()
         inputController = null
         lease?.let { TermuxMainActivity.getInstance().releaseLorieView(it.generation) }
         (lorieView?.parent as? ViewGroup)?.removeView(lorieView)

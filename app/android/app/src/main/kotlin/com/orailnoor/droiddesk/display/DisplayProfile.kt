@@ -21,6 +21,7 @@ data class DisplaySettings(
     val renderPolicy: RenderPolicy,
     val uiScalePercent: Int?,
     val inputMode: Int,
+    val inputRoute: ExternalInputRoutePreference = ExternalInputRoutePreference.AUTOMATIC,
 ) {
     init {
         require(uiScalePercent == null || uiScalePercent in UI_SCALES) { "Invalid UI scale" }
@@ -30,6 +31,35 @@ data class DisplaySettings(
     companion object {
         val UI_SCALES = setOf(100, 125, 150, 175, 200)
     }
+}
+
+data class DisplaySettingsUpdate(
+    val displayKey: String,
+    val settings: DisplaySettings,
+)
+
+fun parseDisplaySettingsUpdate(value: Any?): DisplaySettingsUpdate {
+    val arguments = value as? Map<*, *> ?: throw IllegalArgumentException("Settings are required")
+    val displayKey = arguments["displayKey"] as? String
+    val renderPolicy = RenderPolicy.fromWire(arguments["renderPolicy"] as? String)
+    val rawScale = arguments["uiScalePercent"]
+    val inputMode = arguments["inputMode"] as? Int
+    val inputRoute = ExternalInputRoutePreference.fromWire(arguments["inputRoute"] as? String)
+    require(
+        !displayKey.isNullOrEmpty() &&
+            renderPolicy != null &&
+            inputMode != null &&
+            inputRoute != null
+    ) {
+        "Invalid display settings"
+    }
+    require(arguments.containsKey("uiScalePercent") && (rawScale == null || rawScale is Int)) {
+        "uiScalePercent must be an integer or Automatic"
+    }
+    return DisplaySettingsUpdate(
+        displayKey,
+        DisplaySettings(renderPolicy, rawScale as? Int, inputMode, inputRoute),
+    )
 }
 
 data class DisplayProfile(

@@ -20,6 +20,7 @@ data class DesktopDisplay(
     val isDefault: Boolean,
     val eligible: Boolean,
     val reason: String?,
+    val settingsKey: String = key,
 ) {
     fun toMap(): Map<String, Any?> = mapOf(
         "id" to id, "key" to key, "name" to name, "isDefault" to isDefault,
@@ -36,12 +37,50 @@ data class DisplayCandidate(
     val isOn: Boolean = true,
     val allowed: Boolean = true,
     val reason: String? = null,
+    val settingsKey: String = "display:$id",
 )
 
 interface DesktopDisplaySource {
     fun snapshot(): List<DisplayCandidate>
     fun start(onChanged: (removedId: Int?) -> Unit)
     fun close()
+}
+
+internal fun <T> mergeDisplaysById(
+    primary: List<T>,
+    presentations: List<T>,
+    idOf: (T) -> Int,
+): List<T> {
+    val seen = mutableSetOf<Int>()
+    return (primary + presentations).filter { seen.add(idOf(it)) }
+}
+
+internal fun <T> displayProductInfoForSdk(
+    sdkInt: Int,
+    api31ProductInfo: () -> T?,
+): T? =
+    if (sdkInt >= Build.VERSION_CODES.S) api31ProductInfo() else null
+
+internal fun stableDisplaySettingsKey(
+    isDefault: Boolean,
+    name: String,
+    manufacturerPnpId: String?,
+    productId: String?,
+    width: Int,
+    height: Int,
+): String {
+    if (isDefault) return "default"
+    val productParts = listOf(
+        manufacturerPnpId.orEmpty(),
+        productId.orEmpty(),
+        name,
+    )
+    val parts = if (!manufacturerPnpId.isNullOrBlank() || !productId.isNullOrBlank()) {
+        productParts
+    } else {
+        productParts + listOf(width.toString(), height.toString())
+    }
+    return "external:" + parts.joinToString("|") { "${it.length}:$it" }
 }
 
 class DisplayRepository(private val source: DesktopDisplaySource) {
@@ -62,7 +101,7 @@ class DisplayRepository(private val source: DesktopDisplaySource) {
             val eligible = it.isDefault || it.allowed
             DesktopDisplay(
                 it.id, keys.getOrPut(it.id) { UUID.randomUUID().toString() }, it.name,
-                it.isDefault, eligible, if (eligible) null else it.reason,
+                it.isDefault, eligible, if (eligible) null else it.reason, it.settingsKey,
             )
         }
     }
@@ -103,9 +142,18 @@ private class AndroidDisplaySource(private val context: Context) : DesktopDispla
         val supported = context.packageManager.hasSystemFeature(
             PackageManager.FEATURE_ACTIVITIES_ON_SECONDARY_DISPLAYS,
         )
-        return manager.displays.map { display ->
+        val displays = mergeDisplaysById(
+            primary = manager.displays.toList(),
+            presentations = manager.getDisplays(DisplayManager.DISPLAY_CATEGORY_PRESENTATION).toList(),
+            idOf = Display::getDisplayId,
+        )
+        return displays.map { display ->
             val isDefault = display.displayId == Display.DEFAULT_DISPLAY
             val allowed = isDefault || supported && allowed(display)
+            val product = displayProductInfoForSdk(Build.VERSION.SDK_INT) {
+                display.deviceProductInfo
+            }
+            val mode = display.mode
             DisplayCandidate(
                 display.displayId, display.name, isDefault, display.isValid,
                 display.flags and Display.FLAG_PRIVATE != 0, display.state == Display.STATE_ON,
@@ -114,6 +162,14 @@ private class AndroidDisplaySource(private val context: Context) : DesktopDispla
                 } else {
                     "Android does not allow this app to open on this display"
                 },
+                stableDisplaySettingsKey(
+                    isDefault = isDefault,
+                    name = display.name,
+                    manufacturerPnpId = product?.manufacturerPnpId,
+                    productId = product?.productId,
+                    width = mode.physicalWidth,
+                    height = mode.physicalHeight,
+                ),
             )
         }
     }

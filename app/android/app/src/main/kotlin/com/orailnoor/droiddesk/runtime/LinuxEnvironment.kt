@@ -128,14 +128,6 @@ internal interface EnvironmentAdapter {
 
     fun execute(request: ExecutionRequest): ExecutionResult
 
-    fun optionalAppsStatus(): Map<String, Boolean> = emptyMap()
-
-    fun installOptionalApp(
-        appId: String,
-        onProgress: (Double, String) -> Unit,
-        onLog: (String) -> Unit,
-    ): Result<Unit> = Result.failure(UnsupportedOperationException("Optional apps are unavailable"))
-
     fun waitForDesktopReady(desktop: String, timeoutMs: Long): Boolean = false
 
     fun applyDisplayProfile(

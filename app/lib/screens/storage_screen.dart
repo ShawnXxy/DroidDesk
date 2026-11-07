@@ -1,9 +1,15 @@
+import 'dart:async';
+
+import 'package:droiddesk/models/linux_environment.dart';
+import 'package:droiddesk/models/package_store.dart';
 import 'package:droiddesk/services/platform_bridge.dart';
+import 'package:droiddesk/state/app_state.dart';
 import 'package:droiddesk/theme/droid_theme.dart';
 import 'package:droiddesk/widgets/droid_ui.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:provider/provider.dart';
 
-/// How much space Linux uses on the phone, with a one-tap package cache clean-up.
 class StorageScreen extends StatefulWidget {
   const StorageScreen({super.key});
 
@@ -12,44 +18,142 @@ class StorageScreen extends StatefulWidget {
 }
 
 class _StorageScreenState extends State<StorageScreen> {
-  Map<String, dynamic>? _info;
-  bool _cleaning = false;
-
   static const _systemColor = DroidTheme.primary;
   static const _homeColor = Color(0xFFBF5AF2);
   static const _cacheColor = DroidTheme.warning;
 
+  LinuxEnvironmentKind? _environment;
+  PackageStoreTarget? _target;
+  PackageStoreStorage? _storage;
+  String? _error;
+  bool _loading = true;
+  bool _cleaning = false;
+  int _packageResultId = -1;
+  AppState? _appState;
+
   @override
-  void initState() {
-    super.initState();
-    _load();
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final state = context.read<AppState>();
+    if (!identical(_appState, state)) {
+      _appState?.removeListener(_onAppStateChanged);
+      _appState = state;
+      state.addListener(_onAppStateChanged);
+    }
+    _syncAppState(state, notify: false);
   }
 
-  Future<void> _load() async {
-    final info = await DroidDeskPlatform.getStorageInfo();
-    if (mounted) setState(() => _info = info);
+  void _onAppStateChanged() {
+    final state = _appState;
+    if (!mounted || state == null) return;
+    _syncAppState(state, notify: true);
   }
 
-  int _bytes(String key) => (_info?[key] as num?)?.toInt() ?? 0;
+  void _syncAppState(AppState state, {required bool notify}) {
+    final environment = state.selectedEnvironment;
+    if (_environment != environment) {
+      void reset() {
+        _environment = environment;
+        _packageResultId = state.packageResultId;
+        _target = null;
+        _storage = null;
+        _loading = true;
+        _error = null;
+      }
+
+      if (notify) {
+        setState(reset);
+      } else {
+        reset();
+      }
+      unawaited(_load(environment));
+      return;
+    }
+    if (_packageResultId == state.packageResultId) return;
+    _packageResultId = state.packageResultId;
+    if (_cleaning) return;
+    final result = state.lastPackageStoreResult;
+    if (result == null || result.environmentKind != environment) return;
+    void updateError() {
+      _error = result.error == null
+          ? null
+          : '${result.error!.code}: ${result.error!.message}';
+    }
+
+    if (notify) {
+      setState(updateError);
+    } else {
+      updateError();
+    }
+    unawaited(_load(environment));
+  }
+
+  @override
+  void dispose() {
+    _appState?.removeListener(_onAppStateChanged);
+    super.dispose();
+  }
+
+  Future<void> _load(LinuxEnvironmentKind environment) async {
+    try {
+      final result = await DroidDeskPlatform.queryPackageStore(
+        environment: environment,
+        query: PackageStoreQueryKind.storage,
+      );
+      if (!mounted || _environment != environment) return;
+      setState(() {
+        _target = result.target;
+        _storage = result.storage;
+        _loading = false;
+      });
+    } on Object catch (error) {
+      if (!mounted || _environment != environment) return;
+      setState(() {
+        _error = _errorText(error);
+        _loading = false;
+      });
+    }
+  }
 
   Future<void> _clean() async {
-    setState(() => _cleaning = true);
-    final freed = await DroidDeskPlatform.cleanPackageCache();
-    await _load();
+    if (_cleaning || context.read<AppState>().activePackage != null) return;
+    final environment = _environment;
+    if (environment == null) return;
+    setState(() {
+      _cleaning = true;
+      _error = null;
+    });
+    final result = await context.read<AppState>().cleanSelectedPackageCache(
+      environment: environment,
+    );
     if (!mounted) return;
-    setState(() => _cleaning = false);
+    _packageResultId = context.read<AppState>().packageResultId;
+    setState(() {
+      _cleaning = false;
+      _error = result.error == null
+          ? null
+          : '${result.error!.code}: ${result.error!.message}';
+    });
+    if (_environment == environment) await _load(environment);
+    if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
         content: Text(
-          freed < 0 ? 'Could not clean the package cache' : 'Freed ${_format(freed)}',
+          result.error == null
+              ? 'Freed ${_format(result.bytesFreed ?? 0)}'
+              : '${result.error!.code}: ${result.error!.message}',
         ),
-        backgroundColor: freed < 0 ? DroidTheme.error : DroidTheme.success,
+        backgroundColor: result.error == null
+            ? DroidTheme.success
+            : DroidTheme.error,
       ),
     );
   }
 
   @override
   Widget build(BuildContext context) {
+    final environment = context.watch<AppState>().selectedEnvironment;
+    final targetLabel = _target?.displayName ?? _environmentLabel(environment);
     return Scaffold(
       body: Container(
         decoration: BoxDecoration(gradient: DroidTheme.backgroundGradient),
@@ -57,15 +161,23 @@ class _StorageScreenState extends State<StorageScreen> {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              DroidPageHeader(
+              const DroidPageHeader(
                 title: 'Storage',
-                subtitle: 'Space used by Linux on this phone',
+                subtitle: 'Space used by the selected Linux environment',
               ),
-              Expanded(
-                child: _info == null
-                    ? const Center(child: CircularProgressIndicator())
-                    : RefreshIndicator(onRefresh: _load, child: _content()),
+              Padding(
+                padding: const EdgeInsets.fromLTRB(20, 14, 20, 2),
+                child: _targetChip(targetLabel),
               ),
+              if (_error != null)
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(20, 10, 20, 0),
+                  child: Text(
+                    _error!,
+                    style: DroidTheme.bodySm.copyWith(color: DroidTheme.error),
+                  ),
+                ),
+              Expanded(child: _body()),
             ],
           ),
         ),
@@ -73,16 +185,32 @@ class _StorageScreenState extends State<StorageScreen> {
     );
   }
 
-  Widget _content() {
-    final system = _bytes('system');
-    final home = _bytes('home');
-    final cache = _bytes('cache');
-    final linux = system + home + cache;
-    final free = _bytes('deviceFree');
-    final total = _bytes('deviceTotal');
-    final other = (total - free - linux).clamp(0, total);
-    final packages = _bytes('packages');
+  Widget _body() {
+    if (_loading) return const Center(child: CircularProgressIndicator());
+    final target = _target;
+    if (target == null) {
+      return _empty('Storage unavailable', _error ?? 'Try again.');
+    }
+    if (target.availability != PackageStoreAvailability.ready) {
+      return _empty(
+        'Storage unavailable',
+        target.reason ?? 'This package store is unavailable.',
+      );
+    }
+    final storage = _storage;
+    if (storage == null || !storage.available) {
+      return _empty('Storage unavailable', 'No storage data was returned.');
+    }
+    return RefreshIndicator(
+      onRefresh: () => _load(_environment!),
+      child: _content(storage),
+    );
+  }
 
+  Widget _content(PackageStoreStorage storage) {
+    final linux = storage.systemBytes + storage.homeBytes + storage.cacheBytes;
+    final other = (storage.deviceTotalBytes - storage.deviceFreeBytes - linux)
+        .clamp(0, storage.deviceTotalBytes);
     return ListView(
       padding: const EdgeInsets.fromLTRB(20, 20, 20, 32),
       children: [
@@ -99,32 +227,38 @@ class _StorageScreenState extends State<StorageScreen> {
                   style: DroidTheme.headingXl.copyWith(fontSize: 32),
                 ),
                 Text(
-                  '$packages packages · ${_format(free)} free of ${_format(total)}',
+                  '${storage.packageCount} packages · '
+                  '${_format(storage.deviceFreeBytes)} free of '
+                  '${_format(storage.deviceTotalBytes)}',
                   style: DroidTheme.bodySm,
                 ),
                 const SizedBox(height: 18),
-                _usageBar(total, [
-                  (system, _systemColor),
-                  (home, _homeColor),
-                  (cache, _cacheColor),
+                _usageBar(storage.deviceTotalBytes, [
+                  (storage.systemBytes, _systemColor),
+                  (storage.homeBytes, _homeColor),
+                  (storage.cacheBytes, _cacheColor),
                   (other, DroidTheme.textDim.withValues(alpha: 0.45)),
                 ]),
                 const SizedBox(height: 16),
-                _legend('Linux system', system, _systemColor),
-                _legend('Your files (home)', home, _homeColor),
-                _legend('Package cache', cache, _cacheColor),
+                _legend('Linux system', storage.systemBytes, _systemColor),
+                _legend('Your files (home)', storage.homeBytes, _homeColor),
+                _legend('Package cache', storage.cacheBytes, _cacheColor),
                 _legend('Other apps & Android', other, DroidTheme.textDim),
-                _legend('Free', free, DroidTheme.surfaceBorder),
+                _legend(
+                  'Free',
+                  storage.deviceFreeBytes,
+                  DroidTheme.surfaceBorder,
+                ),
               ],
             ),
           ),
         ),
         const SizedBox(height: 26),
-        DroidSectionLabel('Clean up'),
+        const DroidSectionLabel('Clean up'),
         const SizedBox(height: 10),
         DroidGroupCard(
           child: Padding(
-            padding: const EdgeInsets.fromLTRB(14, 14, 14, 14),
+            padding: const EdgeInsets.all(14),
             child: Row(
               children: [
                 Container(
@@ -149,121 +283,120 @@ class _StorageScreenState extends State<StorageScreen> {
                         'Package cache',
                         style: DroidTheme.headingSm.copyWith(fontSize: 15),
                       ),
-                      const SizedBox(height: 2),
                       Text(
-                        cache > 0
-                            ? '${_format(cache)} of downloaded package files'
+                        storage.cacheBytes > 0
+                            ? '${_format(storage.cacheBytes)} of downloaded files'
                             : 'Nothing to clean',
                         style: DroidTheme.bodySm,
                       ),
                     ],
                   ),
                 ),
-                const SizedBox(width: 10),
-                _cleaning
-                    ? const SizedBox(
-                        width: 22,
-                        height: 22,
-                        child: CircularProgressIndicator(strokeWidth: 2.4),
-                      )
-                    : Material(
-                        color: _cacheColor.withValues(alpha: cache > 0 ? 0.16 : 0.06),
-                        borderRadius: BorderRadius.circular(20),
-                        child: InkWell(
-                          borderRadius: BorderRadius.circular(20),
-                          onTap: cache > 0 ? _clean : null,
-                          child: Padding(
-                            padding: const EdgeInsets.symmetric(
-                              horizontal: 16,
-                              vertical: 7,
-                            ),
-                            child: Text(
-                              'CLEAN',
-                              style: DroidTheme.label.copyWith(
-                                fontSize: 13,
-                                fontWeight: FontWeight.w700,
-                                letterSpacing: 0.4,
-                                color: _cacheColor.withValues(
-                                  alpha: cache > 0 ? 1 : 0.4,
-                                ),
-                              ),
-                            ),
-                          ),
-                        ),
-                      ),
+                if (_cleaning)
+                  const SizedBox(
+                    width: 22,
+                    height: 22,
+                    child: CircularProgressIndicator(strokeWidth: 2.4),
+                  )
+                else
+                  TextButton(
+                    onPressed: storage.cacheBytes > 0 ? _clean : null,
+                    child: const Text('CLEAN'),
+                  ),
               ],
             ),
-          ),
-        ),
-        const SizedBox(height: 12),
-        Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 4),
-          child: Text(
-            'Cleaning removes downloaded installers only. Installed apps and your files stay.',
-            style: DroidTheme.bodySm,
           ),
         ),
       ],
     );
   }
 
-  Widget _usageBar(int total, List<(int, Color)> parts) {
-    return ClipRRect(
-      borderRadius: BorderRadius.circular(8),
-      child: Container(
-        height: 14,
-        color: DroidTheme.surfaceLight,
-        child: Row(
-          children: [
-            for (final (bytes, color) in parts)
-              if (total > 0 && bytes > 0)
-                Expanded(
-                  // Keep tiny slices visible.
-                  flex: (bytes * 1000 ~/ total).clamp(4, 1000),
-                  child: Container(color: color),
-                ),
-            Expanded(
-              flex: ((total - parts.fold<int>(0, (sum, p) => sum + p.$1)) * 1000 ~/
-                      (total == 0 ? 1 : total))
-                  .clamp(1, 1000),
-              child: const SizedBox(),
-            ),
-          ],
+  Widget _targetChip(String label) => Container(
+    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
+    decoration: BoxDecoration(
+      color: DroidTheme.primary.withValues(alpha: 0.14),
+      borderRadius: BorderRadius.circular(20),
+      border: Border.all(color: DroidTheme.primary.withValues(alpha: 0.35)),
+    ),
+    child: Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        const Icon(Icons.storage_rounded, size: 16, color: DroidTheme.primary),
+        const SizedBox(width: 7),
+        Text(
+          label,
+          style: DroidTheme.bodySm.copyWith(fontWeight: FontWeight.w700),
         ),
-      ),
-    );
-  }
+      ],
+    ),
+  );
 
-  Widget _legend(String label, int bytes, Color color) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 5),
+  Widget _empty(String title, String subtitle) => ListView(
+    padding: const EdgeInsets.fromLTRB(20, 24, 20, 32),
+    children: [
+      DroidEmptyCard(
+        icon: Icons.storage_rounded,
+        title: title,
+        subtitle: subtitle,
+      ),
+    ],
+  );
+
+  Widget _usageBar(int total, List<(int, Color)> segments) {
+    if (total <= 0) return const SizedBox(height: 10);
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(5),
       child: Row(
         children: [
-          Container(
-            width: 10,
-            height: 10,
-            decoration: BoxDecoration(color: color, shape: BoxShape.circle),
-          ),
-          const SizedBox(width: 10),
-          Expanded(child: Text(label, style: DroidTheme.bodyMd)),
-          Text(
-            _format(bytes),
-            style: DroidTheme.bodyMd.copyWith(
-              color: DroidTheme.textPrimary,
-              fontWeight: FontWeight.w600,
-            ),
-          ),
+          for (final (bytes, color) in segments)
+            if (bytes > 0)
+              Expanded(
+                flex: (bytes * 1000 / total).round().clamp(1, 1000),
+                child: Container(height: 10, color: color),
+              ),
         ],
       ),
     );
   }
 
-  static String _format(int bytes) {
+  Widget _legend(String label, int bytes, Color color) => Padding(
+    padding: const EdgeInsets.only(top: 7),
+    child: Row(
+      children: [
+        Container(
+          width: 9,
+          height: 9,
+          decoration: BoxDecoration(color: color, shape: BoxShape.circle),
+        ),
+        const SizedBox(width: 8),
+        Expanded(child: Text(label, style: DroidTheme.bodySm)),
+        Text(_format(bytes), style: DroidTheme.monoSm),
+      ],
+    ),
+  );
+
+  String _format(int bytes) {
     if (bytes >= 1024 * 1024 * 1024) {
       return '${(bytes / (1024 * 1024 * 1024)).toStringAsFixed(1)} GB';
     }
-    if (bytes >= 1024 * 1024) return '${(bytes / (1024 * 1024)).toStringAsFixed(0)} MB';
-    if (bytes >= 1024) return '${(bytes / 1024).toStringAsFixed(0)} KB';
+    if (bytes >= 1024 * 1024) {
+      return '${(bytes / (1024 * 1024)).toStringAsFixed(1)} MB';
+    }
+    if (bytes >= 1024) return '${(bytes / 1024).toStringAsFixed(1)} KB';
     return '$bytes B';
   }
+
+  String _environmentLabel(LinuxEnvironmentKind environment) =>
+      switch (environment) {
+        LinuxEnvironmentKind.termuxNative => 'Termux Native',
+        LinuxEnvironmentKind.prootDebian => 'Debian PRoot',
+        LinuxEnvironmentKind.chrootUbuntu => 'Ubuntu chroot',
+      };
+
+  String _errorText(Object error) => switch (error) {
+    PlatformException(:final code, :final message) =>
+      '$code: ${message ?? 'Storage request failed'}',
+    FormatException() => 'Invalid package store response: $error',
+    _ => error.toString(),
+  };
 }

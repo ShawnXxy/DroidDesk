@@ -26,12 +26,40 @@ import kotlin.concurrent.thread
 import com.orailnoor.droiddesk.display.DesktopDisplayCoordinator
 import com.orailnoor.droiddesk.runtime.AndroidAppSync
 import com.orailnoor.droiddesk.runtime.RootShell
-import com.orailnoor.droiddesk.runtime.createLinuxEnvironmentManager
+import com.orailnoor.droiddesk.runtime.ProcessLinuxEnvironmentRegistry
 import java.util.concurrent.Executors
 import java.lang.ref.WeakReference
 import java.io.IOException
 
 enum class DesktopStopReason { USER, ENVIRONMENT_CHANGE }
+
+internal fun performDesktopTeardown(
+    stopEnvironment: () -> Unit,
+    stopLegacyBridge: () -> Unit,
+    stopDisplayService: () -> Unit,
+    onFailure: (String, Exception) -> Unit,
+): Exception? {
+    try {
+        stopEnvironment()
+    } catch (error: Exception) {
+        onFailure("Linux environment stop", error)
+        return error
+    }
+
+    var failure: Exception? = null
+    listOf(
+        "Legacy intent bridge stop" to stopLegacyBridge,
+        "X11 display service stop" to stopDisplayService,
+    ).forEach { (name, operation) ->
+        try {
+            operation()
+        } catch (error: Exception) {
+            onFailure(name, error)
+            if (failure == null) failure = error
+        }
+    }
+    return failure
+}
 
 /**
  * Foreground service that keeps the Linux runtime alive.
@@ -67,25 +95,21 @@ class DroidDeskService : Service() {
             if (reason == DesktopStopReason.USER) coordinator.cancelPendingRestart()
             coordinator.startStopping(preserveRestart = reason == DesktopStopReason.ENVIRONMENT_CHANGE)
             executeSession {
-                var failure: Exception? = null
-                val environments = createLinuxEnvironmentManager(app)
-                val operations: List<() -> Unit> = listOf(
-                    { stopLegacyIntentBridge() },
-                    { environments.stop().getOrThrow() },
-                    { app.stopService(Intent(app, X11ServerService::class.java)); Unit },
+                val environments = ProcessLinuxEnvironmentRegistry.get(app).environmentManager
+                val failure = performDesktopTeardown(
+                    stopEnvironment = { environments.stop().getOrThrow() },
+                    stopLegacyBridge = ::stopLegacyIntentBridge,
+                    stopDisplayService = {
+                        app.stopService(Intent(app, X11ServerService::class.java))
+                        Unit
+                    },
+                    onFailure = { operation, error ->
+                        Log.e(TAG, "$operation failed", error)
+                    },
                 )
-                for (operation in operations) {
-                    try {
-                        operation()
-                    } catch (error: Exception) {
-                        Log.e(TAG, "Desktop teardown operation failed", error)
-                        if (failure == null) failure = error
-                    }
-                }
                 mainHandler.post {
-                    val error = failure
-                    coordinator.finishStopping(error)
-                    if (error == null) {
+                    coordinator.finishStopping(failure)
+                    if (failure == null) {
                         activeService?.get()?.let {
                             ServiceCompat.stopForeground(it, ServiceCompat.STOP_FOREGROUND_REMOVE)
                         }
@@ -93,7 +117,7 @@ class DroidDeskService : Service() {
                         completion(Result.success(Unit))
                     } else {
                         activeService?.get()?.updateNotification("Desktop stop failed. Try Stop again.")
-                        completion(Result.failure(error))
+                        completion(Result.failure(failure))
                     }
                 }
             }
@@ -165,7 +189,7 @@ class DroidDeskService : Service() {
                 PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
             )
             val running = runCatching {
-                createLinuxEnvironmentManager(context.applicationContext).status().running
+                ProcessLinuxEnvironmentRegistry.get(context).environmentManager.status().running
             }.getOrDefault(false)
             manager.notify(NOTIFICATION_ID, NotificationCompat.Builder(context, CHANNEL_ID)
                 .setContentTitle(if (running && !displayLocal) "Linux session preserved" else "Desktop placement needs attention")
