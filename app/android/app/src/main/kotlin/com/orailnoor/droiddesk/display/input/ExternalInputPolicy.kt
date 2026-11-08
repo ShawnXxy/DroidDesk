@@ -1,6 +1,7 @@
 package com.orailnoor.droiddesk.display.input
 
 import com.orailnoor.droiddesk.display.DisplayEnvironment
+import com.orailnoor.droiddesk.display.capability.PointerAssociationEvidence
 
 enum class ExternalInputRoute {
     NATIVE,
@@ -20,9 +21,8 @@ enum class ExternalInputRoutePreference(val wireName: String) {
 
 fun externalInputRoute(
     environment: DisplayEnvironment,
-    targetDisplayId: Int,
     desktopUiMode: Boolean,
-    pointerDisplayIds: List<Int?>?,
+    pointerAssociation: PointerAssociationEvidence,
     preference: ExternalInputRoutePreference = ExternalInputRoutePreference.AUTOMATIC,
 ): ExternalInputRoute {
     if (environment != DisplayEnvironment.OTHER_EXTERNAL) {
@@ -34,15 +34,41 @@ fun externalInputRoute(
         ExternalInputRoutePreference.AUTOMATIC -> Unit
     }
     if (desktopUiMode) return ExternalInputRoute.NATIVE
-    val associations = pointerDisplayIds ?: return ExternalInputRoute.PHONE_RELAY
-    if (associations.isEmpty() || targetDisplayId in associations) {
-        return ExternalInputRoute.NATIVE
+    return when (pointerAssociation) {
+        PointerAssociationEvidence.DEFAULT_OR_UNASSOCIATED,
+        PointerAssociationEvidence.UNKNOWN,
+        -> ExternalInputRoute.PHONE_RELAY
+
+        PointerAssociationEvidence.NO_EXTERNAL_POINTER,
+        PointerAssociationEvidence.TARGET_DISPLAY,
+        PointerAssociationEvidence.OTHER_DISPLAY,
+        -> ExternalInputRoute.NATIVE
     }
-    return if (associations.any { it == null || it == android.view.Display.DEFAULT_DISPLAY }) {
-        ExternalInputRoute.PHONE_RELAY
-    } else {
-        ExternalInputRoute.NATIVE
+}
+
+fun externalInputRoute(
+    environment: DisplayEnvironment,
+    targetDisplayId: Int,
+    desktopUiMode: Boolean,
+    pointerDisplayIds: List<Int?>?,
+    preference: ExternalInputRoutePreference = ExternalInputRoutePreference.AUTOMATIC,
+): ExternalInputRoute {
+    val pointerAssociation = when {
+        pointerDisplayIds == null -> PointerAssociationEvidence.UNKNOWN
+        pointerDisplayIds.isEmpty() -> PointerAssociationEvidence.NO_EXTERNAL_POINTER
+        targetDisplayId in pointerDisplayIds -> PointerAssociationEvidence.TARGET_DISPLAY
+        pointerDisplayIds.any { it == null || it == android.view.Display.DEFAULT_DISPLAY } -> {
+            PointerAssociationEvidence.DEFAULT_OR_UNASSOCIATED
+        }
+
+        else -> PointerAssociationEvidence.OTHER_DISPLAY
     }
+    return externalInputRoute(
+        environment = environment,
+        desktopUiMode = desktopUiMode,
+        pointerAssociation = pointerAssociation,
+        preference = preference,
+    )
 }
 
 fun shouldAutoLaunchExternalDesktop(
