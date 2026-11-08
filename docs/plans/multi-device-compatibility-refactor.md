@@ -232,7 +232,7 @@ Assert exact R2 values `1080 x 2340`, API-independent identity `device = "darwin
 Run:
 
 ```powershell
-& .\app\android\gradlew.bat -p .\app\android testDebugUnitTest --tests "*PresentationEvidenceTest" --no-daemon --console=plain
+& .\app\android\gradlew.bat -p .\app\android :app:testDebugUnitTest --tests "*PresentationEvidenceTest" --no-daemon --console=plain
 ```
 
 Expected: compilation fails because the evidence types do not exist.
@@ -335,7 +335,7 @@ For the Review Focus case, assert `source == SAFE_DEFAULT`, `mode == MOVABLE`, `
 - [ ] **Step 2: Run the focused tests and verify RED**
 
 ```powershell
-& .\app\android\gradlew.bat -p .\app\android testDebugUnitTest --tests "*DesktopPlacementSelectorTest" --tests "*PlacementPreferenceStoreTest" --no-daemon --console=plain
+& .\app\android\gradlew.bat -p .\app\android :app:testDebugUnitTest --tests "*DesktopPlacementSelectorTest" --tests "*PlacementPreferenceStoreTest" --no-daemon --console=plain
 ```
 
 Expected: compilation fails because selector and preference interfaces do not exist.
@@ -363,7 +363,7 @@ For an inactive display, `presentationContext` uses `createDisplayContext(displa
 - [ ] **Step 5: Run focused and existing display tests**
 
 ```powershell
-& .\app\android\gradlew.bat -p .\app\android testDebugUnitTest --tests "*DesktopPlacementSelectorTest" --tests "*PlacementPreferenceStoreTest" --tests "*DesktopDisplayLauncherPolicyTest" --tests "*DisplayLocalStartupTest" --no-daemon --console=plain
+& .\app\android\gradlew.bat -p .\app\android :app:testDebugUnitTest --tests "*DesktopPlacementSelectorTest" --tests "*PlacementPreferenceStoreTest" --tests "*DesktopDisplayLauncherPolicyTest" --tests "*DisplayLocalStartupTest" --no-daemon --console=plain
 ```
 
 Expected: all selected tests pass; production behavior is unchanged.
@@ -471,7 +471,7 @@ The display-ID reuse test must remove a display with key `old`, add a replacemen
 - [ ] **Step 2: Run the focused tests and verify RED**
 
 ```powershell
-& .\app\android\gradlew.bat -p .\app\android testDebugUnitTest --tests "*DesktopPlacementStrategyTest" --no-daemon --console=plain
+& .\app\android\gradlew.bat -p .\app\android :app:testDebugUnitTest --tests "*DesktopPlacementStrategyTest" --no-daemon --console=plain
 ```
 
 Expected: compilation fails because the strategy and port do not exist.
@@ -511,7 +511,7 @@ Rename R2-specific lifecycle test methods where the behavior is adapter-generic.
 - [ ] **Step 7: Run the display test suite**
 
 ```powershell
-& .\app\android\gradlew.bat -p .\app\android testDebugUnitTest --tests "com.orailnoor.droiddesk.display.*" --no-daemon --console=plain
+& .\app\android\gradlew.bat -p .\app\android :app:testDebugUnitTest --tests "com.orailnoor.droiddesk.display.*" --no-daemon --console=plain
 ```
 
 Expected: all display tests pass, including dynamic IDs, headless disconnect, fallback, and stale-key rejection.
@@ -579,7 +579,7 @@ For the Review Focus case, provide current `3840 x 2160 @ 120`, supported `1920 
 - [ ] **Step 2: Run focused tests and verify RED**
 
 ```powershell
-& .\app\android\gradlew.bat -p .\app\android testDebugUnitTest --tests "*DisplayRefreshPolicyTest" --no-daemon --console=plain
+& .\app\android\gradlew.bat -p .\app\android :app:testDebugUnitTest --tests "*DisplayRefreshPolicyTest" --no-daemon --console=plain
 ```
 
 - [ ] **Step 3: Implement the pure policy and replace `applyProotRefreshPolicy` mode selection**
@@ -683,7 +683,7 @@ Use pointer IDs `0`, `12`, and `31`. Assert updates do not throw, absent IDs are
 - [ ] **Step 3: Run focused tests and verify RED**
 
 ```powershell
-& .\app\android\gradlew.bat -p .\app\android testDebugUnitTest --tests "*DesktopInputPolicyTest" --tests "*ActivePointerTrackerTest" --no-daemon --console=plain
+& .\app\android\gradlew.bat -p .\app\android :app:testDebugUnitTest --tests "*DesktopInputPolicyTest" --tests "*ActivePointerTrackerTest" --no-daemon --console=plain
 ```
 
 - [ ] **Step 4: Implement `ActivePointerTracker` and replace the ten-element array**
@@ -810,7 +810,7 @@ Cover widths not divisible by eight and the existing `1366 x 768` compatibility 
 - [ ] **Step 3: Run focused tests and verify RED**
 
 ```powershell
-& .\app\android\gradlew.bat -p .\app\android testDebugUnitTest --tests "*PresentationPolicyTest" --tests "*X11RenderGeometryTest" --no-daemon --console=plain
+& .\app\android\gradlew.bat -p .\app\android :app:testDebugUnitTest --tests "*PresentationPolicyTest" --tests "*X11RenderGeometryTest" --no-daemon --console=plain
 ```
 
 - [ ] **Step 4: Implement the pure policy**
@@ -913,7 +913,7 @@ Add tests named:
 - [ ] **Step 3: Run native focused tests and verify RED**
 
 ```powershell
-& .\app\android\gradlew.bat -p .\app\android testDebugUnitTest --tests "*DisplaySourceMergeTest" --tests "*DisplaySettingsStoreTest" --no-daemon --console=plain
+& .\app\android\gradlew.bat -p .\app\android :app:testDebugUnitTest --tests "*DisplaySourceMergeTest" --tests "*DisplaySettingsStoreTest" --no-daemon --console=plain
 ```
 
 - [ ] **Step 4: Implement schema-v2 storage on the existing identity**
@@ -1010,7 +1010,7 @@ For Review Focus, deliver all permutations of the four signals and assert one co
 - [ ] **Step 2: Run focused tests and verify RED**
 
 ```powershell
-& .\app\android\gradlew.bat -p .\app\android testDebugUnitTest --tests "*DesktopReadinessGateTest" --no-daemon --console=plain
+& .\app\android\gradlew.bat -p .\app\android :app:testDebugUnitTest --tests "*DesktopReadinessGateTest" --no-daemon --console=plain
 ```
 
 - [ ] **Step 3: Implement the gate**
@@ -1029,7 +1029,7 @@ Replace the `postDelayed(..., 250)` startup path with `onReady`.
 - [ ] **Step 5: Run readiness, session-transfer, and display tests**
 
 ```powershell
-& .\app\android\gradlew.bat -p .\app\android testDebugUnitTest --tests "*DesktopReadinessGateTest" --tests "*SessionStartTransferTest" --tests "*DisplayLocalStartupTest" --no-daemon --console=plain
+& .\app\android\gradlew.bat -p .\app\android :app:testDebugUnitTest --tests "*DesktopReadinessGateTest" --tests "*SessionStartTransferTest" --tests "*DisplayLocalStartupTest" --no-daemon --console=plain
 ```
 
 Expected: all pass and `rg -n '\}, 250\)' DesktopActivity.kt` returns no match.
@@ -1120,7 +1120,7 @@ Assert a slow chroot probe does not consume the audio budget, each timed-out cap
 - [ ] **Step 3: Run focused tests and verify RED**
 
 ```powershell
-& .\app\android\gradlew.bat -p .\app\android testDebugUnitTest --tests "*HostAudioAdapterTest" --tests "*RuntimeCapabilityProbeTest" --no-daemon --console=plain
+& .\app\android\gradlew.bat -p .\app\android :app:testDebugUnitTest --tests "*HostAudioAdapterTest" --tests "*RuntimeCapabilityProbeTest" --no-daemon --console=plain
 ```
 
 - [ ] **Step 4: Implement adaptive audio selection**
@@ -1136,7 +1136,7 @@ Launch all probes concurrently. Track each future's start deadline independently
 - [ ] **Step 6: Run runtime and full Android tests**
 
 ```powershell
-& .\app\android\gradlew.bat -p .\app\android testDebugUnitTest --tests "com.orailnoor.droiddesk.runtime.*" --no-daemon --console=plain
+& .\app\android\gradlew.bat -p .\app\android :app:testDebugUnitTest --tests "com.orailnoor.droiddesk.runtime.*" --no-daemon --console=plain
 & .\app\android\gradlew.bat -p .\app\android testDebugUnitTest --no-daemon --console=plain
 ```
 
