@@ -39,8 +39,8 @@ import com.orailnoor.droiddesk.display.DesktopDisplayException
 import com.orailnoor.droiddesk.display.DesktopItemReadinessGate
 import com.orailnoor.droiddesk.display.DesktopLaunchReply
 import com.orailnoor.droiddesk.display.DisplayEnvironmentPolicy
-import com.orailnoor.droiddesk.display.shouldCaptureRelayedPointer
-import com.orailnoor.droiddesk.display.shouldAutoLaunchExternalDesktop
+import com.orailnoor.droiddesk.display.input.shouldCaptureRelayedPointer
+import com.orailnoor.droiddesk.display.input.shouldAutoLaunchExternalDesktop
 import com.orailnoor.droiddesk.packages.PackageStoreException
 import com.orailnoor.droiddesk.packages.PackageStoreMethodHandler
 import com.orailnoor.droiddesk.packages.ProcessPackageStoreRegistry

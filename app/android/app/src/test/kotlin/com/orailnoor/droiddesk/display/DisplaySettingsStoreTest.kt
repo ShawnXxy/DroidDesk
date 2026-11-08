@@ -1,5 +1,6 @@
 package com.orailnoor.droiddesk.display
 
+import com.orailnoor.droiddesk.display.input.ExternalInputRoutePreference
 import org.junit.Assert.assertEquals
 import org.junit.Test
 

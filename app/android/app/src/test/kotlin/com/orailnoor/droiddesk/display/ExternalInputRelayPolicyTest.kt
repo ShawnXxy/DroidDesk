@@ -1,5 +1,6 @@
-package com.orailnoor.droiddesk.display
+package com.orailnoor.droiddesk.display.input
 
+import com.orailnoor.droiddesk.display.DisplayEnvironment
 import com.orailnoor.droiddesk.view.forwardRelayMotion
 import org.junit.Assert.assertEquals
 import com.orailnoor.droiddesk.view.shouldLaunchInputRelay
