@@ -124,6 +124,62 @@ class DisplaySourceMergeTest {
     }
 
     @Test
+    fun identicalMonitorsReconnectWithoutAStalePrimaryAssignment() {
+        val productKey = "external:3:RTK|3:447|7:RTK FHD"
+        val source = MutableDisplaySource(
+            listOf(
+                DisplayCandidate(5, "RTK FHD", false, settingsKey = productKey),
+                DisplayCandidate(6, "RTK FHD", false, settingsKey = productKey),
+            ),
+        )
+        val repository = DisplayRepository(source)
+        repository.start {}
+        repository.snapshot()
+
+        source.replace(emptyList(), removedId = 5)
+        source.replace(
+            listOf(
+                DisplayCandidate(7, "RTK FHD", false, settingsKey = productKey),
+            ),
+        )
+
+        assertEquals(productKey, repository.snapshot().single().settingsKey)
+    }
+
+    @Test
+    fun reconnectedSoleMonitorRemainsPrimaryWhenItsTwinArrives() {
+        val productKey = "external:3:RTK|3:447|7:RTK FHD"
+        val source = MutableDisplaySource(
+            listOf(
+                DisplayCandidate(5, "RTK FHD", false, settingsKey = productKey),
+            ),
+        )
+        val repository = DisplayRepository(source)
+        repository.start {}
+        repository.snapshot()
+
+        source.replace(emptyList(), removedId = 5)
+        source.replace(
+            listOf(
+                DisplayCandidate(7, "RTK FHD", false, settingsKey = productKey),
+            ),
+        )
+        val reconnected = repository.snapshot().single()
+
+        source.replace(
+            listOf(
+                source.snapshot().single(),
+                DisplayCandidate(8, "RTK FHD", false, settingsKey = productKey),
+            ),
+        )
+        val withTwin = repository.snapshot().associateBy(DesktopDisplay::id)
+
+        assertEquals(productKey, reconnected.settingsKey)
+        assertEquals(productKey, withTwin.getValue(7).settingsKey)
+        assertNotEquals(productKey, withTwin.getValue(8).settingsKey)
+    }
+
+    @Test
     fun monitorWithoutProductEvidenceIgnoresResolutionChanges() {
         val firstMode = stableDisplaySettingsKey(
             isDefault = false,

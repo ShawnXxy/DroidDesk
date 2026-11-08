@@ -32,7 +32,7 @@ internal class PackageStoreManager(
         expectedKind: EnvironmentKind,
         request: PackageStoreQuery,
     ): Result<PackageStoreQueryResult> = try {
-        if (request is PackageStoreQuery.Updates && request.refreshIndex) {
+        if (requiresQueryAdmission(expectedKind, request)) {
             queryAdmission?.invoke(expectedKind) {
                 queryForCurrentTarget(expectedKind, request).getOrThrow()
             }?.let(Result.Companion::success)
@@ -55,6 +55,15 @@ internal class PackageStoreManager(
             ),
         )
     }
+
+    private fun requiresQueryAdmission(
+        expectedKind: EnvironmentKind,
+        request: PackageStoreQuery,
+    ): Boolean =
+        request is PackageStoreQuery.Updates && request.refreshIndex ||
+            expectedKind == EnvironmentKind.TERMUX_NATIVE &&
+            request is PackageStoreQuery.Catalog &&
+            request.search.isNotBlank()
 
     private fun queryForCurrentTarget(
         expectedKind: EnvironmentKind,

@@ -97,6 +97,10 @@ class DisplayRepository(private val source: DesktopDisplaySource) {
         val visible = candidates.filter {
             it.isValid && !it.isPrivate && (it.isDefault || it.isOn)
         }
+        val visibleSettingsKeys = visible
+            .mapTo(mutableSetOf(), DisplayCandidate::settingsKey)
+        primaryConnectionBySettingsKey.keys.retainAll(visibleSettingsKeys)
+        ambiguousSettingsKeys.retainAll(visibleSettingsKeys)
         val connectionKeys = visible.associate { candidate ->
             candidate.id to keys.getOrPut(candidate.id) { UUID.randomUUID().toString() }
         }

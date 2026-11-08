@@ -150,6 +150,50 @@ class PackageStoreManagerTest {
         assertEquals(0, store.queryCalls)
     }
 
+    @Test
+    fun nativeCatalogSearchUsesEnvironmentAdmission() {
+        val store = FakeStore(EnvironmentKind.TERMUX_NATIVE)
+        var admissions = 0
+        val manager = manager(
+            stores = listOf(store),
+            activeKind = { EnvironmentKind.TERMUX_NATIVE },
+            queryAdmission = { _, action ->
+                admissions++
+                action()
+            },
+        )
+
+        manager.query(
+            EnvironmentKind.TERMUX_NATIVE,
+            PackageStoreQuery.Catalog(search = ""),
+        ).getOrThrow()
+        assertEquals(0, admissions)
+
+        manager.query(
+            EnvironmentKind.TERMUX_NATIVE,
+            PackageStoreQuery.Catalog(search = "tree"),
+        ).getOrThrow()
+        assertEquals(1, admissions)
+    }
+
+    @Test
+    fun busyNativeCatalogSearchReturnsTypedOperationInProgress() {
+        val store = FakeStore(EnvironmentKind.TERMUX_NATIVE)
+        val manager = manager(
+            stores = listOf(store),
+            activeKind = { EnvironmentKind.TERMUX_NATIVE },
+            queryAdmission = { _, _ -> throw EnvironmentSelectionBusyException() },
+        )
+
+        val error = manager.query(
+            EnvironmentKind.TERMUX_NATIVE,
+            PackageStoreQuery.Catalog(search = "tree"),
+        ).exceptionOrNull() as PackageStoreException
+
+        assertEquals("OPERATION_IN_PROGRESS", error.code)
+        assertEquals(0, store.queryCalls)
+    }
+
     private fun manager(
         stores: List<EnvironmentPackageStore>,
         activeKind: () -> EnvironmentKind,
