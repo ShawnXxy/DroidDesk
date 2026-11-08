@@ -10,31 +10,36 @@ with the same current review APK SHA-256.
 | Field | Result |
 |---|---|
 | Source branch | `shawnxxy-environment-package-store` |
-| Source commit | `8602fda6a701c556253e704d8b405b48a1f3553e` plus the uncommitted third-review working tree |
+| Source commit | `90d71fa6af10a13c541015e9310832324549038b` plus the uncommitted final cancellation-hardening working tree |
 | Working tree | Dirty by design; no checkpoint commit exists |
 | APK path | `app/build/acceptance/DroidDesk-package-store-acceptance.apk` |
 | Package ID | `com.orailnoor.droiddesk.monitoracceptance` |
 | Version | `1.3.1-monitor-acceptance` (`6`) |
 | ABI | `arm64-v8a` |
-| Current review APK SHA-256 | `e038d55537fdd90dec12a91796a80609d562e7d9f0828618e4662dc116bd11e8` |
+| Current review APK SHA-256 | `0cbfbbde0c9caa723590be1a13a88560dd966848e83ebf664150f4e9fb528df2` |
 | Second review-fix APK SHA-256 | `376efbbde766ebfeb52a9d7b04088bf11916c910066e92b854658cc502f6e7c9` |
 | First review-fix APK SHA-256 | `eb5030a19e9df867a9f918fdcff753d6f8c8cf197043a26d3ece8e6c23ad9ad9` |
 | Full transaction baseline APK SHA-256 | `a60f85beb964d2573735dcbb7da08d1f219ab61d90ed809fc7ce2575aedca714` |
 | Signer certificate SHA-256 | `91e55ef8c4b136268e59c7b79fb42d66604e762f1bb2ff11a2a750d44f4e9672` |
-| Current review build time | 2026-11-08 12:02 +08:00 |
+| Current review build time | 2026-11-08 14:35 +08:00 |
 
 ## Device availability
 
 Smartisan R2 (`darwin`, Android 11) was tested by wireless ADB at
 `192.168.31.162:5555`. Its physical HDMI display used a current physical
-display ID of `70` at 2160 × 1440, with TNT windowing on display `100003`. The
+display ID of `72` at 2160 × 1440, with TNT windowing on display `100003`. The
 review-fix passes collectively covered phone and physical TNT startup, TNT Go
 mouse/keyboard input, the Android window border controls, XFCE/GIMP,
 background/return PID stability, package-operation navigation, Stop rejection
 during an active mutation, and final Stop Server cleanup. The current hash
-revalidated phone and TNT startup plus session continuity; its input path is
-unchanged on Android 11. Android 11 also caught and verified the API-level
-guard around API 31 monitor product information.
+revalidated the phone package path, including VLC remove, cancellation,
+owned-process cleanup, and a successful retry. After the dock was reconnected,
+the same hash launched through the public TNT MainActivity path on display
+`100003`, connected LorieView to the X11 service, rendered XFCE Terminal,
+accepted the `R2_TNT_OK` keyboard probe, preserved the PRoot/PulseAudio/XFCE
+PIDs across TNT Home/background and return, and completed app-owned Stop
+cleanup without residual workers. Android 11 also caught and verified the
+API-level guard around API 31 monitor product information.
 
 Nubia NX888J (`PQ85A02`, Android 16) was tested by wireless ADB at
 `192.168.31.50:5555`. Its current review run used dynamic HDMI display `9`
@@ -43,10 +48,11 @@ collectively opened XFCE on the live display, selected the phone relay in
 `Automatic` mode, captured the TNT Go mouse/keyboard, preserved the full
 external viewport, survived rejected Stop requests and display disable/enable
 generation changes, returned the same Linux session to display `0` after
-physical unplug, and stopped without residual processes. The current hash
-revalidated phone and HDMI startup plus relay capture; its input path is
-unchanged on Android 16. The input-route setting remains stored by stable
-monitor product identity rather than the transient display ID.
+physical unplug, and stopped without residual processes. The current hash revalidated VLC remove, cancellation, and retry on the phone,
+then launched XFCE on dynamic HDMI display `9`. The phone relay became the
+foreground pointer-capture owner and Android reported pointer capture enabled.
+The input-route setting remains stored by stable monitor product identity
+rather than the transient display ID.
 
 ## Review-fix delta acceptance
 
@@ -63,8 +69,8 @@ physical scenarios.
 | Relay owner cleanup | Nubia display disable/enable replaced Desktop/Relay tasks `866`/`867` with `869`/`870`; cleanup from the old generation did not close the new visible relay |
 | Captured-pointer forwarding | Android reported the phone relay as the current pointer-capture owner; the user confirmed physical mouse/touchpad, click, keyboard input, and full 2160 × 1440 viewport control after capture |
 | Architecture guard expansion | Guard unit tests and the repository scan passed for all current direct `LinuxRuntime` package-store methods |
-| R2 phone / TNT | Same APK passed startup, physical input, XFCE/GIMP, background/return, mutation rejection, reinstall, and final cleanup |
-| Nubia phone / HDMI | Review builds passed phone mode, dynamic displays `8` and `9`, Automatic phone relay, physical input, mutation rejection with relay captured, generation replacement, physical unplug recovery, and final cleanup |
+| R2 phone / TNT | Current APK passed phone VLC remove → cancelled install → retry, TNT display `100003` startup, XFCE terminal rendering, keyboard input, background/return continuity, and Stop cleanup |
+| Nubia phone / HDMI | Current APK passed VLC remove → cancelled install → retry, dynamic HDMI display `9`, Automatic phone relay, and pointer capture |
 
 One ADB-created hidden R2 TNT task retained an old `Removing VLC` render frame
 after the native operation had completed. Live inspection showed
@@ -109,6 +115,23 @@ sessions completed final Stop cleanup without package workers or services.
 | Resolution-stable fallback identity | Displays without product information use name-based identity; mutable mode dimensions no longer invalidate saved settings |
 | Automated suites | 64 Flutter tests, the full Android unit suite, architecture guards, and the ARM64 acceptance build passed |
 
+### Final cancellation-hardening delta
+
+The current hash closes the final PID-reuse review thread and the additional
+R2 timing failures found during physical cancellation acceptance.
+
+| Follow-up fix | Verification |
+|---|---|
+| Root PID reuse | Descendants are accepted only while the original root identity remains stable before and after enumeration |
+| Ownership evidence | Package operation IDs propagate into PRoot guest commands; token and process identity are both revalidated before capture |
+| Detached workers | Token-owned workers are discovered across process groups, terminated after cancellation, and quarantined if they survive bounded cleanup |
+| Normal completion | Package commands wait for live token-owned descendants; zombie processes do not block settlement because they cannot retain locks |
+| Package-state convergence | Install, remove, upgrade, and upgrade-all verification tolerate bounded dpkg status convergence without accepting an unverified changed version |
+| R2 phone | VLC remove succeeded, install returned `cancelled`, no apt/dpkg/timeout/setsid worker remained, and the immediate retry succeeded |
+| R2/TNT | Display `100003` launched the same hash; XFCE Terminal rendered, accepted `R2_TNT_OK`, retained session PIDs across background/return, and stopped cleanly |
+| Nubia phone / HDMI | The same APK passed VLC remove/cancel/retry, HDMI display `9`, foreground phone relay, and pointer capture |
+| Automated suites | Full Android unit suite, architecture guard repository scan, `git diff --check`, and ARM64 acceptance build passed |
+
 ## Operation evidence
 
 Record one row for every install, removal, upgrade, cancellation, and cache
@@ -135,6 +158,9 @@ cleanup used as acceptance evidence.
 | NX888J phone | Debian PRoot | Node.js + npm | Not captured | Installed | `18.20.4+dfsg-1~deb12u3`; npm `9.2.0` | N/A | `node --version` → `v18.20.4` |
 | NX888J phone | Debian PRoot | Python + pip + venv | Not captured | Installed | Python `3.11.2`; pip `23.0.1` | N/A | All three required packages installed |
 | NX888J phone | Debian PRoot | Cache cleanup and Updates refresh | Not captured | Succeeded | N/A | N/A | Lists were emptied, pull-to-refresh rebuilt about 19 MB of indexes, and Updates remained truthful |
+| R2 phone (current hash) | Debian PRoot | VLC remove → cancelled install → retry | `1` / `2` / `3` | Removed, cancelled with repaired state, then installed | `3.0.24-0+deb12u1` | `vlc.desktop` | No apt/dpkg/timeout/setsid worker remained; immediate retry succeeded |
+| NX888J phone (current hash) | Debian PRoot | VLC remove → cancelled install → retry | `1` / `2` / `3` | Removed, cancelled with repaired state, then installed | `3.0.24-0+deb12u1` | `vlc.desktop` | Same final APK; no package worker remained |
+| NX888J HDMI (current hash) | Debian PRoot | External input routing | N/A | XFCE visible on display `9`; phone relay foregrounded | N/A | N/A | Android reported pointer capture enabled with `ExternalInputRelayActivity` as owner |
 | NX888J HDMI | Debian PRoot | External input routing | N/A | Automatic/native/phone-relay overrides behaved as selected | N/A | N/A | Dynamic display `7`; relay restored full mouse/keyboard control and persisted by monitor product identity |
 
 ## Required matrix
@@ -155,13 +181,15 @@ cleanup used as acceptance evidence.
 
 ### Smartisan R2/TNT
 
-- [x] PRoot Installed and Updates match the phone view on a physical display.
-- [x] XFCE Applications menu refreshes or reports its limitation on TNT.
-- [x] A representative GUI application launches with physical mouse and
-      keyboard.
+- [x] Current-hash PRoot Installed and Updates match the phone view on a physical display.
+- [x] Current-hash XFCE Applications menu refreshes or reports its limitation on TNT.
+- [x] A representative GUI application launches through the validated TNT
+      input path; the current hash accepted the keyboard probe and did not
+      change the previously accepted mouse routing.
 - [x] Package progress and completion survive navigation between App Store,
       Home, and the active TNT desktop.
-- [x] Package operations were exercised while the TNT view remained active.
+- [x] The final-hash installed state remained truthful while TNT was active;
+      the mutation and cancellation path passed separately on R2 phone.
 - [x] Background/return and Stop Server remain correct on physical TNT.
 
 ### Nubia NX888J phone
@@ -213,7 +241,7 @@ cleanup used as acceptance evidence.
 
 - Current review APK acceptance status: **Passed**
 - Accepted APK SHA-256:
-  `e038d55537fdd90dec12a91796a80609d562e7d9f0828618e4662dc116bd11e8`
+  `0cbfbbde0c9caa723590be1a13a88560dd966848e83ebf664150f4e9fb528df2`
 - Blocking failures: **None**
 - Remaining limitation: Android 16 and older do not expose public input-device
   display association. Automatic mode therefore uses desktop-mode evidence and

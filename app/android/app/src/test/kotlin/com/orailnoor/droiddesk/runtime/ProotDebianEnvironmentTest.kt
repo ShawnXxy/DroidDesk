@@ -200,11 +200,33 @@ class ProotDebianEnvironmentTest {
         assertTrue(host.calls.none { it.contains("dpkg --print-architecture") })
     }
 
+    @Test
+    fun packagePortPropagatesOperationOwnershipIntoGuestCommand() {
+        val host = FakeEnvironmentHost().apply {
+            activeOwnershipToken = "47"
+        }
+
+        AndroidProotPackagePort(host).runRoot(
+            executable = "dpkg",
+            arguments = listOf("--configure", "-a"),
+            environment = emptyMap(),
+            timeoutMs = 30_000,
+            onOutput = {},
+        )
+
+        assertTrue(
+            host.calls.single().contains(
+                "$PACKAGE_PROCESS_OWNER_ENV='47'",
+            ),
+        )
+    }
+
     private class FakeEnvironmentHost : ProotDebianHost {
         val calls = mutableListOf<String>()
         val rootfs: File = Files.createTempDirectory("proot-rootfs").toFile()
         val commandOutputs = mutableMapOf<String, String>()
         val cancelGracePeriods = mutableListOf<Long>()
+        var activeOwnershipToken: String? = null
         override fun availableBytes(): Long = 64L * 1024L * 1024L * 1024L
         override fun ensureToolchain(
             onProgress: (Double, String) -> Unit,
@@ -257,6 +279,8 @@ class ProotDebianEnvironmentTest {
         override fun beginActivePackageCommand(operationId: Long): Boolean = true
 
         override fun finishActivePackageCommand(operationId: Long) = Unit
+
+        override fun activePackageOwnershipToken(): String? = activeOwnershipToken
 
         override fun cancelActivePackageCommand(
             operationId: Long,

@@ -109,6 +109,7 @@ interface ProotDebianHost : ProotProvisioningHost, ProotDesktopSessionHost {
     ): ExecutionResult
     fun beginActivePackageCommand(operationId: Long): Boolean = true
     fun finishActivePackageCommand(operationId: Long) = Unit
+    fun activePackageOwnershipToken(): String? = null
     fun cancelActivePackageCommand(
         operationId: Long,
         gracePeriodMs: Long,
@@ -526,6 +527,9 @@ internal class AndroidProotDebianHost(
 
     override fun finishActivePackageCommand(operationId: Long) =
         linuxRuntime.finishOwnedPackageCommand(operationId)
+
+    override fun activePackageOwnershipToken(): String? =
+        linuxRuntime.activePackageOwnershipToken()
 
     override fun cancelActivePackageCommand(
         operationId: Long,

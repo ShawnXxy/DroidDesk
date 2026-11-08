@@ -6,6 +6,7 @@ import java.io.File
 
 internal class PackageTransactionRunner(
     private val port: ProotPackagePort,
+    private val sleep: (Long) -> Unit = { delayMs -> Thread.sleep(delayMs) },
 ) {
     private val stateLock = Any()
     private var activeOperationId: Long? = null
@@ -439,20 +440,12 @@ internal class PackageTransactionRunner(
         affectedRecipes: List<PackageRecipe>,
         versionsBeforeMutation: Map<String, String>,
     ): Boolean {
-        val installed = port.installedPackages()
-        val requestedStateMatches = when (operation.kind) {
-            PackageOperationKind.INSTALL,
-            PackageOperationKind.UPGRADE,
-            -> requireNotNull(recipe).packageNames.all(installed::containsKey)
-            PackageOperationKind.REMOVE ->
-                requireNotNull(recipe).packageNames.none(installed::containsKey)
-            PackageOperationKind.UPGRADE_ALL ->
-                affectedRecipes.all { candidate ->
-                    candidate.packageNames.all(installed::containsKey)
-                }
-            PackageOperationKind.CLEAN_CACHE -> true
-        }
-        if (!requestedStateMatches) return false
+        val installed = awaitRequestedPackageState(
+            operation,
+            recipe,
+            affectedRecipes,
+            versionsBeforeMutation,
+        ) ?: return false
         if (
             operation.kind == PackageOperationKind.REMOVE ||
             operation.kind == PackageOperationKind.CLEAN_CACHE
@@ -469,16 +462,110 @@ internal class PackageTransactionRunner(
             PackageOperationKind.CLEAN_CACHE,
             -> emptyList()
         }
-        if (recipesToVerify.any { !verifyRecipe(it, installed) }) return false
-        if (operation.kind == PackageOperationKind.UPGRADE) {
-            val upgradedRecipe = requireNotNull(recipe)
-            val versionChanged = upgradedRecipe.packageNames.any { packageName ->
-                versionsBeforeMutation[packageName] != installed[packageName]
-            }
-            if (!versionChanged) return false
-        }
-        return true
+        return verifyRecipesAfterSettling(
+            operation,
+            recipe,
+            affectedRecipes,
+            versionsBeforeMutation,
+            recipesToVerify,
+            installed,
+        )
     }
+
+    private fun verifyRecipesAfterSettling(
+        operation: PackageStoreOperation,
+        recipe: PackageRecipe?,
+        affectedRecipes: List<PackageRecipe>,
+        versionsBeforeMutation: Map<String, String>,
+        recipesToVerify: List<PackageRecipe>,
+        initialInstalled: Map<String, String>,
+    ): Boolean {
+        var installed = initialInstalled
+        repeat(PACKAGE_RECIPE_SETTLE_ATTEMPTS) { attempt ->
+            if (
+                requestedStateMatches(
+                    operation,
+                    recipe,
+                    affectedRecipes,
+                    versionsBeforeMutation,
+                    installed,
+                ) &&
+                recipesToVerify.all { verifyRecipe(it, installed) }
+            ) {
+                return true
+            }
+            if (attempt < PACKAGE_RECIPE_SETTLE_ATTEMPTS - 1) {
+                sleep(PACKAGE_RECIPE_SETTLE_DELAY_MS)
+                installed = port.installedPackages()
+            }
+        }
+        return false
+    }
+
+    private fun awaitRequestedPackageState(
+        operation: PackageStoreOperation,
+        recipe: PackageRecipe?,
+        affectedRecipes: List<PackageRecipe>,
+        versionsBeforeMutation: Map<String, String>,
+    ): Map<String, String>? {
+        repeat(PACKAGE_STATE_SETTLE_ATTEMPTS) { attempt ->
+            val installed = port.installedPackages()
+            val requestedStateMatches = requestedStateMatches(
+                operation,
+                recipe,
+                affectedRecipes,
+                versionsBeforeMutation,
+                installed,
+            )
+            val upgradeAllVersionChanged =
+                operation.kind != PackageOperationKind.UPGRADE_ALL ||
+                    affectedRecipes.isEmpty() ||
+                    affectedRecipes.any { candidate ->
+                        candidate.packageNames.any { packageName ->
+                            versionsBeforeMutation[packageName] != installed[packageName]
+                        }
+                    }
+            if (
+                requestedStateMatches &&
+                (
+                    upgradeAllVersionChanged ||
+                        attempt == PACKAGE_STATE_SETTLE_ATTEMPTS - 1
+                    )
+            ) {
+                return installed
+            }
+            if (attempt < PACKAGE_STATE_SETTLE_ATTEMPTS - 1) {
+                sleep(PACKAGE_STATE_SETTLE_DELAY_MS)
+            }
+        }
+        return null
+    }
+
+    private fun requestedStateMatches(
+        operation: PackageStoreOperation,
+        recipe: PackageRecipe?,
+        affectedRecipes: List<PackageRecipe>,
+        versionsBeforeMutation: Map<String, String>,
+        installed: Map<String, String>,
+    ): Boolean =
+        when (operation.kind) {
+            PackageOperationKind.INSTALL,
+            -> requireNotNull(recipe).packageNames.all(installed::containsKey)
+            PackageOperationKind.REMOVE ->
+                requireNotNull(recipe).packageNames.none(installed::containsKey)
+            PackageOperationKind.UPGRADE -> {
+                val upgradedRecipe = requireNotNull(recipe)
+                upgradedRecipe.packageNames.all(installed::containsKey) &&
+                    upgradedRecipe.packageNames.any { packageName ->
+                        versionsBeforeMutation[packageName] != installed[packageName]
+                    }
+            }
+            PackageOperationKind.UPGRADE_ALL ->
+                affectedRecipes.all { candidate ->
+                    candidate.packageNames.all(installed::containsKey)
+                }
+            PackageOperationKind.CLEAN_CACHE -> true
+        }
 
     private fun verifyRecipe(
         recipe: PackageRecipe,
@@ -780,6 +867,10 @@ internal class PackageTransactionRunner(
     private companion object {
         const val CANCEL_GRACE_MS = 5_000L
         const val CANCELLED_EXIT_CODE = 130
+        const val PACKAGE_STATE_SETTLE_ATTEMPTS = 31
+        const val PACKAGE_STATE_SETTLE_DELAY_MS = 100L
+        const val PACKAGE_RECIPE_SETTLE_ATTEMPTS = 6
+        const val PACKAGE_RECIPE_SETTLE_DELAY_MS = 200L
         const val BUSY_CHECK_TIMEOUT_MS = 5_000L
         const val AUDIT_TIMEOUT_MS = 30_000L
         const val VERIFY_TIMEOUT_MS = 30_000L

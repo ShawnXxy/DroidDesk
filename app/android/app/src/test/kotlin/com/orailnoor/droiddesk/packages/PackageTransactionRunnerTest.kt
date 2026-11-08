@@ -136,6 +136,39 @@ class PackageTransactionRunnerTest {
     }
 
     @Test
+    fun installWaitsForPackageDatabaseVisibility() {
+        val port = TransactionProotPort().apply {
+            delayedMutationVisibilityReads = 1
+        }
+        val runner = PackageTransactionRunner(port)
+
+        val result = runner.run(
+            operation(PackageOperationKind.INSTALL, "app.firefox"),
+            ProotPackageRecipes.require("app.firefox"),
+            observer = {},
+        )
+
+        assertEquals(PackageOperationOutcome.SUCCEEDED, result.outcome)
+    }
+
+    @Test
+    fun removeWaitsForPackageDatabaseVisibility() {
+        val port = TransactionProotPort().apply {
+            installed["firefox-esr"] = "128.9.0esr"
+            delayedMutationVisibilityReads = 1
+        }
+        val runner = PackageTransactionRunner(port)
+
+        val result = runner.run(
+            operation(PackageOperationKind.REMOVE, "app.firefox"),
+            ProotPackageRecipes.require("app.firefox"),
+            observer = {},
+        )
+
+        assertEquals(PackageOperationOutcome.SUCCEEDED, result.outcome)
+    }
+
+    @Test
     fun upgradeAllUsesOnlyStoreManagedRecipePackages() {
         val port = TransactionProotPort().apply {
             installed.putAll(
@@ -162,6 +195,44 @@ class PackageTransactionRunnerTest {
         }
         assertTrue(upgrade.arguments.containsAll(listOf("firefox-esr", "nodejs", "npm")))
         assertFalse(upgrade.arguments.contains("curl"))
+    }
+
+    @Test
+    fun upgradeAllWaitsForPackageDatabaseVisibility() {
+        val port = TransactionProotPort().apply {
+            installed.putAll(
+                mapOf(
+                    "firefox-esr" to "128.9.0esr",
+                    "nodejs" to "18.20.4",
+                    "npm" to "9.2.0",
+                ),
+            )
+            delayedMutationVisibilityReads = 1
+        }
+
+        val result = PackageTransactionRunner(port).run(
+            operation(PackageOperationKind.UPGRADE_ALL),
+            recipe = null,
+            observer = {},
+        )
+
+        assertEquals(PackageOperationOutcome.SUCCEEDED, result.outcome)
+    }
+
+    @Test
+    fun upgradeAllAcceptsAnAlreadyCurrentPackageSetAfterSettling() {
+        val port = TransactionProotPort().apply {
+            installed["firefox-esr"] = "128.9.0esr"
+            preserveVersionsOnUpgrade = true
+        }
+
+        val result = PackageTransactionRunner(port, sleep = {}).run(
+            operation(PackageOperationKind.UPGRADE_ALL),
+            recipe = null,
+            observer = {},
+        )
+
+        assertEquals(PackageOperationOutcome.SUCCEEDED, result.outcome)
     }
 
     @Test
@@ -456,6 +527,7 @@ internal class TransactionProotPort : ProotPackagePort {
     var packageArchitecture = "arm64"
     var preserveVersionsOnUpgrade = false
     var blockRemoveBeforeOutput = false
+    var delayedMutationVisibilityReads = 0
     val missingExecutables = mutableSetOf<String>()
     var onInstalledPackages: (() -> Unit)? = null
     val removeStarted = CountDownLatch(1)
@@ -464,6 +536,7 @@ internal class TransactionProotPort : ProotPackagePort {
     val blockingConfigureStarted = CountDownLatch(1)
     val releaseBlockingConfigure = CountDownLatch(1)
     @Volatile var cancellationRequested = false
+    private var staleInstalledSnapshot: Map<String, String>? = null
 
     override fun readyMarker(): ProotReadyMarker = ProotReadyMarker(
         schema = 1,
@@ -481,6 +554,12 @@ internal class TransactionProotPort : ProotPackagePort {
 
     override fun installedPackages(): Map<String, String> {
         onInstalledPackages?.invoke()
+        if (delayedMutationVisibilityReads > 0) {
+            staleInstalledSnapshot?.let { snapshot ->
+                delayedMutationVisibilityReads--
+                return snapshot
+            }
+        }
         return installed.toMap()
     }
 
@@ -553,18 +632,24 @@ internal class TransactionProotPort : ProotPackagePort {
                 releaseRemove.await(5, TimeUnit.SECONDS)
             }
             onOutput("Removing Debian packages")
-            if (mutatePackageState) packageArguments(arguments).forEach(installed::remove)
+            if (mutatePackageState) {
+                val beforeMutation = installed.toMap()
+                packageArguments(arguments).forEach(installed::remove)
+                preserveStaleSnapshot(beforeMutation)
+            }
             return ExecutionResult(0, "")
         }
         if (executable == "apt-get" && arguments.contains("install")) {
             val packages = packageArguments(arguments)
             if (mutatePackageState) {
+                val beforeMutation = installed.toMap()
                 packages.forEach { packageName ->
                     if (!(preserveVersionsOnUpgrade && packageName in installed)) {
                         installed[packageName] = "2.0"
                     }
                 }
                 if (createDesktopEntriesOnInstall) createDesktopEntries(packages)
+                preserveStaleSnapshot(beforeMutation)
             }
             return ExecutionResult(0, "")
         }
@@ -618,6 +703,12 @@ internal class TransactionProotPort : ProotPackagePort {
             "--only-upgrade",
         )
         return arguments.filter { it !in reserved && !it.startsWith("-o") }
+    }
+
+    private fun preserveStaleSnapshot(beforeMutation: Map<String, String>) {
+        if (delayedMutationVisibilityReads > 0) {
+            staleInstalledSnapshot = beforeMutation
+        }
     }
 
     private fun createDesktopEntries(packages: List<String>) {

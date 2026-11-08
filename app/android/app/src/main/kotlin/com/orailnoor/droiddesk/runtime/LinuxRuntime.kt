@@ -68,6 +68,11 @@ internal fun nativePackageUpgradeCommand(packages: List<String>): String =
         "-o Dpkg::Options::=--force-confold " +
         "install --only-upgrade -y ${packages.joinToString(" ")}"
 
+internal fun processIdentityFromStatFields(fields: List<String>): String? {
+    if (fields.firstOrNull() == "Z") return null
+    return fields.getOrNull(19)
+}
+
 /**
  * Core Linux runtime engine.
  *
@@ -86,6 +91,8 @@ class LinuxRuntime(context: Context) {
         private const val SHEBANG_MARKER = ".relocated_text_paths_v4"
         private const val ELF_PATCH_MARKER = ".elf_runpaths_patched"
         private const val DE_MARKER = ".de_installed"
+        private const val PACKAGE_PROCESS_SETTLE_MILLIS = 10_000L
+        private const val PACKAGE_PROCESS_FORCE_GRACE_MILLIS = 1_000L
         private const val PROBE_PROCESS_TIMEOUT_MILLIS = 750L
         private const val PINNED_PROOT_VERSION = "5.1.107.102"
         private const val PINNED_PROOT_DISTRO_VERSION = "5.10.3"
@@ -151,6 +158,8 @@ class LinuxRuntime(context: Context) {
     private val activeCommands = CommandOwnership<Process>()
     private val packageOperationLock = Any()
     private var activePackageOperation: ActivePackageOperation? = null
+    private var unsettledPackageOwnershipToken: String? = null
+    private var quarantinedPackageLane: CommandOwnership.Lease? = null
     @Volatile private var installLogSink: ((String) -> Unit)? = null
     @Volatile private var packageOperationCancelled = false
 
@@ -163,7 +172,14 @@ class LinuxRuntime(context: Context) {
     private data class CommandLease(
         val lease: CommandOwnership.Lease,
         val persistentLane: Boolean,
+        val ownershipToken: String?,
     )
+
+    private enum class PackageProcessSettlement {
+        SETTLED,
+        TERMINATED,
+        SURVIVORS,
+    }
 
     fun setInstallLogSink(sink: ((String) -> Unit)?) {
         installLogSink = sink
@@ -171,6 +187,7 @@ class LinuxRuntime(context: Context) {
 
     fun beginPackageOperation(operationId: Long): Boolean = synchronized(packageOperationLock) {
         if (activePackageOperation != null) return@synchronized false
+        if (!releaseQuarantinedPackageLaneIfSettled()) return@synchronized false
         val lane = activeCommands.reserveLane(acceptsInput = false)
             ?: return@synchronized false
         activePackageOperation = ActivePackageOperation(
@@ -183,15 +200,41 @@ class LinuxRuntime(context: Context) {
     }
 
     fun finishPackageOperation(operationId: Long) {
-        val operation = synchronized(packageOperationLock) {
-            activePackageOperation
+        val (operation, quarantine) = synchronized(packageOperationLock) {
+            val operation = activePackageOperation
                 ?.takeIf { it.operationId == operationId }
                 ?.also {
                     activePackageOperation = null
                     packageOperationCancelled = false
                 }
-        } ?: return
-        activeCommands.release(operation.commandLane)
+                ?: return
+            val ownershipToken = operation.operationId.toString()
+            val quarantine =
+                unsettledPackageOwnershipToken == ownershipToken &&
+                    processPidsOwnedByToken(ownershipToken).isNotEmpty()
+            if (quarantine) {
+                quarantinedPackageLane = operation.commandLane
+            } else if (unsettledPackageOwnershipToken == ownershipToken) {
+                unsettledPackageOwnershipToken = null
+            }
+            operation to quarantine
+        }
+        if (!quarantine) activeCommands.release(operation.commandLane)
+    }
+
+    internal fun activePackageOwnershipToken(): String? =
+        synchronized(packageOperationLock) {
+            activePackageOperation?.operationId?.toString()
+        }
+
+    private fun releaseQuarantinedPackageLaneIfSettled(): Boolean {
+        val lane = quarantinedPackageLane ?: return true
+        val ownershipToken = unsettledPackageOwnershipToken ?: return false
+        if (processPidsOwnedByToken(ownershipToken).isNotEmpty()) return false
+        activeCommands.release(lane)
+        quarantinedPackageLane = null
+        unsettledPackageOwnershipToken = null
+        return true
     }
 
     fun cancelPackageOperation(operationId: Long): Boolean {
@@ -202,7 +245,9 @@ class LinuxRuntime(context: Context) {
             packageOperationCancelled = true
             activeCommands.cancelProcess(operation.commandLane)
         } ?: return false
-        cancellation.process?.let { terminateProcess(it, 200) }
+        cancellation.process?.let {
+            terminateProcess(it, 200, operationId.toString())
+        }
         return true
     }
 
@@ -2128,10 +2173,13 @@ class LinuxRuntime(context: Context) {
                 .also { builder ->
                     builder.environment().clear()
                     builder.environment().putAll(getTermuxEnv())
+                    commandLease.ownershipToken?.let { token ->
+                        builder.environment()[PACKAGE_PROCESS_OWNER_ENV] = token
+                    }
                 }
                 .start()
             if (!activeCommands.attach(lease, process)) {
-                terminateProcess(process, 200)
+                terminateProcess(process, 200, commandLease.ownershipToken)
                 return ExecutionResult(1, "Error: Command was cancelled before it started")
             }
             val output = StringBuilder()
@@ -2145,8 +2193,17 @@ class LinuxRuntime(context: Context) {
                 onOutput?.invoke(chunk)
             }
             process.waitFor()
+            if (
+                waitForOwnedPackageProcesses(commandLease.ownershipToken) !=
+                PackageProcessSettlement.SETTLED
+            ) {
+                return ExecutionResult(1, "Error: Package processes did not settle")
+            }
             ExecutionResult(process.exitValue(), output.toString())
         } catch (error: Exception) {
+            process?.let {
+                terminateProcess(it, 200, commandLease.ownershipToken)
+            }
             ExecutionResult(1, "Error: ${error.message}")
         } finally {
             releaseCommandLease(commandLease)
@@ -2718,6 +2775,7 @@ $stagedProfile
         val commandLease = acquireCommandLease(interactive)
             ?: return "Error: Another command is already running"
         val lease = commandLease.lease
+        var process: Process? = null
 
         return try {
             Log.d(TAG, "Executing command natively: $command")
@@ -2727,20 +2785,22 @@ $stagedProfile
             } else {
                 fullCommand
             }
-            val process = ProcessBuilder(launchedCommand)
+            process = ProcessBuilder(launchedCommand)
                 .directory(prefixDir)
                 .redirectErrorStream(true)
                 .also { pb ->
                     pb.environment().clear()
                     pb.environment().putAll(getTermuxEnv())
+                    commandLease.ownershipToken?.let { token ->
+                        pb.environment()[PACKAGE_PROCESS_OWNER_ENV] = token
+                    }
                 }
                 .start()
 
             if (!activeCommands.attach(lease, process)) {
-                terminateProcess(process, 200)
+                terminateProcess(process, 200, commandLease.ownershipToken)
                 return "Error: Command was cancelled before it started"
             }
-
             val output = StringBuilder()
             val reader = java.io.InputStreamReader(process.inputStream)
             val buffer = CharArray(1024)
@@ -2753,6 +2813,12 @@ $stagedProfile
                 onOutput?.invoke(chunk)
             }
             process.waitFor()
+            check(
+                waitForOwnedPackageProcesses(commandLease.ownershipToken) ==
+                    PackageProcessSettlement.SETTLED,
+            ) {
+                "Package processes did not settle"
+            }
             Log.d(TAG, "Command finished with exit code: ${process.exitValue()}")
 
             if (process.exitValue() != 0) {
@@ -2761,6 +2827,9 @@ $stagedProfile
 
             output.toString()
         } catch (e: Exception) {
+            process?.let {
+                terminateProcess(it, 200, commandLease.ownershipToken)
+            }
             Log.e(TAG, "Command execution failed: ${e.message}")
             "Error: ${e.message}"
         } finally {
@@ -2775,13 +2844,33 @@ $stagedProfile
                 if (packageOperation.ownerThreadId != Thread.currentThread().id) {
                     return@synchronized null
                 }
+                val ownershipToken = packageOperation.operationId.toString()
+                if (unsettledPackageOwnershipToken == ownershipToken) {
+                    if (processPidsOwnedByToken(ownershipToken).isNotEmpty()) {
+                        return@synchronized null
+                    }
+                    unsettledPackageOwnershipToken = null
+                }
                 if (!activeCommands.beginCommand(packageOperation.commandLane)) {
                     return@synchronized null
                 }
-                CommandLease(packageOperation.commandLane, persistentLane = true)
+                CommandLease(
+                    packageOperation.commandLane,
+                    persistentLane = true,
+                    ownershipToken = ownershipToken,
+                )
             } else {
+                if (!releaseQuarantinedPackageLaneIfSettled()) {
+                    return@synchronized null
+                }
                 activeCommands.reserve(interactive)
-                    ?.let { CommandLease(it, persistentLane = false) }
+                    ?.let {
+                        CommandLease(
+                            it,
+                            persistentLane = false,
+                            ownershipToken = null,
+                        )
+                    }
             }
         }
 
@@ -2803,7 +2892,9 @@ $stagedProfile
                 ?: return@synchronized null
             activeCommands.cancelProcess(operation.commandLane)
         } ?: return false
-        cancellation.process?.let { terminateProcess(it, gracePeriodMs) }
+        cancellation.process?.let {
+            terminateProcess(it, gracePeriodMs, operationId.toString())
+        }
         return true
     }
 
@@ -2814,31 +2905,116 @@ $stagedProfile
         process?.let { terminateProcess(it, gracePeriodMs) }
     }
 
-    private fun terminateProcess(process: Process, gracePeriodMs: Long) {
+    private fun terminateProcess(
+        process: Process,
+        gracePeriodMs: Long,
+        ownershipToken: String? = null,
+    ) {
         Log.d(TAG, "Interrupting active command...")
         val rootPid = processPid(process)
         if (rootPid != null) {
-            OwnedProcessTreeTerminator(
-                descendantsOf = ::descendantPids,
-                identityOf = ::processIdentity,
-                signal = android.os.Process::sendSignal,
-                elapsedRealtime = android.os.SystemClock::elapsedRealtime,
-                sleep = { duration ->
-                    try {
-                        Thread.sleep(duration)
-                    } catch (_: InterruptedException) {
-                        Thread.currentThread().interrupt()
-                    }
-                },
-                membersOfGroup = ::processGroupPids,
-            ).terminate(rootPid, gracePeriodMs)
+            ownedProcessTerminator(ownershipToken).terminate(rootPid, gracePeriodMs)
         } else {
             process.destroy()
+        }
+        ownershipToken?.let { token ->
+            val detached = tokenOwnedProcessTerminator(token)
+            if (!detached.awaitGroupExit(groupId = 0, timeoutMs = 0)) {
+                detached.terminateGroup(groupId = 0, gracePeriodMs = gracePeriodMs)
+                if (
+                    !detached.awaitGroupExit(
+                        groupId = 0,
+                        timeoutMs = PACKAGE_PROCESS_FORCE_GRACE_MILLIS,
+                    )
+                ) {
+                    markUnsettledPackageOwnership(token)
+                }
+            }
         }
         if (process.isAlive) {
             process.destroyForcibly()
         }
     }
+
+    private fun waitForOwnedPackageProcesses(
+        ownershipToken: String?,
+    ): PackageProcessSettlement {
+        if (ownershipToken == null) return PackageProcessSettlement.SETTLED
+        val waiter = tokenOwnedProcessTerminator(ownershipToken)
+        if (
+            waiter.awaitGroupExit(
+                groupId = 0,
+                timeoutMs = PACKAGE_PROCESS_SETTLE_MILLIS,
+            )
+        ) {
+            return PackageProcessSettlement.SETTLED
+        }
+        Log.w(TAG, "Package processes did not settle; terminating owned workers")
+        waiter.terminateGroup(
+            groupId = 0,
+            gracePeriodMs = PACKAGE_PROCESS_FORCE_GRACE_MILLIS,
+        )
+        val settled = waiter.awaitGroupExit(
+            groupId = 0,
+            timeoutMs = PACKAGE_PROCESS_FORCE_GRACE_MILLIS,
+        )
+        if (!settled) markUnsettledPackageOwnership(ownershipToken)
+        return if (settled) {
+            PackageProcessSettlement.TERMINATED
+        } else {
+            PackageProcessSettlement.SURVIVORS
+        }
+    }
+
+    private fun markUnsettledPackageOwnership(ownershipToken: String) {
+        synchronized(packageOperationLock) {
+            unsettledPackageOwnershipToken = ownershipToken
+        }
+    }
+
+    private fun ownedProcessTerminator(
+        ownershipToken: String?,
+    ): OwnedProcessTreeTerminator =
+        OwnedProcessTreeTerminator(
+            descendantsOf = ::descendantPids,
+            identityOf = ::processIdentity,
+            signal = android.os.Process::sendSignal,
+            elapsedRealtime = android.os.SystemClock::elapsedRealtime,
+            sleep = { duration ->
+                try {
+                    Thread.sleep(duration)
+                } catch (_: InterruptedException) {
+                    Thread.currentThread().interrupt()
+                }
+            },
+            membersOfGroup = if (ownershipToken == null) {
+                { emptyList() }
+            } else {
+                ::processGroupPids
+            },
+            isOwned = { pid ->
+                ownershipToken == null || processOwnershipToken(pid) == ownershipToken
+            },
+        )
+
+    private fun tokenOwnedProcessTerminator(
+        ownershipToken: String,
+    ): OwnedProcessTreeTerminator =
+        OwnedProcessTreeTerminator(
+            descendantsOf = { emptyList() },
+            identityOf = ::processIdentity,
+            signal = android.os.Process::sendSignal,
+            elapsedRealtime = android.os.SystemClock::elapsedRealtime,
+            sleep = { duration ->
+                try {
+                    Thread.sleep(duration)
+                } catch (_: InterruptedException) {
+                    Thread.currentThread().interrupt()
+                }
+            },
+            membersOfGroup = { processPidsOwnedByToken(ownershipToken) },
+            isOwned = { pid -> processOwnershipToken(pid) == ownershipToken },
+        )
 
     private fun processPid(process: Process): Int? = runCatching {
         var type: Class<*>? = process.javaClass
@@ -2884,8 +3060,29 @@ $stagedProfile
             ?.toList()
             .orEmpty()
 
-    private fun processIdentity(pid: Int): String? =
-        processStatFields(pid)?.getOrNull(19)
+    private fun processIdentity(pid: Int): String? {
+        val fields = processStatFields(pid) ?: return null
+        return processIdentityFromStatFields(fields)
+    }
+
+    private fun processOwnershipToken(pid: Int): String? = runCatching {
+        File("/proc/$pid/environ").readBytes()
+            .toString(Charsets.UTF_8)
+            .split('\u0000')
+            .firstOrNull { it.startsWith("$PACKAGE_PROCESS_OWNER_ENV=") }
+            ?.substringAfter('=')
+    }.getOrNull()
+
+    private fun processPidsOwnedByToken(ownershipToken: String): List<Int> =
+        File("/proc").listFiles()
+            ?.asSequence()
+            ?.mapNotNull { entry -> entry.name.toIntOrNull() }
+            ?.filter { pid ->
+                processIdentity(pid) != null &&
+                    processOwnershipToken(pid) == ownershipToken
+            }
+            ?.toList()
+            .orEmpty()
 
     private fun processStatFields(pid: Int): List<String>? = runCatching {
         val stat = File("/proc/$pid/stat").readText()

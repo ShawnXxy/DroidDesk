@@ -1,5 +1,7 @@
 package com.orailnoor.droiddesk.runtime
 
+internal const val PACKAGE_PROCESS_OWNER_ENV = "DROIDDESK_PACKAGE_OPERATION_ID"
+
 internal enum class CommandInputState {
     READY,
     STARTING,

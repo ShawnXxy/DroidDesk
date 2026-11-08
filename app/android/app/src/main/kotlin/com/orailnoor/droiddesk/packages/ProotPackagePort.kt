@@ -3,6 +3,7 @@ package com.orailnoor.droiddesk.packages
 import com.orailnoor.droiddesk.runtime.ExecutionResult
 import com.orailnoor.droiddesk.runtime.AndroidDirectorySizer
 import com.orailnoor.droiddesk.runtime.DirectorySizer
+import com.orailnoor.droiddesk.runtime.PACKAGE_PROCESS_OWNER_ENV
 import com.orailnoor.droiddesk.runtime.ProotDebianHost
 import com.orailnoor.droiddesk.runtime.ProotReadyMarker
 import java.io.File
@@ -104,7 +105,12 @@ internal class AndroidProotPackagePort(
         onOutput: (String) -> Unit,
     ): ExecutionResult = host.executeActive(
         user = "root",
-        command = boundedCommand(executable, arguments, environment, timeoutMs),
+        command = boundedCommand(
+            executable,
+            arguments,
+            packageEnvironment(environment),
+            timeoutMs,
+        ),
         onOutput = onOutput,
     )
 
@@ -130,6 +136,11 @@ internal class AndroidProotPackagePort(
         operationId: Long,
         gracePeriodMs: Long,
     ): Boolean = host.cancelActivePackageCommand(operationId, gracePeriodMs)
+
+    private fun packageEnvironment(environment: Map<String, String>): Map<String, String> =
+        host.activePackageOwnershipToken()?.let { token ->
+            environment + (PACKAGE_PROCESS_OWNER_ENV to token)
+        } ?: environment
 
     private fun boundedCommand(
         executable: String,
