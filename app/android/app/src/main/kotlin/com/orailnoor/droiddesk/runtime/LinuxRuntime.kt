@@ -2117,7 +2117,12 @@ class LinuxRuntime(context: Context) {
         val lease = commandLease.lease
         var process: Process? = null
         return try {
-            process = ProcessBuilder(command)
+            val launchedCommand = if (commandLease.persistentLane) {
+                isolatedPackageCommand(command)
+            } else {
+                command
+            }
+            process = ProcessBuilder(launchedCommand)
                 .directory(prefixDir)
                 .redirectErrorStream(true)
                 .also { builder ->
@@ -2717,7 +2722,12 @@ $stagedProfile
         return try {
             Log.d(TAG, "Executing command natively: $command")
 
-            val process = ProcessBuilder(fullCommand)
+            val launchedCommand = if (commandLease.persistentLane) {
+                isolatedPackageCommand(fullCommand)
+            } else {
+                fullCommand
+            }
+            val process = ProcessBuilder(launchedCommand)
                 .directory(prefixDir)
                 .redirectErrorStream(true)
                 .also { pb ->
@@ -2820,6 +2830,7 @@ $stagedProfile
                         Thread.currentThread().interrupt()
                     }
                 },
+                membersOfGroup = ::processGroupPids,
             ).terminate(rootPid, gracePeriodMs)
         } else {
             process.destroy()
@@ -2857,12 +2868,30 @@ $stagedProfile
         return result
     }
 
-    private fun processIdentity(pid: Int): String? = runCatching {
+    private fun isolatedPackageCommand(command: List<String>): List<String> {
+        val setsid = sequenceOf(
+            File("/system/bin/setsid"),
+            File(binDir, "setsid"),
+        ).firstOrNull(File::canExecute) ?: return command
+        return listOf(setsid.absolutePath) + command
+    }
+
+    private fun processGroupPids(groupId: Int): List<Int> =
+        File("/proc").listFiles()
+            ?.asSequence()
+            ?.mapNotNull { entry -> entry.name.toIntOrNull() }
+            ?.filter { pid -> processStatFields(pid)?.getOrNull(2)?.toIntOrNull() == groupId }
+            ?.toList()
+            .orEmpty()
+
+    private fun processIdentity(pid: Int): String? =
+        processStatFields(pid)?.getOrNull(19)
+
+    private fun processStatFields(pid: Int): List<String>? = runCatching {
         val stat = File("/proc/$pid/stat").readText()
-        val fieldsAfterCommand = stat.substring(stat.lastIndexOf(") ") + 2)
+        stat.substring(stat.lastIndexOf(") ") + 2)
             .trim()
             .split(Regex("\\s+"))
-        fieldsAfterCommand[19]
     }.getOrNull()
 
 }

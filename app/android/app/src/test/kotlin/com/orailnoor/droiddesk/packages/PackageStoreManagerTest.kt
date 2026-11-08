@@ -1,6 +1,7 @@
 package com.orailnoor.droiddesk.packages
 
 import com.orailnoor.droiddesk.runtime.EnvironmentKind
+import com.orailnoor.droiddesk.runtime.EnvironmentSelectionBusyException
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertThrows
@@ -105,13 +106,61 @@ class PackageStoreManagerTest {
         assertFalse(operation.bytesFreed != null)
     }
 
+    @Test
+    fun indexRefreshQueriesUseEnvironmentAdmission() {
+        val store = FakeStore(EnvironmentKind.PROOT_DEBIAN)
+        var admissions = 0
+        val manager = manager(
+            stores = listOf(store),
+            activeKind = { EnvironmentKind.PROOT_DEBIAN },
+            queryAdmission = { _, action ->
+                admissions++
+                action()
+            },
+        )
+
+        manager.query(
+            EnvironmentKind.PROOT_DEBIAN,
+            PackageStoreQuery.Updates(refreshIndex = false),
+        ).getOrThrow()
+        assertEquals(0, admissions)
+
+        manager.query(
+            EnvironmentKind.PROOT_DEBIAN,
+            PackageStoreQuery.Updates(refreshIndex = true),
+        ).getOrThrow()
+        assertEquals(1, admissions)
+    }
+
+    @Test
+    fun busyIndexRefreshReturnsTypedOperationInProgress() {
+        val store = FakeStore(EnvironmentKind.PROOT_DEBIAN)
+        val manager = manager(
+            stores = listOf(store),
+            activeKind = { EnvironmentKind.PROOT_DEBIAN },
+            queryAdmission = { _, _ -> throw EnvironmentSelectionBusyException() },
+        )
+
+        val error = manager.query(
+            EnvironmentKind.PROOT_DEBIAN,
+            PackageStoreQuery.Updates(refreshIndex = true),
+        ).exceptionOrNull() as PackageStoreException
+
+        assertEquals("OPERATION_IN_PROGRESS", error.code)
+        assertEquals(0, store.queryCalls)
+    }
+
     private fun manager(
         stores: List<EnvironmentPackageStore>,
         activeKind: () -> EnvironmentKind,
+        queryAdmission: (
+            (EnvironmentKind, () -> PackageStoreQueryResult) -> PackageStoreQueryResult
+        )? = null,
     ) = PackageStoreManager(
         adapters = stores,
         activeKind = activeKind,
         operations = PackageOperationCoordinator(),
+        queryAdmission = queryAdmission,
     )
 }
 

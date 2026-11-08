@@ -93,6 +93,15 @@ class DisplaySourceMergeTest {
                     isDefault = false,
                     settingsKey = productKey,
                 ),
+            ),
+        )
+        val repository = DisplayRepository(source)
+        repository.start {}
+        val soleMonitor = repository.snapshot().single()
+
+        source.replace(
+            listOf(
+                source.snapshot().single(),
                 DisplayCandidate(
                     id = 6,
                     name = "RTK FHD",
@@ -101,18 +110,39 @@ class DisplaySourceMergeTest {
                 ),
             ),
         )
-        val repository = DisplayRepository(source)
-        repository.start {}
 
         val firstSnapshot = repository.snapshot().associateBy(DesktopDisplay::id)
+        assertEquals(soleMonitor.settingsKey, firstSnapshot.getValue(5).settingsKey)
         assertNotEquals(
             firstSnapshot.getValue(5).settingsKey,
             firstSnapshot.getValue(6).settingsKey,
         )
 
-        source.replace(listOf(source.snapshot().first()))
+        source.replace(listOf(source.snapshot().last()))
         val remaining = repository.snapshot().single()
-        assertEquals(firstSnapshot.getValue(5).settingsKey, remaining.settingsKey)
+        assertEquals(firstSnapshot.getValue(6).settingsKey, remaining.settingsKey)
+    }
+
+    @Test
+    fun monitorWithoutProductEvidenceIgnoresResolutionChanges() {
+        val firstMode = stableDisplaySettingsKey(
+            isDefault = false,
+            name = "HDMI Screen",
+            manufacturerPnpId = null,
+            productId = null,
+            width = 2160,
+            height = 1440,
+        )
+        val secondMode = stableDisplaySettingsKey(
+            isDefault = false,
+            name = "HDMI Screen",
+            manufacturerPnpId = null,
+            productId = null,
+            width = 1920,
+            height = 1080,
+        )
+
+        assertEquals(firstMode, secondMode)
     }
 
     @Test

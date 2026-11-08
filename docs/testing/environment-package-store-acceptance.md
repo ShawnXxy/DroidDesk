@@ -10,17 +10,18 @@ with the same current review APK SHA-256.
 | Field | Result |
 |---|---|
 | Source branch | `shawnxxy-environment-package-store` |
-| Source commit | `7dd49396561d8d28462e1717db51e841eec76e8b` plus the uncommitted second-review working tree |
+| Source commit | `8602fda6a701c556253e704d8b405b48a1f3553e` plus the uncommitted third-review working tree |
 | Working tree | Dirty by design; no checkpoint commit exists |
 | APK path | `app/build/acceptance/DroidDesk-package-store-acceptance.apk` |
 | Package ID | `com.orailnoor.droiddesk.monitoracceptance` |
 | Version | `1.3.1-monitor-acceptance` (`6`) |
 | ABI | `arm64-v8a` |
-| Current review APK SHA-256 | `376efbbde766ebfeb52a9d7b04088bf11916c910066e92b854658cc502f6e7c9` |
+| Current review APK SHA-256 | `e038d55537fdd90dec12a91796a80609d562e7d9f0828618e4662dc116bd11e8` |
+| Second review-fix APK SHA-256 | `376efbbde766ebfeb52a9d7b04088bf11916c910066e92b854658cc502f6e7c9` |
 | First review-fix APK SHA-256 | `eb5030a19e9df867a9f918fdcff753d6f8c8cf197043a26d3ece8e6c23ad9ad9` |
 | Full transaction baseline APK SHA-256 | `a60f85beb964d2573735dcbb7da08d1f219ab61d90ed809fc7ce2575aedca714` |
 | Signer certificate SHA-256 | `91e55ef8c4b136268e59c7b79fb42d66604e762f1bb2ff11a2a750d44f4e9672` |
-| Current review build time | 2026-11-08 11:16 +08:00 |
+| Current review build time | 2026-11-08 12:02 +08:00 |
 
 ## Device availability
 
@@ -91,6 +92,21 @@ ready for physical confirmation.
 | Android 37 route refresh | External renderers register an input-device listener only on API 37+, recompute routing on add/remove/change, and unregister during renderer teardown |
 | Operation messaging | Install, remove, single upgrade, upgrade-all, and cache cleanup use operation-specific running, completion, and help text |
 | Multiline architecture guard | Direct runtime calls with whitespace or newlines around `.` are detected |
+| Automated suites | 64 Flutter tests, the full Android unit suite, architecture guards, and the ARM64 acceptance build passed |
+
+### Third review delta
+
+The current hash revalidated both external renderers and the affected runtime
+paths. R2/TNT and Nubia HDMI started successfully with the same APK, and both
+sessions completed final Stop cleanup without package workers or services.
+
+| Follow-up fix | Verification |
+|---|---|
+| Duplicate monitor route preservation | The first monitor keeps its existing product key when an identical monitor appears; additional simultaneous connections receive connection-scoped keys and retain them after the first monitor disconnects |
+| Background relay relaunch | With MainActivity foreground and the existing relay backgrounded, reapplying the active display settings brought the same singleTask relay to the foreground and restored pointer capture |
+| Index-refresh admission | Refreshing Updates queries use the same environment admission as mutations; read-only queries remain available and busy transitions return typed `OPERATION_IN_PROGRESS` |
+| Process-group cancellation | Package commands launch through `setsid`; a Nubia VLC install cancelled with outcome `cancelled`, left no apt/dpkg/timeout/setsid worker, and a retry succeeded |
+| Resolution-stable fallback identity | Displays without product information use name-based identity; mutable mode dimensions no longer invalidate saved settings |
 | Automated suites | 64 Flutter tests, the full Android unit suite, architecture guards, and the ARM64 acceptance build passed |
 
 ## Operation evidence
@@ -197,7 +213,7 @@ cleanup used as acceptance evidence.
 
 - Current review APK acceptance status: **Passed**
 - Accepted APK SHA-256:
-  `376efbbde766ebfeb52a9d7b04088bf11916c910066e92b854658cc502f6e7c9`
+  `e038d55537fdd90dec12a91796a80609d562e7d9f0828618e4662dc116bd11e8`
 - Blocking failures: **None**
 - Remaining limitation: Android 16 and older do not expose public input-device
   display association. Automatic mode therefore uses desktop-mode evidence and

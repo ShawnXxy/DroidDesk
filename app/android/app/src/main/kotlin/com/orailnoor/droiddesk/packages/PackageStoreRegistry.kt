@@ -40,6 +40,7 @@ internal object ProcessPackageStoreRegistry {
             activeKind = environmentManager::activeKind,
             operations = PackageOperationCoordinator(),
             operationAdmission = environmentManager::withActivePackageTarget,
+            queryAdmission = environmentManager::withActivePackageTarget,
         )
     }
 }

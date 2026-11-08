@@ -16,6 +16,9 @@ internal class PackageStoreManager(
     private val operationAdmission: (
         (EnvironmentKind, () -> PackageOperationResult) -> PackageOperationResult
     )? = null,
+    private val queryAdmission: (
+        (EnvironmentKind, () -> PackageStoreQueryResult) -> PackageStoreQueryResult
+    )? = null,
 ) {
     private val adaptersByKind = adapters.associateBy(EnvironmentPackageStore::kind)
 
@@ -26,6 +29,34 @@ internal class PackageStoreManager(
     }
 
     fun query(
+        expectedKind: EnvironmentKind,
+        request: PackageStoreQuery,
+    ): Result<PackageStoreQueryResult> = try {
+        if (request is PackageStoreQuery.Updates && request.refreshIndex) {
+            queryAdmission?.invoke(expectedKind) {
+                queryForCurrentTarget(expectedKind, request).getOrThrow()
+            }?.let(Result.Companion::success)
+                ?: queryForCurrentTarget(expectedKind, request)
+        } else {
+            queryForCurrentTarget(expectedKind, request)
+        }
+    } catch (error: EnvironmentTargetChangedException) {
+        Result.failure(
+            PackageStoreException(
+                code = "TARGET_CHANGED",
+                message = "Package store target changed to ${error.currentKind.wireValue}",
+            ),
+        )
+    } catch (_: EnvironmentSelectionBusyException) {
+        Result.failure(
+            PackageStoreException(
+                code = "OPERATION_IN_PROGRESS",
+                message = "A Linux environment transition or package operation is already running",
+            ),
+        )
+    }
+
+    private fun queryForCurrentTarget(
         expectedKind: EnvironmentKind,
         request: PackageStoreQuery,
     ): Result<PackageStoreQueryResult> {

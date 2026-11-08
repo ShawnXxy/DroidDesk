@@ -25,15 +25,28 @@ internal fun forwardRelayMotion(
     return forward()
 }
 
+internal fun shouldLaunchInputRelay(
+    hasActivity: Boolean,
+    isFinishing: Boolean,
+    isDestroyed: Boolean,
+    hasWindowFocus: Boolean,
+): Boolean = !hasActivity || isFinishing || isDestroyed || !hasWindowFocus
+
 class ExternalInputRelayActivity : Activity() {
     companion object {
         private var current = WeakReference<ExternalInputRelayActivity>(null)
 
         fun open(context: Context) {
             val activity = current.get()
-            if (activity != null && !activity.isFinishing && !activity.isDestroyed) return
+            if (!shouldLaunchInputRelay(
+                    hasActivity = activity != null,
+                    isFinishing = activity?.isFinishing == true,
+                    isDestroyed = activity?.isDestroyed == true,
+                    hasWindowFocus = activity?.hasWindowFocus() == true,
+                )
+            ) return
             val intent = Intent(context, ExternalInputRelayActivity::class.java).apply {
-                flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_MULTIPLE_TASK
+                flags = Intent.FLAG_ACTIVITY_NEW_TASK
             }
             val options = ActivityOptions.makeBasic().apply {
                 launchDisplayId = Display.DEFAULT_DISPLAY

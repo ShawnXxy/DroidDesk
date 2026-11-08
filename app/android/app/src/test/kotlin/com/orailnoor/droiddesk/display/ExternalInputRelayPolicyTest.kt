@@ -2,11 +2,40 @@ package com.orailnoor.droiddesk.display
 
 import com.orailnoor.droiddesk.view.forwardRelayMotion
 import org.junit.Assert.assertEquals
+import com.orailnoor.droiddesk.view.shouldLaunchInputRelay
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class ExternalInputRelayPolicyTest {
+    @Test
+    fun backgroundRelayIsRelaunchedToRecoverFocusAndCapture() {
+        assertFalse(
+            shouldLaunchInputRelay(
+                hasActivity = true,
+                isFinishing = false,
+                isDestroyed = false,
+                hasWindowFocus = true,
+            ),
+        )
+        assertTrue(
+            shouldLaunchInputRelay(
+                hasActivity = true,
+                isFinishing = false,
+                isDestroyed = false,
+                hasWindowFocus = false,
+            ),
+        )
+        assertTrue(
+            shouldLaunchInputRelay(
+                hasActivity = false,
+                isFinishing = false,
+                isDestroyed = false,
+                hasWindowFocus = false,
+            ),
+        )
+    }
+
     @Test
     fun genericExternalWithoutAssociationEvidenceUsesThePhoneRelay() {
         assertTrue(

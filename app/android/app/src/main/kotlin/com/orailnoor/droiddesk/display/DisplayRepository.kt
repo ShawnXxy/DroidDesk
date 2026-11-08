@@ -66,20 +66,17 @@ internal fun stableDisplaySettingsKey(
     name: String,
     manufacturerPnpId: String?,
     productId: String?,
+    @Suppress("UNUSED_PARAMETER")
     width: Int,
+    @Suppress("UNUSED_PARAMETER")
     height: Int,
 ): String {
     if (isDefault) return "default"
-    val productParts = listOf(
+    val parts = listOf(
         manufacturerPnpId.orEmpty(),
         productId.orEmpty(),
         name,
     )
-    val parts = if (!manufacturerPnpId.isNullOrBlank() || !productId.isNullOrBlank()) {
-        productParts
-    } else {
-        productParts + listOf(width.toString(), height.toString())
-    }
     return "external:" + parts.joinToString("|") { "${it.length}:$it" }
 }
 
@@ -88,6 +85,7 @@ class DisplayRepository(private val source: DesktopDisplaySource) {
 
     private val keys = mutableMapOf<Int, String>()
     private val ambiguousSettingsKeys = mutableSetOf<String>()
+    private val primaryConnectionBySettingsKey = mutableMapOf<String, String>()
     private var listener: ((List<DesktopDisplay>) -> Unit)? = null
     private var last = emptyList<DesktopDisplay>()
     private var started = false
@@ -99,17 +97,29 @@ class DisplayRepository(private val source: DesktopDisplaySource) {
         val visible = candidates.filter {
             it.isValid && !it.isPrivate && (it.isDefault || it.isOn)
         }
+        val connectionKeys = visible.associate { candidate ->
+            candidate.id to keys.getOrPut(candidate.id) { UUID.randomUUID().toString() }
+        }
+        visible.forEach { candidate ->
+            primaryConnectionBySettingsKey.putIfAbsent(
+                candidate.settingsKey,
+                connectionKeys.getValue(candidate.id),
+            )
+        }
         visible.groupingBy(DisplayCandidate::settingsKey).eachCount()
             .filterValues { it > 1 }
             .keys
             .let(ambiguousSettingsKeys::addAll)
         return visible.map {
             val eligible = it.isDefault || it.allowed
-            val connectionKey = keys.getOrPut(it.id) { UUID.randomUUID().toString() }
+            val connectionKey = connectionKeys.getValue(it.id)
             // Android exposes product identity but no public stable connector address. Keep the
-            // product key for a sole monitor; simultaneous identical monitors become
-            // connection-scoped so their settings cannot overwrite each other.
-            val settingsKey = if (it.settingsKey in ambiguousSettingsKeys) {
+            // first product key stable; additional simultaneous identical monitors become
+            // connection-scoped so their settings cannot overwrite the first monitor.
+            val settingsKey = if (
+                it.settingsKey in ambiguousSettingsKeys &&
+                primaryConnectionBySettingsKey[it.settingsKey] != connectionKey
+            ) {
                 "${it.settingsKey}|connection:$connectionKey"
             } else {
                 it.settingsKey
@@ -146,6 +156,7 @@ class DisplayRepository(private val source: DesktopDisplaySource) {
         listener = null
         keys.clear()
         ambiguousSettingsKeys.clear()
+        primaryConnectionBySettingsKey.clear()
         last = emptyList()
     }
 }

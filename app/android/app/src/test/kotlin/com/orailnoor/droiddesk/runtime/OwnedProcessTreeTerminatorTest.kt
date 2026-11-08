@@ -80,4 +80,30 @@ class OwnedProcessTreeTerminatorTest {
 
         assertEquals(listOf(10 to 15), signals)
     }
+
+    @Test
+    fun terminatesGroupChildSpawnedAfterTheInitialSnapshot() {
+        val identities = mutableMapOf(10 to "root-start", 11 to "late-child")
+        val signals = mutableListOf<Pair<Int, Int>>()
+        var groupScans = 0
+        var elapsed = 0L
+        val terminator = OwnedProcessTreeTerminator(
+            descendantsOf = { emptyList() },
+            membersOfGroup = {
+                groupScans++
+                if (groupScans == 1) listOf(10) else listOf(11)
+            },
+            identityOf = identities::get,
+            signal = { pid, signal ->
+                signals += pid to signal
+                identities.remove(pid)
+            },
+            elapsedRealtime = { elapsed },
+            sleep = { elapsed += it },
+        )
+
+        terminator.terminate(rootPid = 10, gracePeriodMs = 100)
+
+        assertEquals(listOf(10 to 15, 11 to 15), signals)
+    }
 }

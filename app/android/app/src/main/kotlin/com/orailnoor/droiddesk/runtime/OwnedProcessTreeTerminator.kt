@@ -6,23 +6,39 @@ internal class OwnedProcessTreeTerminator(
     private val signal: (Int, Int) -> Unit,
     private val elapsedRealtime: () -> Long,
     private val sleep: (Long) -> Unit,
+    private val membersOfGroup: (Int) -> List<Int> = { emptyList() },
 ) {
     fun terminate(rootPid: Int, gracePeriodMs: Long) {
-        val owned = (descendantsOf(rootPid).asReversed() + rootPid)
-            .distinct()
-            .mapNotNull { pid ->
-                identityOf(pid)?.let { identity -> OwnedProcess(pid, identity) }
-            }
-        owned.forEach { process ->
+        val owned = linkedMapOf<Int, OwnedProcess>()
+        fun captureNewProcesses(): List<OwnedProcess> {
+            return (
+                descendantsOf(rootPid).asReversed() +
+                    membersOfGroup(rootPid).asReversed() +
+                    rootPid
+                )
+                .distinct()
+                .mapNotNull { pid ->
+                    if (owned.containsKey(pid)) return@mapNotNull null
+                    identityOf(pid)?.let { identity -> OwnedProcess(pid, identity) }
+                }
+                .onEach { process -> owned[process.pid] = process }
+        }
+        captureNewProcesses().forEach { process ->
             if (isAlive(process)) signal(process.pid, SIGTERM)
         }
 
         val deadline = elapsedRealtime() + gracePeriodMs.coerceAtLeast(0)
-        while (owned.any(::isAlive) && elapsedRealtime() < deadline) {
+        while (elapsedRealtime() < deadline) {
+            val discovered = captureNewProcesses()
+            discovered.forEach { process ->
+                if (isAlive(process)) signal(process.pid, SIGTERM)
+            }
+            if (owned.values.none(::isAlive) && discovered.isEmpty()) break
             sleep(POLL_INTERVAL_MS)
         }
 
-        owned.forEach { process ->
+        captureNewProcesses()
+        owned.values.forEach { process ->
             if (isAlive(process)) signal(process.pid, SIGKILL)
         }
     }
