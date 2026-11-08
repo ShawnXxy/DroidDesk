@@ -221,4 +221,27 @@ class LinuxRuntimeAudioTest {
         assertTrue(failure.message.orEmpty().contains(libraryPath))
         assertEquals(cleanupFailure, failure.cause)
     }
+
+    @Test
+    fun tcpModuleLoadingIsBounded() {
+        var renderedCommand = ""
+
+        val result = runHostAudioCommand(
+            libraryPath = "/data/user/0/com.example/files/usr/lib",
+            operation = "load TCP module and verify server",
+            body = hostAudioTcpSetupBody(
+                port = 4713,
+                cookiePath = "/data/user/0/com.example/files/home/.config/pulse/cookie",
+                guestServer = "tcp:127.0.0.1:4713",
+            ),
+            execute = {
+                renderedCommand = it
+                ""
+            },
+        )
+
+        assertTrue(result.isSuccess)
+        assertTrue(renderedCommand.contains("limit 10 pactl load-module module-native-protocol-tcp"))
+        assertTrue(renderedCommand.contains("limit 2 pactl info"))
+    }
 }

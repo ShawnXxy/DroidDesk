@@ -22,6 +22,15 @@ internal fun pulseAudioTcpPort(packageName: String): Int {
     return 4714 + bucket.toInt()
 }
 
+internal fun hostAudioTcpSetupBody(
+    port: Int,
+    cookiePath: String,
+    guestServer: String,
+): String =
+    "limit 10 pactl load-module module-native-protocol-tcp " +
+        "listen=127.0.0.1 port=$port auth-cookie='$cookiePath'\n" +
+        "PULSE_SERVER='$guestServer' PULSE_COOKIE='$cookiePath' limit 2 pactl info"
+
 internal fun hostPulseAudioLibraryPath(
     sdkInt: Int,
     prefixLibraryPath: String,
@@ -772,15 +781,11 @@ class LinuxRuntime(context: Context) {
         audioCommand(
             libraryPath = audioLibraryPath,
             operation = "load TCP module and verify server",
-            body = """
-            pactl load-module module-native-protocol-tcp \
-                listen=127.0.0.1 \
-                port=$hostPulseAudioTcpPort \
-                auth-cookie='${File(homeDir, ".config/pulse/cookie").absolutePath}'
-            PULSE_SERVER='$guestPulseServer' \
-                PULSE_COOKIE='${File(homeDir, ".config/pulse/cookie").absolutePath}' \
-                limit 2 pactl info
-            """.trimIndent(),
+            body = hostAudioTcpSetupBody(
+                port = hostPulseAudioTcpPort,
+                cookiePath = File(homeDir, ".config/pulse/cookie").absolutePath,
+                guestServer = guestPulseServer,
+            ),
         ).getOrThrow()
     }
 
