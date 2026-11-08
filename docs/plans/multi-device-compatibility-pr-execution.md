@@ -133,8 +133,8 @@ PR bodies contain:
 | 7 | P16 | Serial `DesktopActivity` integration |
 | 8 | P17 | Serial native settings integration |
 | 9 | P18, P19 | Flutter settings and readiness integration use disjoint files |
-| 10 | P20 | Serial native diagnostics integration |
-| 11 | P21 -> P22 | Strictly serial final UI and guard work |
+| 10 | P20 | Forward-compatible Flutter diagnostics |
+| 11 | P21 -> P22 | Strictly serial native diagnostics integration and guard work |
 
 ---
 
@@ -563,29 +563,9 @@ PR bodies contain:
 
 ---
 
-### Task P20: Publish native compatibility diagnostics and placement override
+### Task P20: Make Flutter compatibility diagnostics forward-compatible
 
-**Dependencies:** P03, P04, P05, P10, P17, P19.
-
-**Files:**
-- Modify: `app/android/app/src/main/kotlin/com/orailnoor/droiddesk/display/DesktopDisplayCoordinator.kt`
-- Modify: `app/android/app/src/main/kotlin/com/orailnoor/droiddesk/MainActivity.kt`
-- Create or modify: native schema-v2/placement-override tests
-
-**Interfaces:**
-- Snapshot schema 2 exposes placement selection, override, presentation class, stable display key, input evidence/route/capture ownership, refresh request, geometry, profile, and runtime capability evidence.
-- `setDesktopPlacementOverride` rejects changes while Linux is running, persists while stopped, reselects the adapter, and publishes the new state.
-
-- [ ] Add failing complete-payload, nullable-field, state-invariant, and stopped-only override tests.
-- [ ] Implement serialization from existing decisions without recomputing policy.
-- [ ] Run coordinator, MethodChannel, placement, and full Android tests.
-- [ ] Follow the Common PR Lifecycle and merge P20.
-
----
-
-### Task P21: Add Flutter compatibility diagnostics and placement override
-
-**Dependencies:** P18, P20.
+**Dependencies:** P03, P04, P05, P10, P17, P18, P19.
 
 **Files:**
 - Modify: `app/lib/models/desktop_display.dart`
@@ -596,11 +576,35 @@ PR bodies contain:
 - Create: `app/test/screens/display_compatibility_diagnostics_test.dart`
 
 **Interfaces:**
-- Adds typed schema-2 diagnostics and the Automatic/Movable/Display-local placement preference control.
+- Flutter accepts native snapshot schema 1 and schema 2.
+- Schema-2-only diagnostics are optional; missing fields mean native support is unavailable.
+- Compatibility details and the Automatic/Movable/Display-local controls remain dormant for schema 1 or missing diagnostics, and Flutter does not invoke an unsupported placement-override method.
+- When schema 2 is present, typed diagnostics, warnings, and controls are ready to activate without another Flutter contract change.
 
-- [ ] Add failing payload, enum, invariant, widget, warning, and running-session-disabled tests.
-- [ ] Implement typed models, state operation, and read-only compatibility details.
+- [ ] Add failing schema-1, schema-2, missing/nullable diagnostic, enum, invariant, widget, warning, dormant-control, and no-unsupported-call tests.
+- [ ] Implement backward-compatible models, guarded state/platform operations, and read-only compatibility details.
 - [ ] Run focused and full Flutter tests.
+- [ ] Follow the Common PR Lifecycle and merge P20.
+
+---
+
+### Task P21: Publish native compatibility diagnostics and placement override
+
+**Dependencies:** P20.
+
+**Files:**
+- Modify: `app/android/app/src/main/kotlin/com/orailnoor/droiddesk/display/DesktopDisplayCoordinator.kt`
+- Modify: `app/android/app/src/main/kotlin/com/orailnoor/droiddesk/MainActivity.kt`
+- Create or modify: native schema-v2/placement-override tests
+
+**Interfaces:**
+- Snapshot schema 2 exposes placement selection, override, presentation class, stable display key, input evidence/route/capture ownership, refresh request, geometry, profile, and runtime capability evidence.
+- `setDesktopPlacementOverride` rejects changes while Linux is running, persists while stopped, reselects the adapter, and publishes the new state.
+- Publishing schema 2 activates the forward-compatible Flutter diagnostics and placement controls merged in P20.
+
+- [ ] Add failing complete-payload, nullable-field, state-invariant, stopped-only override, and schema-version tests.
+- [ ] Implement serialization from existing decisions without recomputing policy and add the native override handler.
+- [ ] Run coordinator, MethodChannel, placement, full Android, and focused Flutter compatibility tests.
 - [ ] Follow the Common PR Lifecycle and merge P21.
 
 ---

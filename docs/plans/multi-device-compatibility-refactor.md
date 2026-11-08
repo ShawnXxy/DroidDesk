@@ -247,9 +247,9 @@ Run the Step 3 command.
 
 Expected: all `PresentationEvidenceTest` tests pass.
 
-- [ ] **Step 6: Prepare the uncommitted review checkpoint**
+- [ ] **Step 6: Complete this milestone through P01**
 
-Run `git diff --check`, record the focused test result, and leave the changes uncommitted for the final shared-APK device gate.
+Run `git diff --check` and record the focused test result. Complete this milestone through P01 under the tracked micro-PR lifecycle; independent review, commit, push, Quality/Copilot review, and merge happen within that PR unit.
 
 ---
 
@@ -368,9 +368,9 @@ For an inactive display, `presentationContext` uses `createDisplayContext(displa
 
 Expected: all selected tests pass; production behavior is unchanged.
 
-- [ ] **Step 6: Prepare the uncommitted review checkpoint**
+- [ ] **Step 6: Complete this milestone through P05-P06**
 
-Run `git diff --check`, record selector plus existing display-source tests, and keep the diff uncommitted.
+Run `git diff --check` and record selector plus existing display-source tests. Complete this milestone through P05-P06 under the tracked micro-PR lifecycle, with each PR unit independently reviewed, committed, pushed, reviewed in GitHub, and merged.
 
 ---
 
@@ -524,9 +524,9 @@ rg -n 'Build\.DEVICE|device == "darwin"|displayId == 100003|isDisplayLocal|displ
 
 Expected: OEM identity appears only in `DeviceQuirkCatalog`; no caller-owned display-local branch remains.
 
-- [ ] **Step 9: Prepare the uncommitted review checkpoint**
+- [ ] **Step 9: Complete this milestone through P07-P11**
 
-Run `git diff --check`, record the complete display and relay-policy suite result, and keep the placement migration uncommitted.
+Run `git diff --check` and record the complete display and relay-policy suite result. Complete this milestone through P07-P11 under the tracked micro-PR lifecycle, keeping every hotspot integration PR strictly serial.
 
 ---
 
@@ -594,9 +594,9 @@ Keep PRoot as the only current caller. `DesktopActivity` converts Android `Displ
 
 Expected: all tests pass.
 
-- [ ] **Step 5: Prepare the uncommitted review checkpoint**
+- [ ] **Step 5: Complete this milestone through P12**
 
-Run `git diff --check`, record refresh-policy and full Android test results, and keep the diff uncommitted.
+Run `git diff --check` and record refresh-policy plus full Android test results. Complete this milestone through P12 under the tracked micro-PR lifecycle.
 
 ---
 
@@ -710,9 +710,9 @@ Replace hard-coded `-100` wheel multipliers with the policy's horizontal and ver
 
 Expected: sparse IDs pass and existing Termux:X11 input behavior remains covered.
 
-- [ ] **Step 8: Prepare the uncommitted review checkpoint**
+- [ ] **Step 8: Complete this milestone through P02, P13, and P14**
 
-Run `git diff --check`, record sparse-pointer, relay-policy, routing, and full Android test results, and keep the diff uncommitted.
+Run `git diff --check` and record sparse-pointer, relay-policy, routing, and full Android test results. Complete this milestone through P02, P13, and P14 under the tracked micro-PR lifecycle, keeping P14 serialized with every other hotspot integration PR.
 
 ---
 
@@ -829,9 +829,9 @@ Build `PresentationContext` from the measured content bounds and evidence probe.
 
 Expected: all tests pass with no direct `smallestScreenWidthDp` classification in `DesktopActivity`.
 
-- [ ] **Step 7: Prepare the uncommitted review checkpoint**
+- [ ] **Step 7: Complete this milestone through P15-P16**
 
-Run `git diff --check`, record presentation-policy and geometry results, and keep the diff uncommitted.
+Run `git diff --check` and record presentation-policy plus geometry results. Complete this milestone through P15-P16 under the tracked micro-PR lifecycle.
 
 ---
 
@@ -956,9 +956,9 @@ flutter test
 Pop-Location
 ```
 
-- [ ] **Step 9: Prepare the uncommitted review checkpoint**
+- [ ] **Step 9: Complete this milestone through P17-P18**
 
-Run `git diff --check`, record display-source, settings migration, and Flutter results, and keep the diff uncommitted.
+Run `git diff --check` and record display-source, settings migration, and Flutter results. Complete this milestone through P17-P18 under the tracked micro-PR lifecycle.
 
 ---
 
@@ -1034,9 +1034,9 @@ Replace the `postDelayed(..., 250)` startup path with `onReady`.
 
 Expected: all pass and `rg -n '\}, 250\)' DesktopActivity.kt` returns no match.
 
-- [ ] **Step 6: Prepare the uncommitted review checkpoint**
+- [ ] **Step 6: Complete this milestone through P19**
 
-Run `git diff --check`, record readiness, session-transfer, display, and relay tests, and keep the diff uncommitted.
+Run `git diff --check` and record readiness, session-transfer, display, and relay tests. Complete this milestone through P19 under the tracked micro-PR lifecycle after P17 merges.
 
 ---
 
@@ -1140,13 +1140,13 @@ Launch all probes concurrently. Track each future's start deadline independently
 & .\app\android\gradlew.bat -p .\app\android testDebugUnitTest --no-daemon --console=plain
 ```
 
-- [ ] **Step 7: Prepare the uncommitted review checkpoint**
+- [ ] **Step 7: Complete this milestone through P03-P04**
 
-Run `git diff --check`, record host-audio, PulseAudio fallback, runtime-probe, and full Android results, and keep the diff uncommitted.
+Run `git diff --check` and record host-audio, PulseAudio fallback, runtime-probe, and full Android results. Complete this milestone through P03-P04 under the tracked micro-PR lifecycle.
 
 ---
 
-### Task 10: Publish compatibility diagnostics through the native and Flutter state
+### Task 10: Roll out compatibility diagnostics through forward-compatible Flutter and native state
 
 **Files:**
 - Modify: `app/android/app/src/main/kotlin/com/orailnoor/droiddesk/display/DesktopDisplayCoordinator.kt`
@@ -1160,6 +1160,8 @@ Run `git diff --check`, record host-audio, PulseAudio fallback, runtime-probe, a
 
 **Interfaces:**
 - Consumes: placement selection, presentation plan, input decision, refresh request, and runtime capability evidence.
+- Flutter accepts native snapshot schema 1 and schema 2. Schema-2-only diagnostics are optional; missing fields mean native support is unavailable.
+- On schema 1 or a payload without compatibility diagnostics, the compatibility details and placement-override controls remain dormant and no unsupported platform method is invoked.
 - Produces native snapshot schema version 2 with:
 
 ```text
@@ -1185,7 +1187,7 @@ runtimeCapabilities
 
 - `inputCapabilities` is a map containing `touchEvidence`, `pointerAssociation`, `hasMouse`, `hasTouchpad`, `hasKeyboard`, and `hasStylus`.
 - `runtimeCapabilities` reuses the existing `RuntimeCapabilities.toMap()` payload rather than creating a second evidence vocabulary.
-- Flutter produces typed equivalents, a read-only `Compatibility details` section, and a placement preference control.
+- Flutter produces optional typed equivalents, a read-only `Compatibility details` section, and a placement preference control that activates only when native schema 2 is present.
 - The placement preference control has `Automatic`, `Move existing desktop view`, and `Restart Linux on current display`. It invokes:
 
 ```dart
@@ -1196,14 +1198,23 @@ static Future<DesktopDisplayState> setDesktopPlacementOverride(
 
 `null` means Automatic.
 
-- [ ] **Step 1: Write failing Dart parsing tests**
+- [ ] **Step 1: Write failing forward-compatibility Dart tests**
 
-Test a complete schema-v2 payload, nullable refresh mode, runtime-capability parsing, unknown enum rejection, and inconsistent placement state rejection.
+Test:
 
-- [ ] **Step 2: Write failing diagnostics widget tests**
+- a schema-1 payload still parses;
+- a complete schema-2 payload parses;
+- missing diagnostics and nullable refresh mode remain valid;
+- runtime-capability parsing;
+- unknown enum rejection when a schema-2 field is present;
+- inconsistent schema-2 placement state rejection.
+
+- [ ] **Step 2: Write failing forward-compatible diagnostics widget tests**
 
 Assert the screen shows:
 
+- no compatibility details or placement-override action for schema 1 or missing native diagnostics;
+- no `setDesktopPlacementOverride` platform call while native support is unavailable;
 - `Movable`, `Display-local restart`, or `Safe default`.
 - Selection source and reason.
 - Presentation class.
@@ -1222,17 +1233,34 @@ flutter test test\models\desktop_display_test.dart test\screens\display_compatib
 Pop-Location
 ```
 
-- [ ] **Step 4: Publish schema-v2 native state**
+- [ ] **Step 4: Implement the forward-compatible Flutter contract**
 
-Build the map from existing selected module outputs; do not recompute policy inside serialization.
-
-- [ ] **Step 5: Implement typed Dart models and UI**
+Parse schema 1 and schema 2 without requiring schema-2-only fields. Keep diagnostics and override controls dormant when native support is absent. Add the typed models, state handling, and guarded platform-bridge operation without assuming the native method already exists.
 
 Remove user-facing text that assumes every display-local environment is TNT. Keep an R2-specific label only when the diagnostic environment is explicitly TNT.
 
-Add the MethodChannel handler and `AppState` operation for changing the override. Reject the operation with `INVALID_ARGUMENT` while a Linux session is running. After saving, run the selector again and call `replacePlacementStrategy`; the next desktop start uses the new adapter.
+- [ ] **Step 5: Run focused and full Flutter tests**
 
-- [ ] **Step 6: Run all Flutter and Android tests**
+```powershell
+Push-Location app
+flutter test test\models\desktop_display_test.dart test\screens\display_compatibility_diagnostics_test.dart
+flutter test
+Pop-Location
+```
+
+Expected: Flutter remains compatible with schema 1 and is ready for schema 2 before native publication.
+
+- [ ] **Step 6: Write failing native schema-2 and override tests**
+
+Add complete-payload, nullable-field, state-invariant, stopped-only override, and schema-version tests.
+
+- [ ] **Step 7: Publish schema-v2 native state and activate the compatible UI**
+
+Build the map from existing selected module outputs; do not recompute policy inside serialization. Add the MethodChannel handler for changing the override. Reject the operation with `INVALID_ARGUMENT` while a Linux session is running. After saving, run the selector again and call `replacePlacementStrategy`; the next desktop start uses the new adapter.
+
+The schema-2 payload activates the already-compatible Flutter diagnostics and placement controls from Step 4.
+
+- [ ] **Step 8: Run all Flutter and Android tests**
 
 ```powershell
 Push-Location app
@@ -1241,9 +1269,9 @@ Pop-Location
 & .\app\android\gradlew.bat -p .\app\android testDebugUnitTest --no-daemon --console=plain
 ```
 
-- [ ] **Step 7: Prepare the uncommitted review checkpoint**
+- [ ] **Step 9: Complete this milestone through P20-P21**
 
-Run `git diff --check`, record schema-v2 parsing and diagnostics widget results, and keep the diff uncommitted.
+Run `git diff --check` and record schema-1/schema-2 Flutter compatibility, native schema-2, diagnostics widget, and override results. Complete this milestone through P20-P21 under the tracked micro-PR lifecycle: P20 merges the forward-compatible Flutter contract before P21 publishes native schema 2 and activates it.
 
 ---
 
