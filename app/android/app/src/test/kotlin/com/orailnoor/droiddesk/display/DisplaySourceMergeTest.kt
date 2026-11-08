@@ -1,9 +1,14 @@
 package com.orailnoor.droiddesk.display
 
+import com.orailnoor.droiddesk.display.capability.AndroidInputDeviceSnapshot
+import com.orailnoor.droiddesk.display.capability.AndroidPresentationDisplaySnapshot
+import com.orailnoor.droiddesk.display.capability.AndroidPresentationEvidencePlatform
+import com.orailnoor.droiddesk.display.capability.AndroidPresentationEvidenceProbe
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class DisplaySourceMergeTest {
@@ -31,8 +36,13 @@ class DisplaySourceMergeTest {
             ),
         )
         val repository = DisplayRepository(source)
+        val probe = AndroidPresentationEvidenceProbe(
+            displayRepository = repository,
+            platform = EmptyAndroidPresentationEvidencePlatform,
+        )
         repository.start {}
-        val first = repository.snapshot().single()
+        val canonicalFirst = repository.snapshot().single()
+        val first = probe.displayIdentity(5)
 
         source.replace(emptyList(), removedId = 5)
         source.replace(
@@ -45,10 +55,42 @@ class DisplaySourceMergeTest {
                 ),
             ),
         )
-        val second = repository.snapshot().single()
+        val canonicalSecond = repository.snapshot().single()
+        val second = probe.displayIdentity(5)
 
+        assertEquals(canonicalFirst.key, first.key)
+        assertEquals(canonicalFirst.settingsKey, first.settingsKey)
+        assertEquals(canonicalSecond.key, second.key)
+        assertEquals(canonicalSecond.settingsKey, second.settingsKey)
         assertNotEquals(first.key, second.key)
         assertEquals(first.settingsKey, second.settingsKey)
+    }
+
+    @Test
+    fun android28SkipsTheDisplayPermissionApi() {
+        var permissionApiCalled = false
+
+        val allowed = activityStartAllowedOnDisplayForSdk(28) {
+            permissionApiCalled = true
+            false
+        }
+
+        assertTrue(allowed)
+        assertFalse(permissionApiCalled)
+    }
+
+    @Test
+    fun displayPermissionFailuresAreDenied() {
+        assertFalse(
+            activityStartAllowedOnDisplayForSdk(29) {
+                throw SecurityException("permission denied")
+            },
+        )
+        assertFalse(
+            activityStartAllowedOnDisplayForSdk(29) {
+                throw IllegalArgumentException("display disconnected")
+            },
+        )
     }
 
     @Test
@@ -215,6 +257,17 @@ class DisplaySourceMergeTest {
     }
 
     private data class FakeDisplay(val id: Int)
+
+    private object EmptyAndroidPresentationEvidencePlatform :
+        AndroidPresentationEvidencePlatform {
+        override val supportsSecondaryActivities: Boolean = true
+
+        override fun isActivityStartAllowedOnDisplay(displayId: Int): Boolean = false
+
+        override fun displaySnapshot(displayId: Int): AndroidPresentationDisplaySnapshot? = null
+
+        override fun inputDevices(): List<AndroidInputDeviceSnapshot> = emptyList()
+    }
 
     private class MutableDisplaySource(
         private var displays: List<DisplayCandidate>,
