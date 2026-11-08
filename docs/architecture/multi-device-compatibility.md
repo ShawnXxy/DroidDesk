@@ -50,7 +50,7 @@ The refactor must turn these variants into explicit capabilities, policies, and 
 - Existing display settings must migrate without silently discarding user choices.
 - User-directed delivery exception for this refactor: implementation is merged incrementally through reviewed PRs into `ref/v1` before physical-device validation. No implementation PR targets `xixia`.
 - After every planned PR is merged into `ref/v1`, stop and notify the user. Do not create a `ref/v1 -> xixia` PR; R2 phone/TNT and NX888J phone/HDMI validation happens next under user coordination.
-- When physical validation starts, use one identical APK for all four paths and keep R2/Nubia wireless ADB enabled through validation and later review.
+- When physical validation starts, use one identical APK for all four paths. Keep R2/Nubia wireless ADB enabled only for the designated validation and review cycle, use paired wireless debugging on a trusted private network, keep both devices off untrusted networks while it is enabled, and disable wireless ADB immediately after the final changes are merged.
 
 ## Non-Goals
 

@@ -34,7 +34,7 @@
 - User-directed exception for this refactor: merge independently reviewed micro-PRs into `ref/v1` before physical-device validation.
 - Never target `xixia` from a task PR and do not create a `ref/v1 -> xixia` PR after the tasks finish.
 - Every commit must be independently reviewed before commit and include `Co-authored-by: Copilot App <223556219+Copilot@users.noreply.github.com>`.
-- When physical validation starts after P22, use one identical APK for R2 phone/TNT and NX888J phone/HDMI and keep wireless ADB enabled through validation and later review.
+- When physical validation starts after P22, use one identical APK for R2 phone/TNT and NX888J phone/HDMI. Keep R2/Nubia wireless ADB enabled only for the designated validation and review cycle, use paired wireless debugging on a trusted private network, keep both devices off untrusted networks while it is enabled, and disable wireless ADB immediately after the final changes are merged.
 
 ## Review Focus
 
