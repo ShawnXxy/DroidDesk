@@ -1,6 +1,7 @@
 package com.orailnoor.droiddesk.display.capability
 
 import android.content.Context
+import android.view.InputDevice
 import com.orailnoor.droiddesk.display.DesktopDisplay
 import com.orailnoor.droiddesk.display.DisplayRepository
 import com.orailnoor.droiddesk.display.PixelSize
@@ -11,6 +12,38 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class AndroidPresentationEvidenceProbeTest {
+    @Test
+    fun keyboardEvidenceRequiresANonVirtualAlphabeticDevice() {
+        assertTrue(
+            isTypingKeyboardDevice(
+                isVirtual = false,
+                supportsKeyboardSource = true,
+                keyboardType = InputDevice.KEYBOARD_TYPE_ALPHABETIC,
+            ),
+        )
+        assertFalse(
+            isTypingKeyboardDevice(
+                isVirtual = true,
+                supportsKeyboardSource = true,
+                keyboardType = InputDevice.KEYBOARD_TYPE_ALPHABETIC,
+            ),
+        )
+        assertFalse(
+            isTypingKeyboardDevice(
+                isVirtual = false,
+                supportsKeyboardSource = true,
+                keyboardType = InputDevice.KEYBOARD_TYPE_NON_ALPHABETIC,
+            ),
+        )
+        assertFalse(
+            isTypingKeyboardDevice(
+                isVirtual = false,
+                supportsKeyboardSource = false,
+                keyboardType = InputDevice.KEYBOARD_TYPE_ALPHABETIC,
+            ),
+        )
+    }
+
     @Test
     fun productionConstructorRequiresTheCanonicalDisplayRepository() {
         val factory: (Context, DisplayRepository) -> AndroidPresentationEvidenceProbe =

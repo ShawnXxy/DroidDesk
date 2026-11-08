@@ -43,6 +43,15 @@ internal interface AndroidPresentationEvidencePlatform {
     fun inputDevices(): List<AndroidInputDeviceSnapshot>
 }
 
+internal fun isTypingKeyboardDevice(
+    isVirtual: Boolean,
+    supportsKeyboardSource: Boolean,
+    keyboardType: Int,
+): Boolean =
+    !isVirtual &&
+        supportsKeyboardSource &&
+        keyboardType == InputDevice.KEYBOARD_TYPE_ALPHABETIC
+
 class AndroidPresentationEvidenceProbe internal constructor(
     private val displayInventory: () -> List<DesktopDisplay>,
     private val platform: AndroidPresentationEvidencePlatform,
@@ -219,7 +228,12 @@ private class AndroidPresentationEvidencePlatformAdapter(
                     hasTouchscreen = device.supportsSource(InputDevice.SOURCE_TOUCHSCREEN),
                     hasMouse = device.supportsSource(InputDevice.SOURCE_MOUSE),
                     hasTouchpad = device.supportsSource(InputDevice.SOURCE_TOUCHPAD),
-                    hasKeyboard = device.supportsSource(InputDevice.SOURCE_KEYBOARD),
+                    hasKeyboard = isTypingKeyboardDevice(
+                        isVirtual = device.isVirtual,
+                        supportsKeyboardSource =
+                            device.supportsSource(InputDevice.SOURCE_KEYBOARD),
+                        keyboardType = device.keyboardType,
+                    ),
                     hasStylus = device.supportsSource(InputDevice.SOURCE_STYLUS),
                     associationKnown = associationKnown,
                     associatedDisplayId = associatedDisplayId,
