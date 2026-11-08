@@ -42,9 +42,7 @@ The refactor must turn these variants into explicit capabilities, policies, and 
 - Preserve merged primary/presentation display discovery and the distinction between transient connection keys and stable `DesktopDisplay.settingsKey` values.
 - Preserve `ExternalInputRoutePreference`, `ExternalInputRelayActivity`, `ExternalDesktopInputBridge`, and automatic generic-external startup until their behavior is moved behind dedicated interfaces.
 - Preserve the existing package-store architecture guard when extending the quality workflow.
-- A task PR may merge only when Quality passes and the latest review authored by `copilot-pull-request-reviewer` is for the current head SHA and explicitly reports `No open issues` or `Approval recommended`; all review threads must also be resolved.
-- `thread.isResolved=true`, a human reply, or Quality alone is insufficient when that latest review body still reports open issues or `Needs a closer look`.
-- If feedback is technically disputed, make a clarifying change and obtain a fresh clean Copilot review on the new head, or pause and escalate to the parent; never merge based solely on manual resolution.
+- Every task PR must satisfy the canonical [Merge Eligibility Gate](../plans/multi-device-compatibility-pr-execution.md#merge-eligibility-gate).
 - Do not add a new third-party runtime dependency.
 - Do not require hardware acceleration.
 - Do not rely on fixed delays for correctness.
