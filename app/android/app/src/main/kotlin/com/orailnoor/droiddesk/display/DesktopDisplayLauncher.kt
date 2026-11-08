@@ -78,21 +78,38 @@ internal fun translateAndroidDesktopLaunchFailure(error: Throwable): DesktopDisp
         else -> throw error
     }
 
-internal fun syntheticDisplayHandoff(
+internal fun acceptedSyntheticDisplayHandoff(
     registry: AcceptedDisplayHandoffRegistry, owner: Any,
     displayId: Int, connectionKey: String,
     currentEvidence: AcceptedDisplayHandoffEvidence?,
     previousEvidence: AcceptedDisplayHandoffEvidence?,
-): AcceptedDisplayHandoffAdmission =
+): AcceptedDisplayHandoffAdmission.Accepted? =
     registry.admit(
         owner = owner,
         displayId = displayId,
         connectionKey = connectionKey,
         evidence = AcceptedDisplayHandoffEvidenceSnapshot(
-            current = currentEvidence,
-            previous = previousEvidence,
+            current = currentEvidence?.takeIf { it.displayId == displayId },
+            previous = previousEvidence?.takeIf { it.displayId == displayId },
         ),
-    )
+    ) as? AcceptedDisplayHandoffAdmission.Accepted
+
+internal fun requireAcceptedSyntheticDisplayHandoff(
+    registry: AcceptedDisplayHandoffRegistry, owner: Any,
+    displayId: Int, connectionKey: String,
+    currentEvidence: AcceptedDisplayHandoffEvidence?,
+    previousEvidence: AcceptedDisplayHandoffEvidence?,
+): AcceptedDisplayHandoffAdmission.Accepted =
+    checkNotNull(
+        acceptedSyntheticDisplayHandoff(
+            registry,
+            owner,
+            displayId,
+            connectionKey,
+            currentEvidence,
+            previousEvidence,
+        ),
+    ) { "Synthetic display handoff requires accepted display evidence" }
 
 internal fun resolveObservedDisplayConnection(
     registry: AcceptedDisplayHandoffRegistry, owner: Any,
@@ -100,24 +117,17 @@ internal fun resolveObservedDisplayConnection(
     evidence: AcceptedDisplayHandoffEvidence,
 ): DisplayConnectionIdentity? {
     if (evidence.displayId != requestedDisplayId) {
-        registry.unbind(owner)
         return registry.resolve(evidence)
     }
-    return when (
-        val admission = syntheticDisplayHandoff(
-            registry = registry,
-            owner = owner,
-            displayId = requestedDisplayId,
-            connectionKey = requestedConnectionKey,
-            currentEvidence = evidence,
-            previousEvidence = null,
+    return (
+        registry.admit(
+            owner,
+            requestedDisplayId,
+            requestedConnectionKey,
+            AcceptedDisplayHandoffEvidenceSnapshot(evidence, null),
         )
-    ) {
-        is AcceptedDisplayHandoffAdmission.Accepted -> admission.connection
-        AcceptedDisplayHandoffAdmission.AwaitingEvidence,
-        AcceptedDisplayHandoffAdmission.Rejected,
-        -> null
-    }
+            as? AcceptedDisplayHandoffAdmission.Accepted
+        )?.connection
 }
 
 class DesktopDisplayLauncher {
@@ -191,7 +201,7 @@ internal class AndroidDesktopDisplayHost(
             ?.connectionEvidence
         if (activity is DesktopActivity) {
             syntheticHandoffRequest(activity)?.let { request ->
-                val admission = syntheticDisplayHandoff(
+                val admission = acceptedSyntheticDisplayHandoff(
                     registry = handoffs,
                     owner = activity,
                     displayId = request.displayId,

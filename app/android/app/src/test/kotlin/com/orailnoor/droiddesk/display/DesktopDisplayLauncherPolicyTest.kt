@@ -106,7 +106,7 @@ class DesktopDisplayLauncherPolicyTest {
         val evidence = evidence(displayId = 30, fallbackIdentity = "external:4:HDMI")
         val connectionKey = handoffs.resolve(evidence).connectionKey
 
-        val first = syntheticDisplayHandoff(
+        val first = requireAcceptedSyntheticDisplayHandoff(
             registry = handoffs,
             owner = Any(),
             displayId = 30,
@@ -114,7 +114,7 @@ class DesktopDisplayLauncherPolicyTest {
             currentEvidence = evidence,
             previousEvidence = null,
         )
-        val second = syntheticDisplayHandoff(
+        val second = requireAcceptedSyntheticDisplayHandoff(
             registry = handoffs,
             owner = Any(),
             displayId = 30,
@@ -136,7 +136,7 @@ class DesktopDisplayLauncherPolicyTest {
 
         assertAcceptedConnection(
             connectionKey,
-            syntheticDisplayHandoff(
+            requireAcceptedSyntheticDisplayHandoff(
                 registry = handoffs,
                 owner = desktopOwner,
                 displayId = 30,
@@ -168,7 +168,7 @@ class DesktopDisplayLauncherPolicyTest {
         val desktopOwner = Any()
         assertAcceptedConnection(
             launchConnectionKey,
-            syntheticDisplayHandoff(
+            requireAcceptedSyntheticDisplayHandoff(
                 registry = handoffs,
                 owner = desktopOwner,
                 displayId = 30,
@@ -189,10 +189,24 @@ class DesktopDisplayLauncherPolicyTest {
         assertEquals(31, observed.displayId)
         assertEquals("external:7:Display", observed.connectionIdentity)
         assertNotEquals(launchConnectionKey, observed.connectionKey)
+        assertAcceptedConnection(
+            launchConnectionKey,
+            requireAcceptedSyntheticDisplayHandoff(
+                registry = handoffs,
+                owner = desktopOwner,
+                displayId = 30,
+                connectionKey = launchConnectionKey,
+                currentEvidence = evidence(
+                    displayId = 31,
+                    fallbackIdentity = "external:7:Display",
+                ),
+                previousEvidence = null,
+            ),
+        )
     }
 
     @Test
-    fun repositoryAbsentPreRCoordinatorValidatesBindsClaimsAndResumes() {
+    fun repositoryAbsentPreRCoordinatorRequiresAcceptedRebindAndDelayedConfirmation() {
         val host = RepositoryAbsentHandoffHost()
         val coordinator = DesktopDisplayCoordinator(host = host)
         val target = host.currentDisplay()!!
@@ -208,19 +222,52 @@ class DesktopDisplayLauncherPolicyTest {
         ))
         assertAcceptedConnection(
             request.display.key,
-            host.bindDesktopOnCreateBeforeDecorEvidence(request.display.key),
+            host.bindDesktopOnCreateFromPreviousEvidence(request.display.key),
         )
 
         val lease = coordinator.claim(request.display.id) {}
         coordinator.registerActivity(lease, request.requestId) {}
         assertAcceptedConnection(
             request.display.key,
-            host.bindDesktopOnResumeWithDecorEvidence(request.display.key),
+            host.bindDesktopOnResumeWithoutEvidence(request.display.key),
         )
+        assertTrue(host.confirmDelayedDecorEvidence(request.display.key))
         coordinator.onAttached(lease, request.requestId, PixelSize(1920, 1080))
 
         assertTrue(completion?.isSuccess == true)
         assertEquals("attached", coordinator.snapshot()["phase"])
+    }
+
+    @Test
+    fun syntheticBindRejectsAwaitingOrStaleAdmissionBeforeClaim() {
+        val evidence = evidence(displayId = 30, fallbackIdentity = "external:4:HDMI")
+        val awaitingRegistry = AcceptedDisplayHandoffRegistry()
+        val connectionKey = awaitingRegistry.resolve(evidence).connectionKey
+
+        assertThrows(IllegalStateException::class.java) {
+            requireAcceptedSyntheticDisplayHandoff(
+                registry = awaitingRegistry,
+                owner = Any(),
+                displayId = 30,
+                connectionKey = connectionKey,
+                currentEvidence = null,
+                previousEvidence = null,
+            )
+        }
+
+        val staleRegistry = AcceptedDisplayHandoffRegistry()
+        val staleKey = staleRegistry.resolve(evidence).connectionKey
+        staleRegistry.displayRemoved(30)
+        assertThrows(IllegalStateException::class.java) {
+            requireAcceptedSyntheticDisplayHandoff(
+                registry = staleRegistry,
+                owner = Any(),
+                displayId = 30,
+                connectionKey = staleKey,
+                currentEvidence = evidence,
+                previousEvidence = null,
+            )
+        }
     }
 
     @Test
@@ -291,13 +338,13 @@ class DesktopDisplayLauncherPolicyTest {
 
         override fun notifyReturnRequired(error: DesktopDisplayException) = Unit
 
-        fun bindDesktopOnCreateBeforeDecorEvidence(
+        fun bindDesktopOnCreateFromPreviousEvidence(
             connectionKey: String,
-        ): AcceptedDisplayHandoffAdmission {
+        ): AcceptedDisplayHandoffAdmission.Accepted {
             val previousEvidence = displayEvidence
             owner = Any()
             displayEvidence = null
-            return syntheticDisplayHandoff(
+            return requireAcceptedSyntheticDisplayHandoff(
                 registry = handoffs,
                 owner = owner,
                 displayId = displayId,
@@ -307,18 +354,30 @@ class DesktopDisplayLauncherPolicyTest {
             )
         }
 
-        fun bindDesktopOnResumeWithDecorEvidence(
+        fun bindDesktopOnResumeWithoutEvidence(
             connectionKey: String,
-        ): AcceptedDisplayHandoffAdmission {
-            displayEvidence = evidence
-            return syntheticDisplayHandoff(
+        ): AcceptedDisplayHandoffAdmission.Accepted =
+            requireAcceptedSyntheticDisplayHandoff(
                 registry = handoffs,
                 owner = owner,
                 displayId = displayId,
                 connectionKey = connectionKey,
-                currentEvidence = evidence,
+                currentEvidence = null,
                 previousEvidence = null,
             )
+
+        fun confirmDelayedDecorEvidence(
+            connectionKey: String,
+        ): Boolean {
+            displayEvidence = evidence
+            val connection = resolveObservedDisplayConnection(
+                registry = handoffs,
+                owner = owner,
+                requestedDisplayId = displayId,
+                requestedConnectionKey = connectionKey,
+                evidence = evidence,
+            )
+            return connection?.connectionKey == connectionKey
         }
 
         fun replaceDisplayConnection() {
