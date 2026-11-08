@@ -12,7 +12,20 @@
 
 **Re-evaluated baseline:** `origin/xixia` at `e8884c2` on 2026-11-08.
 
-`GitHub Copilot Balance code review` is the repository's automatic review authored by `copilot-pull-request-reviewer`, triggered after each pushed head update, and is complete only when a review exists for the latest head SHA and every actionable thread is resolved or explicitly adjudicated.
+## Merge Eligibility Gate
+
+This section is the canonical merge policy for the tracked architecture, milestone plan, and PR execution plan.
+
+`GitHub Copilot Balance code review` is the repository's automatic review authored by `copilot-pull-request-reviewer`, triggered after each pushed head update.
+
+A task PR is merge-eligible only when all of these conditions hold:
+
+- Quality passes for the current head SHA.
+- The latest review authored by `copilot-pull-request-reviewer` is for the current head SHA and unambiguously indicates that it found no actionable issues. `No open issues` and `Approval recommended` are illustrative examples of clean outcomes, not exact-string requirements.
+- A latest review body that reports open, active, or actionable issues, says `Needs a closer look`, or leaves the outcome ambiguous blocks the merge.
+- Every review thread, including minimized or suppressed comments, is resolved.
+
+`thread.isResolved=true`, a human reply, or Quality alone cannot override an unclean or ambiguous latest review body. If feedback is technically disputed, make a clarifying change and obtain a fresh clean Copilot review on the new head, or pause and escalate to the parent; never merge based solely on manual resolution. Any pushed head update invalidates the prior Quality and Copilot-review eligibility and requires the gate to run again.
 
 ## Global Constraints
 
@@ -26,6 +39,7 @@
 - Each commit must be a minimal usable change and include `Co-authored-by: Copilot App <223556219+Copilot@users.noreply.github.com>`.
 - Push only after the local independent review is clean.
 - After push, create a PR with base `ref/v1`, wait for Quality and GitHub Copilot Balance code review, inspect every review thread including minimized or suppressed comments, and fix actionable findings.
+- Every PR must satisfy the [Merge Eligibility Gate](#merge-eligibility-gate), the canonical merge policy for all three tracked documents.
 - Every review-fix commit also requires an independent pre-commit review, a push, passing checks, and another completed GitHub Copilot review cycle.
 - Merge approved/clean PRs with a merge commit. Do not squash or rebase-merge.
 - If another PR advances `ref/v1`, merge the latest `origin/ref/v1` into the still-open task branch only when GitHub requires an update or reports a conflict. Do not rewrite published history. Re-run local review, checks, and GitHub Copilot review after the update.
@@ -86,9 +100,9 @@ Every PR unit below follows this lifecycle:
 7. Launch an independent code-review agent inside the nested session against the uncommitted diff. This is a user-directed exception to the usual implementer/reviewer separation because the uncommitted worktree is visible only inside that session.
 8. Resolve findings and repeat Step 7 until spec compliance and code quality are clean.
 9. Commit the minimal change with the required trailer, push the branch, and create a PR whose base is explicitly `ref/v1`.
-10. Wait for Quality and GitHub Copilot Balance code review to complete. Read all review threads and suppressed/minimized comments.
-11. For actionable feedback, implement the smallest fix in the same nested session; repeat local tests, independent pre-commit review, commit, push, Quality, and GitHub Copilot Balance review.
-12. When checks pass and no unresolved actionable findings remain, merge with `gh pr merge --merge --delete-branch`.
+10. Evaluate the current PR head against the [Merge Eligibility Gate](#merge-eligibility-gate) and read all review threads, including suppressed/minimized comments.
+11. When the gate identifies actionable or technically disputed feedback, implement the smallest clarifying fix in the same nested session and repeat local tests, independent pre-commit review, commit, push, Quality, and GitHub Copilot Balance review. If no clarifying change is appropriate, pause and escalate to the parent.
+12. Only after the [Merge Eligibility Gate](#merge-eligibility-gate) is fully satisfied, merge with `gh pr merge --merge --delete-branch`.
 13. Fetch `origin/ref/v1`, verify the merge commit, record the PR and merge SHA in the execution ledger, then archive the nested session.
 
 PR titles use:
@@ -152,7 +166,7 @@ PR bodies contain:
 
 - [ ] Copy the current ignored documents without changing their technical content.
 - [ ] Verify all three tracked documents reference baseline `e8884c2`, `ref/v1`, the micro-PR workflow, and the no-PR-to-`xixia` rule.
-- [ ] Run Markdown structural checks and `git diff --check`.
+- [ ] Run Markdown structural checks that inspect only fenced `powershell` or `bash` command blocks. For each line in those blocks that invokes `gradlew` or `gradlew.bat` and contains `testDebugUnitTest`, require the task token `:app:testDebugUnitTest`; ignore prose. Also require all three tracked documents to reference the canonical merge gate, preserve P00-P22 and Task 1-Task 11 numbering plus the P20/P21 order, and run `git diff --check`.
 - [ ] Follow the Common PR Lifecycle and merge P00 into `ref/v1`.
 
 ---
