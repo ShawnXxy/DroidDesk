@@ -73,7 +73,7 @@ class PresentationEvidenceTest {
 
         val replacementMode = DisplayModeEvidence(3, 2560, 1440, 60f)
         val replacement = mutableListOf(replacementMode)
-        val copy = context.copy(
+        val copy = context.copyWithSnapshot(
             currentMode = replacementMode,
             supportedModes = replacement,
         )
@@ -89,6 +89,7 @@ class PresentationEvidenceTest {
         assertEquals(PixelSize(1080, 2340), PresentationFixtures.r2Phone.windowSizePx)
         assertEquals(100003, PresentationFixtures.r2Tnt.displayId)
         assertEquals(PixelSize(1260, 2800), PresentationFixtures.nx888jPhone.windowSizePx)
+        assertEquals("RTK FHD", PresentationFixtures.nx888jHdmi.displayName)
         assertEquals(PixelSize(2160, 1440), PresentationFixtures.nx888jHdmi.windowSizePx)
 
         assertFalse(PresentationFixtures.r2TntPlacement.anotherDisplayLaunchAllowed)

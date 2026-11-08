@@ -91,13 +91,13 @@ data class PresentationContext private constructor(
         require(fontScale.isFinite() && fontScale > 0f) {
             "Presentation font scale must be positive and finite"
         }
-        require(supportedModes.map(DisplayModeEvidence::modeId).distinct().size == supportedModes.size) {
+        val modeIds = HashSet<Int>(supportedModes.size)
+        require(supportedModes.all { modeIds.add(it.modeId) }) {
             "Supported display mode IDs must be unique"
         }
     }
 
-    @Suppress("UNUSED_PARAMETER")
-    fun copy(
+    fun copyWithSnapshot(
         displayId: Int = this.displayId,
         displayName: String = this.displayName,
         displayFlags: Int = this.displayFlags,
@@ -109,7 +109,6 @@ data class PresentationContext private constructor(
         currentMode: DisplayModeEvidence? = this.currentMode,
         supportedModes: List<DisplayModeEvidence> = this.supportedModes,
         input: InputCapabilities = this.input,
-        snapshotCopy: Unit = Unit,
     ) = Companion.invoke(
         displayId = displayId,
         displayName = displayName,

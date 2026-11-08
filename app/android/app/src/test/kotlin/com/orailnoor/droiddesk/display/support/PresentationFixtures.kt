@@ -84,6 +84,7 @@ object PresentationFixtures {
 
     val nx888jHdmi = context(
         displayId = 10,
+        // Android reports this vendor label while the active physical mode is 2160 x 1440.
         displayName = "RTK FHD",
         isDefaultDisplay = false,
         windowSizePx = PixelSize(2160, 1440),
