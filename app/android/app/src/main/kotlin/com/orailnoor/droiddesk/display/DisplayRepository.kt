@@ -80,6 +80,39 @@ internal fun stableDisplaySettingsKey(
     return "external:" + parts.joinToString("|") { "${it.length}:$it" }
 }
 
+internal fun activityStartAllowedOnDisplayForSdk(
+    sdkInt: Int,
+    onFailure: (RuntimeException) -> Unit = {},
+    check: () -> Boolean,
+): Boolean {
+    if (sdkInt < Build.VERSION_CODES.Q) return true
+    return try {
+        check()
+    } catch (error: SecurityException) {
+        onFailure(error)
+        false
+    } catch (error: IllegalArgumentException) {
+        onFailure(error)
+        false
+    }
+}
+
+internal fun isActivityStartAllowedOnDisplay(
+    context: Context,
+    displayId: Int,
+): Boolean = activityStartAllowedOnDisplayForSdk(
+    sdkInt = Build.VERSION.SDK_INT,
+    onFailure = { error ->
+        Log.w("DesktopDisplay", "Display launch permission check failed", error)
+    },
+) {
+    context.getSystemService(ActivityManager::class.java).isActivityStartAllowedOnDisplay(
+        context,
+        displayId,
+        DesktopDisplayLauncher.intent(context, displayId, "eligibility", 0L),
+    )
+}
+
 class DisplayRepository(private val source: DesktopDisplaySource) {
     constructor(context: Context) : this(AndroidDisplaySource(context.applicationContext))
 
@@ -180,7 +213,8 @@ private class AndroidDisplaySource(private val context: Context) : DesktopDispla
         )
         return displays.map { display ->
             val isDefault = display.displayId == Display.DEFAULT_DISPLAY
-            val allowed = isDefault || supported && allowed(display)
+            val allowed = isDefault ||
+                supported && isActivityStartAllowedOnDisplay(context, display.displayId)
             val product = displayProductInfoForSdk(Build.VERSION.SDK_INT) {
                 display.deviceProductInfo
             }
@@ -202,22 +236,6 @@ private class AndroidDisplaySource(private val context: Context) : DesktopDispla
                     height = mode.physicalHeight,
                 ),
             )
-        }
-    }
-
-    private fun allowed(display: Display): Boolean {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return true
-        return try {
-            context.getSystemService(ActivityManager::class.java).isActivityStartAllowedOnDisplay(
-                context, display.displayId,
-                DesktopDisplayLauncher.intent(context, display.displayId, "eligibility", 0L),
-            )
-        } catch (error: SecurityException) {
-            Log.w("DesktopDisplay", "Display launch permission check failed", error)
-            false
-        } catch (error: IllegalArgumentException) {
-            Log.w("DesktopDisplay", "Display changed during permission check", error)
-            false
         }
     }
 
