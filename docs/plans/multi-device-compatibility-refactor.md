@@ -34,6 +34,9 @@
 - User-directed exception for this refactor: merge independently reviewed micro-PRs into `ref/v1` before physical-device validation.
 - Never target `xixia` from a task PR and do not create a `ref/v1 -> xixia` PR after the tasks finish.
 - Every commit must be independently reviewed before commit and include `Co-authored-by: Copilot App <223556219+Copilot@users.noreply.github.com>`.
+- A task PR may merge only when Quality passes and the latest review authored by `copilot-pull-request-reviewer` is for the current head SHA and explicitly reports `No open issues` or `Approval recommended`; every review thread must also be resolved.
+- `thread.isResolved=true`, a human reply, or Quality alone is insufficient when that latest review body still reports open issues or `Needs a closer look`.
+- If feedback is technically disputed, make a clarifying change and obtain a fresh clean Copilot review on the new head, or pause and escalate to the parent; never merge based solely on manual resolution.
 - When physical validation starts after P22, use one identical APK for R2 phone/TNT and NX888J phone/HDMI. Keep R2/Nubia wireless ADB enabled only for the designated validation and review cycle, use paired wireless debugging on a trusted private network, keep both devices off untrusted networks while it is enabled, and disable wireless ADB immediately after the final changes are merged.
 
 ## Review Focus
@@ -209,7 +212,7 @@ flutter pub get --enforce-lockfile
 flutter test
 flutter build apk --debug --no-pub --target-platform android-arm64
 Pop-Location
-& .\app\android\gradlew.bat -p .\app\android testDebugUnitTest --no-daemon --console=plain
+& .\app\android\gradlew.bat -p .\app\android :app:testDebugUnitTest --no-daemon --console=plain
 ```
 
 Expected: the existing Flutter and Android tests pass before refactoring. The Flutter build generates the worktree-local Android configuration required by direct Gradle commands.
@@ -589,7 +592,7 @@ Keep PRoot as the only current caller. `DesktopActivity` converts Android `Displ
 - [ ] **Step 4: Run focused tests and the Android unit suite**
 
 ```powershell
-& .\app\android\gradlew.bat -p .\app\android testDebugUnitTest --no-daemon --console=plain
+& .\app\android\gradlew.bat -p .\app\android :app:testDebugUnitTest --no-daemon --console=plain
 ```
 
 Expected: all tests pass.
@@ -705,7 +708,7 @@ Replace hard-coded `-100` wheel multipliers with the policy's horizontal and ver
 - [ ] **Step 7: Run input and full Android tests**
 
 ```powershell
-& .\app\android\gradlew.bat -p .\app\android testDebugUnitTest --no-daemon --console=plain
+& .\app\android\gradlew.bat -p .\app\android :app:testDebugUnitTest --no-daemon --console=plain
 ```
 
 Expected: sparse IDs pass and existing Termux:X11 input behavior remains covered.
@@ -824,7 +827,7 @@ Build `PresentationContext` from the measured content bounds and evidence probe.
 - [ ] **Step 6: Run Android tests**
 
 ```powershell
-& .\app\android\gradlew.bat -p .\app\android testDebugUnitTest --no-daemon --console=plain
+& .\app\android\gradlew.bat -p .\app\android :app:testDebugUnitTest --no-daemon --console=plain
 ```
 
 Expected: all tests pass with no direct `smallestScreenWidthDp` classification in `DesktopActivity`.
@@ -950,7 +953,7 @@ Expected: payload parsing, scope selection, stable identity, input-route preserv
 - [ ] **Step 8: Run full native and Flutter tests**
 
 ```powershell
-& .\app\android\gradlew.bat -p .\app\android testDebugUnitTest --no-daemon --console=plain
+& .\app\android\gradlew.bat -p .\app\android :app:testDebugUnitTest --no-daemon --console=plain
 Push-Location app
 flutter test
 Pop-Location
@@ -1137,7 +1140,7 @@ Launch all probes concurrently. Track each future's start deadline independently
 
 ```powershell
 & .\app\android\gradlew.bat -p .\app\android :app:testDebugUnitTest --tests "com.orailnoor.droiddesk.runtime.*" --no-daemon --console=plain
-& .\app\android\gradlew.bat -p .\app\android testDebugUnitTest --no-daemon --console=plain
+& .\app\android\gradlew.bat -p .\app\android :app:testDebugUnitTest --no-daemon --console=plain
 ```
 
 - [ ] **Step 7: Complete this milestone through P03-P04**
@@ -1266,7 +1269,7 @@ The schema-2 payload activates the already-compatible Flutter diagnostics and pl
 Push-Location app
 flutter test
 Pop-Location
-& .\app\android\gradlew.bat -p .\app\android testDebugUnitTest --no-daemon --console=plain
+& .\app\android\gradlew.bat -p .\app\android :app:testDebugUnitTest --no-daemon --console=plain
 ```
 
 - [ ] **Step 9: Complete this milestone through P20-P21**
