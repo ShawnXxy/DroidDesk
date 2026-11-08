@@ -1,6 +1,6 @@
 # Multi-Device Compatibility Refactor Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Replace model-specific Android compatibility branches with capability evidence, explicit placement adapters, pure presentation policies, event-driven readiness, and release gates that preserve R2/TNT and NX888J behavior on the same commit.
 

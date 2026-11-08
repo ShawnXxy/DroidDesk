@@ -10,6 +10,8 @@
 
 **Spec:** `docs/architecture/multi-device-compatibility.md`
 
+**Re-evaluated baseline:** `origin/xixia` at `e8884c2` on 2026-11-08.
+
 ## Global Constraints
 
 - Create `ref/v1` from the latest `origin/xixia`; never commit implementation work directly to `xixia`.
