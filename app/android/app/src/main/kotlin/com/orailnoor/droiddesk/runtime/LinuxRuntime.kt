@@ -16,7 +16,11 @@ import java.util.concurrent.TimeUnit
 import com.orailnoor.droiddesk.display.DisplayProfile
 import com.orailnoor.droiddesk.display.DisplayProfilePolicy
 
-internal const val GUEST_PULSE_SERVER = "tcp:127.0.0.1"
+internal fun pulseAudioTcpPort(packageName: String): Int {
+    if (packageName == "com.orailnoor.droiddesk") return 4713
+    val bucket = (packageName.hashCode().toLong() and 0x7fffffffL) % 1_000L
+    return 4714 + bucket.toInt()
+}
 
 internal fun hostPulseAudioLibraryPath(
     sdkInt: Int,
@@ -46,6 +50,29 @@ internal fun stopHostProcessWithFallback(
 internal fun nativeDesktopBusSocket(directory: File): File =
     File(directory, UUID.randomUUID().toString().replace("-", ""))
 
+internal fun startPulseAudioDaemonWithFallback(
+    startAAudio: () -> Boolean,
+    isReady: () -> Boolean,
+    stop: () -> Unit,
+    startFallback: () -> Boolean,
+): Boolean {
+    if (startAAudio() && isReady()) return true
+    stop()
+    return startFallback() && isReady()
+}
+
+internal fun nativePackageUpgradeCommand(packages: List<String>): String =
+    "timeout --signal=TERM --kill-after=5s 1800s " +
+        "env DEBIAN_FRONTEND=noninteractive apt-get " +
+        "-o Dpkg::Options::=--force-confdef " +
+        "-o Dpkg::Options::=--force-confold " +
+        "install --only-upgrade -y ${packages.joinToString(" ")}"
+
+internal fun processIdentityFromStatFields(fields: List<String>): String? {
+    if (fields.firstOrNull() == "Z") return null
+    return fields.getOrNull(19)
+}
+
 /**
  * Core Linux runtime engine.
  *
@@ -55,6 +82,8 @@ internal fun nativeDesktopBusSocket(directory: File): File =
  */
 class LinuxRuntime(context: Context) {
     private val context = context.applicationContext
+    private val hostPulseAudioTcpPort = pulseAudioTcpPort(this.context.packageName)
+    internal val guestPulseServer = "tcp:127.0.0.1:$hostPulseAudioTcpPort"
 
     companion object {
         private const val TAG = "LinuxRuntime"
@@ -62,6 +91,8 @@ class LinuxRuntime(context: Context) {
         private const val SHEBANG_MARKER = ".relocated_text_paths_v4"
         private const val ELF_PATCH_MARKER = ".elf_runpaths_patched"
         private const val DE_MARKER = ".de_installed"
+        private const val PACKAGE_PROCESS_SETTLE_MILLIS = 10_000L
+        private const val PACKAGE_PROCESS_FORCE_GRACE_MILLIS = 1_000L
         private const val PROBE_PROCESS_TIMEOUT_MILLIS = 750L
         private const val PINNED_PROOT_VERSION = "5.1.107.102"
         private const val PINNED_PROOT_DISTRO_VERSION = "5.10.3"
@@ -125,31 +156,105 @@ class LinuxRuntime(context: Context) {
     }
 
     private val activeCommands = CommandOwnership<Process>()
+    private val packageOperationLock = Any()
+    private var activePackageOperation: ActivePackageOperation? = null
+    private var unsettledPackageOwnershipToken: String? = null
+    private var quarantinedPackageLane: CommandOwnership.Lease? = null
     @Volatile private var installLogSink: ((String) -> Unit)? = null
     @Volatile private var packageOperationCancelled = false
+
+    private data class ActivePackageOperation(
+        val operationId: Long,
+        val ownerThreadId: Long,
+        val commandLane: CommandOwnership.Lease,
+    )
+
+    private data class CommandLease(
+        val lease: CommandOwnership.Lease,
+        val persistentLane: Boolean,
+        val ownershipToken: String?,
+    )
+
+    private enum class PackageProcessSettlement {
+        SETTLED,
+        TERMINATED,
+        SURVIVORS,
+    }
 
     fun setInstallLogSink(sink: ((String) -> Unit)?) {
         installLogSink = sink
     }
 
-    fun beginPackageOperation() {
-        // A previous App Store screen may have been closed while apt was still
-        // running. Stop that process before accepting a new transaction.
-        if (activeCommands.isBusy()) interruptCommand()
+    fun beginPackageOperation(operationId: Long): Boolean = synchronized(packageOperationLock) {
+        if (activePackageOperation != null) return@synchronized false
+        if (!releaseQuarantinedPackageLaneIfSettled()) return@synchronized false
+        val lane = activeCommands.reserveLane(acceptsInput = false)
+            ?: return@synchronized false
+        activePackageOperation = ActivePackageOperation(
+            operationId = operationId,
+            ownerThreadId = Thread.currentThread().id,
+            commandLane = lane,
+        )
         packageOperationCancelled = false
-        clearStalePackageLocks()
+        true
     }
 
-    fun finishPackageOperation() {
-        packageOperationCancelled = false
+    fun finishPackageOperation(operationId: Long) {
+        val (operation, quarantine) = synchronized(packageOperationLock) {
+            val operation = activePackageOperation
+                ?.takeIf { it.operationId == operationId }
+                ?.also {
+                    activePackageOperation = null
+                    packageOperationCancelled = false
+                }
+                ?: return
+            val ownershipToken = operation.operationId.toString()
+            val quarantine =
+                unsettledPackageOwnershipToken == ownershipToken &&
+                    processPidsOwnedByToken(ownershipToken).isNotEmpty()
+            if (quarantine) {
+                quarantinedPackageLane = operation.commandLane
+            } else if (unsettledPackageOwnershipToken == ownershipToken) {
+                unsettledPackageOwnershipToken = null
+            }
+            operation to quarantine
+        }
+        if (!quarantine) activeCommands.release(operation.commandLane)
     }
 
-    fun cancelPackageOperation(): Boolean {
-        packageOperationCancelled = true
-        val wasRunning = activeCommands.isBusy()
-        interruptCommand()
-        return wasRunning
+    internal fun activePackageOwnershipToken(): String? =
+        synchronized(packageOperationLock) {
+            activePackageOperation?.operationId?.toString()
+        }
+
+    private fun releaseQuarantinedPackageLaneIfSettled(): Boolean {
+        val lane = quarantinedPackageLane ?: return true
+        val ownershipToken = unsettledPackageOwnershipToken ?: return false
+        if (processPidsOwnedByToken(ownershipToken).isNotEmpty()) return false
+        activeCommands.release(lane)
+        quarantinedPackageLane = null
+        unsettledPackageOwnershipToken = null
+        return true
     }
+
+    fun cancelPackageOperation(operationId: Long): Boolean {
+        val cancellation = synchronized(packageOperationLock) {
+            val operation = activePackageOperation
+                ?.takeIf { it.operationId == operationId }
+                ?: return@synchronized null
+            packageOperationCancelled = true
+            activeCommands.cancelProcess(operation.commandLane)
+        } ?: return false
+        cancellation.process?.let {
+            terminateProcess(it, 200, operationId.toString())
+        }
+        return true
+    }
+
+    internal fun cancelOwnedPackageCommand(
+        operationId: Long,
+        gracePeriodMs: Long,
+    ): Boolean = interruptOwnedPackageCommand(operationId, gracePeriodMs)
 
     // ── Base directories (all inside app's private storage) ──
 
@@ -161,6 +266,168 @@ class LinuxRuntime(context: Context) {
     // through libsocket_hook, so this must not be $PREFIX/tmp.
     private val tmpDir: File get() = File(baseDir, "tmp")
     private val homeDir: File get() = File(baseDir, "home")
+
+    internal val packageStorePrefixDir: File
+        get() = prefixDir
+    internal val packageStoreHomeDir: File
+        get() = homeDir
+
+    internal fun beginStorePackageOperation(
+        operationId: Long,
+        onOutput: (String) -> Unit,
+    ): Boolean {
+        setInstallLogSink(onOutput)
+        return beginPackageOperation(operationId)
+    }
+
+    internal fun finishStorePackageOperation(operationId: Long) {
+        setInstallLogSink(null)
+        finishPackageOperation(operationId)
+    }
+
+    internal fun beginOwnedPackageCommand(operationId: Long): Boolean =
+        beginPackageOperation(operationId)
+
+    internal fun finishOwnedPackageCommand(operationId: Long) =
+        finishPackageOperation(operationId)
+
+    internal fun searchStorePackageRecords(query: String): ExecutionResult {
+        if (!query.matches(Regex("[A-Za-z0-9+._ -]*"))) {
+            return ExecutionResult(1, "Invalid package search")
+        }
+        val output = executeCommand(
+            "apt-cache search --names-only '${query.ifEmpty { "." }}'",
+        )
+        return ExecutionResult(if (output.startsWith("Error:")) 1 else 0, output)
+    }
+
+    internal fun upgradableStorePackageRecords(refreshIndex: Boolean): ExecutionResult {
+        if (refreshIndex) {
+            val refreshed = executeCommand(
+                "timeout --signal=TERM --kill-after=5s 120s apt-get update",
+            )
+            if (refreshed.startsWith("Error:")) {
+                return ExecutionResult(1, refreshed)
+            }
+        }
+        val output = executeCommand("apt list --upgradable 2>/dev/null")
+        return ExecutionResult(if (output.startsWith("Error:")) 1 else 0, output)
+    }
+
+    internal fun installCuratedStorePackage(
+        legacyId: String,
+        onProgress: (Double, String) -> Unit,
+        onOutput: (String) -> Unit,
+    ): Boolean {
+        setInstallLogSink(onOutput)
+        return installNativeCuratedPackage(legacyId, onProgress)
+    }
+
+    internal fun installStorePackages(
+        packages: List<String>,
+        onProgress: (Double, String) -> Unit,
+        onOutput: (String) -> Unit,
+    ): Boolean {
+        if (packages.isEmpty()) return true
+        setInstallLogSink(onOutput)
+        onProgress(0.2, "Installing ${packages.joinToString(", ")}...")
+        val installed = installOptionalPackages(packages, onProgress, 0.55)
+        patchShebangs(force = true)
+        return installed && packages.all(::isDpkgPackageInstalled)
+    }
+
+    internal fun removeStorePackages(
+        packages: List<String>,
+        onProgress: (Double, String) -> Unit,
+        onOutput: (String) -> Unit,
+    ): PackageMutationStatus {
+        if (packages.isEmpty()) return PackageMutationStatus(succeeded = true)
+        setInstallLogSink(onOutput)
+        onProgress(0.2, "Removing ${packages.joinToString(", ")}...")
+        val output = executeCommand(
+            "timeout --signal=TERM --kill-after=5s 1800s " +
+                "env DEBIAN_FRONTEND=noninteractive apt-get remove -y " +
+                packages.joinToString(" "),
+        )
+        if (packageOperationCancelled) return PackageMutationStatus(succeeded = false)
+        patchShebangs(force = true)
+        val configured = executeCommand(
+            "timeout --signal=TERM --kill-after=5s 90s dpkg --configure -a",
+        )
+        if (output.startsWith("Error:") || configured.startsWith("Error:")) {
+            val repaired = repairStorePackageStateAfterCancellation(onOutput)
+            return PackageMutationStatus(
+                succeeded = false,
+                repairFailed = !repaired,
+            )
+        }
+        return PackageMutationStatus(
+            succeeded = packages.none(::isDpkgPackageInstalled),
+        )
+    }
+
+    internal fun upgradeStorePackages(
+        packages: List<String>,
+        onProgress: (Double, String) -> Unit,
+        onOutput: (String) -> Unit,
+    ): PackageMutationStatus {
+        if (packages.isEmpty()) return PackageMutationStatus(succeeded = true)
+        setInstallLogSink(onOutput)
+        onProgress(0.2, "Updating ${packages.size} package(s)...")
+        val output = executeCommand(nativePackageUpgradeCommand(packages))
+        if (packageOperationCancelled) return PackageMutationStatus(succeeded = false)
+        patchShebangs(force = true)
+        val configured = executeCommand(
+            "timeout --signal=TERM --kill-after=5s 90s dpkg --configure -a",
+        )
+        if (output.startsWith("Error:") || configured.startsWith("Error:")) {
+            val repaired = repairStorePackageStateAfterCancellation(onOutput)
+            return PackageMutationStatus(
+                succeeded = false,
+                repairFailed = !repaired,
+            )
+        }
+        return PackageMutationStatus(succeeded = true)
+    }
+
+    internal fun refreshStoreDesktopMenus(onOutput: (String) -> Unit): Boolean {
+        setInstallLogSink(onOutput)
+        refreshDesktopMenus()
+        return true
+    }
+
+    internal fun cleanStorePackageCache(onOutput: (String) -> Unit): Boolean {
+        setInstallLogSink(onOutput)
+        val archivesCleaned = !executeCommand(
+            "timeout --signal=TERM --kill-after=5s 120s apt-get clean",
+        ).startsWith("Error:")
+        if (!archivesCleaned) return false
+        val lists = File(prefixDir, "var/lib/apt/lists")
+        return lists.listFiles()?.all(File::deleteRecursively) != false
+    }
+
+    internal fun repairStorePackageStateAfterCancellation(
+        onOutput: (String) -> Unit,
+    ): Boolean {
+        packageOperationCancelled = false
+        setInstallLogSink(onOutput)
+        patchShebangs(force = true)
+        var configured = executeCommand(
+            "timeout --signal=TERM --kill-after=5s 90s dpkg --configure -a",
+        )
+        if (configured.startsWith("Error:")) {
+            val repaired = executeCommand(
+                "timeout --signal=TERM --kill-after=5s 120s " +
+                    "env DEBIAN_FRONTEND=noninteractive apt-get -f install -y",
+            )
+            if (repaired.startsWith("Error:")) return false
+            patchShebangs(force = true)
+            configured = executeCommand(
+                "timeout --signal=TERM --kill-after=5s 90s dpkg --configure -a",
+            )
+        }
+        return !configured.startsWith("Error:")
+    }
 
     /** Qualcomm exposes the Adreno render device through KGSL on Android. */
     private fun hasAdrenoGpu(): Boolean = File("/dev/kgsl-3d0").exists()
@@ -296,6 +563,57 @@ class LinuxRuntime(context: Context) {
             sdkInt = Build.VERSION.SDK_INT,
             prefixLibraryPath = libDir.absolutePath,
         )
+        fun audioCommand(body: String): Boolean {
+            val output = executeCommand(
+                """
+                set -e
+                export LD_LIBRARY_PATH='$audioLibraryPath'
+                limit() {
+                    if command -v timeout >/dev/null 2>&1; then timeout "${'$'}@"; else shift; "${'$'}@"; fi
+                }
+                $body
+                """.trimIndent(),
+            )
+            return !output.startsWith("Error:")
+        }
+
+        fun stopDaemon() {
+            audioCommand("pkill -9 -x pulseaudio >/dev/null 2>&1 || true")
+        }
+
+        fun waitUntilReady(): Boolean = audioCommand(
+            """
+            for attempt in 1 2 3 4 5; do
+                if limit 2 pactl info >/dev/null 2>&1; then exit 0; fi
+                sleep 0.1
+            done
+            exit 1
+            """.trimIndent(),
+        )
+
+        stopDaemon()
+        check(
+            startPulseAudioDaemonWithFallback(
+                startAAudio = {
+                    audioCommand(
+                        """
+                        limit 10 pulseaudio --start --exit-idle-time=-1 \
+                            --load=module-aaudio-sink >/dev/null 2>&1
+                        """.trimIndent(),
+                    )
+                },
+                isReady = ::waitUntilReady,
+                stop = ::stopDaemon,
+                startFallback = {
+                    audioCommand(
+                        "limit 10 pulseaudio --start --exit-idle-time=-1 >/dev/null 2>&1",
+                    )
+                },
+            ),
+        ) {
+            "PulseAudio did not become ready with AAudio or the compatibility fallback"
+        }
+
         val output = executeCommand(
             """
             set -e
@@ -303,22 +621,12 @@ class LinuxRuntime(context: Context) {
             limit() {
                 if command -v timeout >/dev/null 2>&1; then timeout "${'$'}@"; else shift; "${'$'}@"; fi
             }
-            pkill -9 -x pulseaudio >/dev/null 2>&1 || true
-            if ! limit 10 pulseaudio --start --exit-idle-time=-1 \
-                --load=module-aaudio-sink >/dev/null 2>&1; then
-                pkill -9 -x pulseaudio >/dev/null 2>&1 || true
-                limit 10 pulseaudio --start --exit-idle-time=-1 >/dev/null 2>&1
-            fi
-            for attempt in 1 2 3 4 5 6 7 8 9 10; do
-                if limit 2 pactl info >/dev/null 2>&1; then break; fi
-                sleep 0.1
-            done
-            limit 2 pactl info >/dev/null 2>&1
             pactl load-module module-native-protocol-tcp \
                 listen=127.0.0.1 \
+                port=$hostPulseAudioTcpPort \
                 auth-cookie='${File(homeDir, ".config/pulse/cookie").absolutePath}' \
                 >/dev/null
-            PULSE_SERVER=$GUEST_PULSE_SERVER \
+            PULSE_SERVER='$guestPulseServer' \
                 PULSE_COOKIE='${File(homeDir, ".config/pulse/cookie").absolutePath}' \
                 limit 2 pactl info >/dev/null 2>&1
             """.trimIndent(),
@@ -510,24 +818,12 @@ class LinuxRuntime(context: Context) {
         )
     }
 
-    fun getOptionalAppsStatus(): Map<String, Boolean> = mapOf(
+    private fun nativeCuratedPackageStatus(): Map<String, Boolean> = mapOf(
         "firefox" to File(binDir, "firefox").exists(),
         "code_oss" to (File(binDir, "code-oss").exists() || File(binDir, "code").exists()),
         "nodejs" to (File(binDir, "node").exists() && File(binDir, "npm").exists()),
         "imagemagick" to (File(binDir, "magick").exists() || File(binDir, "convert").exists()),
-        "proot_debian" to isMinimalDebianInstalled(),
     )
-
-    private fun isMinimalDebianInstalled(): Boolean {
-        val installed = debianRootfsMarkers().any(File::exists) &&
-            File(binDir, "start-debian").exists()
-        if (installed) {
-            relocateProotExecutable()
-            writeDebianLauncher()
-            clearProotDownloadCache()
-        }
-        return installed
-    }
 
     private fun relocateProotExecutable() {
         val proot = File(binDir, "proot")
@@ -539,83 +835,6 @@ class LinuxRuntime(context: Context) {
             "/data/data/com.termux/files/usr/lib/dri",
         )
     }
-
-    private fun writeDebianLauncher() {
-        val launcher = File(binDir, "start-debian")
-        launcher.writeText(
-            """
-            #!${File(binDir, "bash").absolutePath}
-            export DISPLAY="${'$'}{DISPLAY:-:0}"
-            export TMPDIR="${tmpDir.absolutePath}"
-            mkdir -p "${tmpDir.absolutePath}/proot"
-            exec "${File(binDir, "proot-distro").absolutePath}" login debian \
-                --bind "${tmpDir.absolutePath}:/tmp" \
-                --env PROOT_TMP_DIR="${tmpDir.absolutePath}/proot" \
-                --env PROOT_LOADER="${File(prefixDir, "libexec/proot/loader").absolutePath}" \
-                --env PROOT_LOADER_32="${File(prefixDir, "libexec/proot/loader32").absolutePath}" -- \
-                env DISPLAY="${'$'}DISPLAY" TERM="${'$'}{TERM:-xterm-256color}" bash -l
-            """.trimIndent() + "\n",
-        )
-        launcher.setExecutable(true, false)
-
-        val appsLauncher = File(binDir, "debian-apps")
-        appsLauncher.writeText(
-            """
-            #!${File(binDir, "bash").absolutePath}
-            export TMPDIR="${tmpDir.absolutePath}"
-            mkdir -p "${tmpDir.absolutePath}/proot"
-            mode="${'$'}{1:-gui}"
-            exec "${File(binDir, "proot-distro").absolutePath}" login debian \
-                --bind "${tmpDir.absolutePath}:/tmp" \
-                --env PROOT_TMP_DIR="${tmpDir.absolutePath}/proot" \
-                --env PROOT_LOADER="${File(prefixDir, "libexec/proot/loader").absolutePath}" \
-                --env PROOT_LOADER_32="${File(prefixDir, "libexec/proot/loader32").absolutePath}" -- \
-                bash -s -- "${'$'}mode" <<'DROIDDESK_DEBIAN_APPS'
-            mode="${'$'}1"
-            case "${'$'}mode" in
-                --all)
-                    dpkg-query -W -f='${'$'}{binary:Package}\t${'$'}{Version}\n' | sort
-                    ;;
-                --manual)
-                    apt-mark showmanual | sort
-                    ;;
-                gui)
-                    for desktop in \
-                        /usr/share/applications/*.desktop \
-                        /usr/local/share/applications/*.desktop
-                    do
-                        [ -f "${'$'}desktop" ] || continue
-                        no_display=${'$'}(sed -n 's/^NoDisplay=//p' "${'$'}desktop" | head -n 1)
-                        [ "${'$'}no_display" = "true" ] && continue
-                        name=${'$'}(sed -n 's/^Name=//p' "${'$'}desktop" | head -n 1)
-                        command=${'$'}(sed -n 's/^Exec=//p' "${'$'}desktop" | head -n 1)
-                        [ -n "${'$'}name" ] && [ -n "${'$'}command" ] &&
-                            printf '%-32s %s\n' "${'$'}name" "${'$'}command"
-                    done | sort -f
-                    ;;
-                *)
-                    echo "Usage: debian-apps [--manual|--all]" >&2
-                    exit 2
-                    ;;
-            esac
-            DROIDDESK_DEBIAN_APPS
-            """.trimIndent() + "\n",
-        )
-        appsLauncher.setExecutable(true, false)
-    }
-
-    private fun clearProotDownloadCache() {
-        File(prefixDir, "var/lib/proot-distro/dlcache").deleteRecursively()
-        File(prefixDir, "var/lib/proot-distro/cache").deleteRecursively()
-    }
-
-    private fun debianRootfsMarkers(): List<File> = listOf(
-        // proot-distro 5.4+
-        File(prefixDir, "var/lib/proot-distro/containers/debian/rootfs/usr/lib/os-release"),
-        File(prefixDir, "var/lib/proot-distro/containers/debian/rootfs/etc/os-release"),
-        // Legacy proot-distro releases
-        File(prefixDir, "var/lib/proot-distro/installed-rootfs/debian/etc/os-release"),
-    )
 
     // ── Bootstrap ──
 
@@ -1827,42 +2046,6 @@ class LinuxRuntime(context: Context) {
         return isDpkgPackageInstalled("nodejs")
     }
 
-    /** Installs only PRoot, proot-distro and Debian's base rootfs. */
-    private fun installMinimalDebian(
-        onProgress: ((Double, String) -> Unit)? = null,
-    ): Boolean {
-        onProgress?.invoke(0.12, "Installing lightweight PRoot runtime...")
-        if (!installOptionalPackages(listOf("proot", "proot-distro"), onProgress, 0.28)) {
-            return false
-        }
-
-        patchShebangs(force = true)
-        relocateProotExecutable()
-        if (executeCommand("proot --version").startsWith("Error:")) {
-            Log.e(TAG, "Installed PRoot executable could not start")
-            return false
-        }
-
-        if (debianRootfsMarkers().none(File::exists)) {
-            // Remove an interrupted extraction so proot-distro can safely retry.
-            File(prefixDir, "var/lib/proot-distro/containers/debian").deleteRecursively()
-            File(prefixDir, "var/lib/proot-distro/installed-rootfs/debian").deleteRecursively()
-            onProgress?.invoke(0.38, "Downloading minimal Debian base system...")
-            if (executeCommand("proot-distro install debian").startsWith("Error:")) {
-                Log.e(TAG, "Minimal Debian rootfs installation failed")
-                return false
-            }
-        }
-
-        onProgress?.invoke(0.9, "Creating Debian shell shortcut...")
-        writeDebianLauncher()
-
-        // The downloaded archive is not needed after extraction.
-        clearProotDownloadCache()
-        onProgress?.invoke(1.0, "Minimal Debian compatibility is ready")
-        return isMinimalDebianInstalled()
-    }
-
     fun ensureProotToolchain(
         onProgress: (Double, String) -> Unit,
         onLog: (String) -> Unit,
@@ -1974,20 +2157,29 @@ class LinuxRuntime(context: Context) {
                     ExecutionResult(1, "Error: No interactive command is running")
             }
         }
-        val lease = activeCommands.reserve(interactive)
+        val commandLease = acquireCommandLease(interactive)
             ?: return ExecutionResult(1, "Error: Another command is already running")
+        val lease = commandLease.lease
         var process: Process? = null
         return try {
-            process = ProcessBuilder(command)
+            val launchedCommand = if (commandLease.persistentLane) {
+                isolatedPackageCommand(command)
+            } else {
+                command
+            }
+            process = ProcessBuilder(launchedCommand)
                 .directory(prefixDir)
                 .redirectErrorStream(true)
                 .also { builder ->
                     builder.environment().clear()
                     builder.environment().putAll(getTermuxEnv())
+                    commandLease.ownershipToken?.let { token ->
+                        builder.environment()[PACKAGE_PROCESS_OWNER_ENV] = token
+                    }
                 }
                 .start()
             if (!activeCommands.attach(lease, process)) {
-                process.destroyForcibly()
+                terminateProcess(process, 200, commandLease.ownershipToken)
                 return ExecutionResult(1, "Error: Command was cancelled before it started")
             }
             val output = StringBuilder()
@@ -2001,11 +2193,20 @@ class LinuxRuntime(context: Context) {
                 onOutput?.invoke(chunk)
             }
             process.waitFor()
+            if (
+                waitForOwnedPackageProcesses(commandLease.ownershipToken) !=
+                PackageProcessSettlement.SETTLED
+            ) {
+                return ExecutionResult(1, "Error: Package processes did not settle")
+            }
             ExecutionResult(process.exitValue(), output.toString())
         } catch (error: Exception) {
+            process?.let {
+                terminateProcess(it, 200, commandLease.ownershipToken)
+            }
             ExecutionResult(1, "Error: ${error.message}")
         } finally {
-            activeCommands.release(lease)
+            releaseCommandLease(commandLease)
         }
     }
 
@@ -2091,12 +2292,12 @@ class LinuxRuntime(context: Context) {
         return true
     }
 
-    fun installOptionalApp(
+    internal fun installNativeCuratedPackage(
         appId: String,
         onProgress: ((Double, String) -> Unit)? = null,
     ): Boolean {
         if (getInstalledDE().isEmpty()) return false
-        if (getOptionalAppsStatus()[appId] == true) {
+        if (nativeCuratedPackageStatus()[appId] == true) {
             onProgress?.invoke(1.0, "Already installed")
             return true
         }
@@ -2132,11 +2333,10 @@ class LinuxRuntime(context: Context) {
                 onProgress?.invoke(0.25, "Installing ImageMagick...")
                 installOptionalPackages(listOf("imagemagick"), onProgress, 0.55)
             }
-            "proot_debian" -> installMinimalDebian(onProgress)
             else -> false
         }
 
-        val verified = ok && getOptionalAppsStatus()[appId] == true
+        val verified = ok && nativeCuratedPackageStatus()[appId] == true
         if (verified) {
             patchShebangs(force = true)
             onProgress?.invoke(1.0, "Installation complete")
@@ -2144,289 +2344,6 @@ class LinuxRuntime(context: Context) {
             onProgress?.invoke(-1.0, "Installation failed. Review the package log and retry.")
         }
         return verified
-    }
-
-    // ── Native package store ──
-
-    fun searchNativePackages(query: String, limit: Int = 60): List<Map<String, Any>> {
-        if (!isBootstrapped()) return emptyList()
-        val cleanQuery = query.trim().take(60)
-        if (!cleanQuery.matches(Regex("[A-Za-z0-9+._ -]*"))) return emptyList()
-        val output = runQuickCommand("apt-cache search --names-only '${cleanQuery.ifEmpty { "." }}'")
-        val installed = installedPackageRecords().associateBy { it["name"] as String }
-        return output.lineSequence().mapNotNull { line ->
-            val separator = line.indexOf(" - ")
-            if (separator <= 0) return@mapNotNull null
-            val name = line.substring(0, separator).substringBefore(':').trim()
-            if (!isSafePackageName(name)) return@mapNotNull null
-            val description = line.substring(separator + 3).trim()
-            val record = installed[name]
-            mapOf(
-                "name" to name,
-                "description" to description,
-                "version" to (record?.get("version") ?: ""),
-                "section" to (record?.get("section") ?: categoryForPackage(name, description)),
-                "installed" to (record != null),
-                "gui" to providesDesktopEntry(name),
-            )
-        }.distinctBy { it["name"] }.take(limit.coerceIn(1, 100)).toList()
-    }
-
-    fun getInstalledNativePackages(limit: Int = 500): List<Map<String, Any>> {
-        val visible = storeInstalledPackages() + setOf(
-            "firefox", "code-oss", "libreoffice", "gimp", "blender", "vlc",
-            "nodejs", "python", "imagemagick",
-        )
-        return installedPackageRecords()
-            .filter { record ->
-                val name = record["name"] as? String ?: return@filter false
-                visible.contains(name)
-            }
-            .take(limit.coerceIn(1, 1000))
-    }
-
-    fun installStorePackage(
-        packageName: String,
-        onProgress: (Double, String) -> Unit,
-    ): Boolean {
-        if (!isSafePackageName(packageName)) {
-            onProgress(-1.0, "Invalid package name")
-            return false
-        }
-        onProgress(0.08, "Repairing interrupted package operations...")
-        installPackageGroup("dpkg --configure -a")
-        if (packageOperationCancelled) {
-            onProgress(-1.0, "Installation cancelled")
-            return false
-        }
-        onProgress(0.22, "Installing $packageName and dependencies...")
-        val optionalId = when (packageName) {
-            "firefox" -> "firefox"
-            "code-oss", "code" -> "code_oss"
-            "nodejs" -> "nodejs"
-            "imagemagick" -> "imagemagick"
-            else -> null
-        }
-        val ok = if (optionalId != null) {
-            installOptionalApp(optionalId) { progress, status ->
-                onProgress(0.22 + progress.coerceIn(0.0, 1.0) * 0.68, status)
-            }
-        } else {
-            installOptionalPackages(listOf(packageName), onProgress, 0.5)
-        }
-        if (packageOperationCancelled) {
-            onProgress(-1.0, "Installation cancelled")
-            return false
-        }
-        patchShebangs(force = true)
-        refreshDesktopMenus()
-        val installed = ok && isDpkgPackageInstalled(packageName)
-        if (installed) setStorePackageInstalled(packageName, true)
-        onProgress(if (installed) 1.0 else -1.0, if (installed) "$packageName installed" else "$packageName installation failed")
-        return installed
-    }
-
-    fun removeStorePackage(
-        packageName: String,
-        onProgress: (Double, String) -> Unit,
-    ): Boolean {
-        if (!isSafePackageName(packageName) || isProtectedPackage(packageName)) {
-            onProgress(-1.0, "This package is required by DroidDesk")
-            return false
-        }
-        onProgress(0.15, "Removing $packageName...")
-        val output = executeCommand("apt-get remove -y $packageName")
-        if (packageOperationCancelled) {
-            onProgress(-1.0, "Removal cancelled")
-            return false
-        }
-        patchShebangs(force = true)
-        executeCommand("dpkg --configure -a")
-        refreshDesktopMenus()
-        val removed = !isDpkgPackageInstalled(packageName)
-        if (removed) setStorePackageInstalled(packageName, false)
-        onProgress(if (removed) 1.0 else -1.0, if (removed) "$packageName removed" else "$packageName removal failed")
-        return removed && !output.startsWith("Error:")
-    }
-
-    /**
-     * Installed packages with a newer version available. Core packages DroidDesk depends on
-     * (see [isProtectedPackage]) are left out: upgrading them can break the relocated runtime.
-     */
-    fun getUpgradablePackages(refresh: Boolean): List<Map<String, Any>> {
-        if (!isBootstrapped()) return emptyList()
-        if (refresh) {
-            runQuickCommand("timeout --signal=TERM --kill-after=5s 120s apt-get update >/dev/null 2>&1; true")
-        }
-        val installed = installedPackageRecords().associateBy { it["name"] as String }
-        // Lines look like: name/stable 1.2-1 aarch64 [upgradable from: 1.1-1]
-        return runQuickCommand("apt list --upgradable 2>/dev/null").lineSequence().mapNotNull { line ->
-            if (!line.contains("[upgradable from:")) return@mapNotNull null
-            val name = line.substringBefore('/').trim()
-            if (!isSafePackageName(name) || isProtectedPackage(name)) return@mapNotNull null
-            val newVersion = line.substringAfter('/').split(' ').getOrNull(1).orEmpty()
-            val current = line.substringAfter("upgradable from: ").substringBefore(']').trim()
-            val record = installed[name]
-            val description = record?.get("description") as? String ?: ""
-            mapOf(
-                "name" to name,
-                "version" to newVersion,
-                "currentVersion" to current,
-                "description" to description,
-                "section" to (record?.get("section") ?: categoryForPackage(name, description)),
-                "installed" to true,
-                "gui" to providesDesktopEntry(name),
-            )
-        }.distinctBy { it["name"] }.toList()
-    }
-
-    /** Upgrades every package from [getUpgradablePackages]; core packages are never touched. */
-    fun upgradeAllPackages(onProgress: (Double, String) -> Unit): Boolean {
-        onProgress(0.06, "Repairing interrupted package operations...")
-        installPackageGroup("dpkg --configure -a")
-        if (packageOperationCancelled) return cancelled(onProgress)
-        onProgress(0.14, "Checking for updates...")
-        val packages = getUpgradablePackages(refresh = true).map { it["name"] as String }
-        if (packageOperationCancelled) return cancelled(onProgress)
-        if (packages.isEmpty()) {
-            onProgress(1.0, "Everything is up to date")
-            return true
-        }
-        onProgress(0.3, "Updating ${packages.size} package${if (packages.size == 1) "" else "s"}...")
-        val output = executeCommand(
-            "DEBIAN_FRONTEND=noninteractive apt-get " +
-                "-o Dpkg::Options::=--force-confdef " +
-                "-o Dpkg::Options::=--force-confold " +
-                "install --only-upgrade -y ${packages.joinToString(" ")}",
-        )
-        if (packageOperationCancelled) return cancelled(onProgress)
-        onProgress(0.88, "Finishing up...")
-        patchShebangs(force = true)
-        executeCommand("timeout --signal=TERM --kill-after=5s 90s dpkg --configure -a")
-        refreshDesktopMenus()
-        val remaining = getUpgradablePackages(refresh = false).size
-        val ok = !output.startsWith("Error:") && remaining < packages.size
-        onProgress(
-            if (ok) 1.0 else -1.0,
-            if (!ok) "Update failed" else if (remaining == 0) "All packages updated" else "$remaining package(s) could not be updated",
-        )
-        return ok
-    }
-
-    private fun cancelled(onProgress: (Double, String) -> Unit): Boolean {
-        onProgress(-1.0, "Update cancelled")
-        return false
-    }
-
-    /** Disk usage of the Linux runtime and the device, in bytes. */
-    fun getStorageInfo(): Map<String, Any> {
-        val stat = android.os.StatFs(baseDir.absolutePath)
-        val info = mutableMapOf<String, Any>(
-            "deviceFree" to stat.availableBytes,
-            "deviceTotal" to stat.totalBytes,
-            "available" to isBootstrapped(),
-        )
-        if (!isBootstrapped()) return info
-        // Separate du runs: one du call counts each inode once, so a nested path listed after
-        // its parent would report 0.
-        val output = runQuickCommand(
-            "cd '${baseDir.absolutePath}' && for d in usr home usr/var/cache/apt usr/var/lib/apt/lists; " +
-                "do du -sk \"\$d\" 2>/dev/null; done; true",
-        )
-        val sizes = output.lineSequence().mapNotNull { line ->
-            val parts = line.trim().split(Regex("\\s+"), limit = 2)
-            val kb = parts.getOrNull(0)?.toLongOrNull() ?: return@mapNotNull null
-            parts.getOrNull(1)?.let { it to kb * 1024 }
-        }.toMap()
-        val cache = (sizes["usr/var/cache/apt"] ?: 0L) + (sizes["usr/var/lib/apt/lists"] ?: 0L)
-        info["system"] = ((sizes["usr"] ?: 0L) - cache).coerceAtLeast(0L)
-        info["home"] = sizes["home"] ?: 0L
-        info["cache"] = cache
-        info["packages"] = installedPackageRecords().size
-        return info
-    }
-
-    /** Deletes downloaded package files (apt-get clean). Returns bytes freed, or -1 on failure. */
-    fun cleanPackageCache(): Long {
-        val before = (getStorageInfo()["cache"] as? Long) ?: 0L
-        val output = executeCommand("apt-get clean")
-        if (output.startsWith("Error:")) return -1L
-        val after = (getStorageInfo()["cache"] as? Long) ?: 0L
-        return (before - after).coerceAtLeast(0L)
-    }
-
-    private fun installedPackageRecords(): List<Map<String, Any>> {
-        val statusFile = File(prefixDir, "var/lib/dpkg/status")
-        if (!statusFile.isFile) return emptyList()
-        return statusFile.readText().split(Regex("\\n\\s*\\n")).mapNotNull { paragraph ->
-            val fields = mutableMapOf<String, String>()
-            var currentKey: String? = null
-            paragraph.lineSequence().forEach { line ->
-                if (line.startsWith(" ") && currentKey != null) {
-                    fields[currentKey!!] = fields[currentKey!!].orEmpty() + " " + line.trim()
-                } else {
-                    val colon = line.indexOf(':')
-                    if (colon > 0) {
-                        currentKey = line.substring(0, colon)
-                        fields[currentKey!!] = line.substring(colon + 1).trim()
-                    }
-                }
-            }
-            if (fields["Status"] != "install ok installed") return@mapNotNull null
-            val name = fields["Package"]?.substringBefore(':') ?: return@mapNotNull null
-            val description = fields["Description"].orEmpty().substringBefore(" . ").trim()
-            mapOf(
-                "name" to name,
-                "description" to description,
-                "version" to fields["Version"].orEmpty(),
-                "section" to fields["Section"].orEmpty().ifEmpty { categoryForPackage(name, description) },
-                "installed" to true,
-                "gui" to providesDesktopEntry(name),
-                "removable" to !isProtectedPackage(name),
-            )
-        }.sortedBy { (it["name"] as String).lowercase() }
-    }
-
-    private fun providesDesktopEntry(packageName: String): Boolean {
-        val fileList = File(prefixDir, "var/lib/dpkg/info/$packageName.list")
-        return fileList.isFile && fileList.useLines { lines ->
-            lines.any { it.contains("/share/applications/") && it.endsWith(".desktop") }
-        }
-    }
-
-    private fun categoryForPackage(name: String, description: String): String {
-        val text = "$name $description".lowercase()
-        return when {
-            listOf("browser", "firefox", "chromium").any(text::contains) -> "Internet"
-            listOf("editor", "compiler", "git", "python", "nodejs", "ide").any(text::contains) -> "Development"
-            listOf("image", "photo", "graphics", "gimp", "blender").any(text::contains) -> "Graphics"
-            listOf("audio", "video", "media", "music", "vlc").any(text::contains) -> "Multimedia"
-            listOf("office", "document", "spreadsheet", "pdf").any(text::contains) -> "Office"
-            else -> "System"
-        }
-    }
-
-    private fun isSafePackageName(packageName: String): Boolean =
-        packageName.matches(Regex("[a-z0-9][a-z0-9+.-]{0,127}"))
-
-    private fun isProtectedPackage(packageName: String): Boolean =
-        packageName in setOf(
-            "apt", "bash", "coreutils", "dpkg", "termux-tools", "termux-am", "glibc-repo",
-            "x11-repo", "tur-repo", "pulseaudio", "dbus", "python", "xfce4", "xfce4-session",
-            "xfce4-panel", "xfdesktop", "xfwm4", "xfconf", "thunar", "xorg-xrandr",
-        )
-
-    private fun storeInstalledPackages(): Set<String> =
-        context.getSharedPreferences("package_store", Context.MODE_PRIVATE)
-            .getStringSet("installed", emptySet())
-            ?.toSet()
-            .orEmpty()
-
-    private fun setStorePackageInstalled(packageName: String, installed: Boolean) {
-        val preferences = context.getSharedPreferences("package_store", Context.MODE_PRIVATE)
-        val packages = preferences.getStringSet("installed", emptySet())?.toMutableSet() ?: mutableSetOf()
-        if (installed) packages.add(packageName) else packages.remove(packageName)
-        preferences.edit().putStringSet("installed", packages).commit()
     }
 
     private fun runQuickCommand(command: String): String = runCatching {
@@ -2855,26 +2772,35 @@ $stagedProfile
 
         val bashBin = File(prefixDir, "bin/bash").absolutePath
         val fullCommand = listOf(bashBin, "-c", command)
-        val lease = activeCommands.reserve(interactive)
+        val commandLease = acquireCommandLease(interactive)
             ?: return "Error: Another command is already running"
+        val lease = commandLease.lease
+        var process: Process? = null
 
         return try {
             Log.d(TAG, "Executing command natively: $command")
 
-            val process = ProcessBuilder(fullCommand)
+            val launchedCommand = if (commandLease.persistentLane) {
+                isolatedPackageCommand(fullCommand)
+            } else {
+                fullCommand
+            }
+            process = ProcessBuilder(launchedCommand)
                 .directory(prefixDir)
                 .redirectErrorStream(true)
                 .also { pb ->
                     pb.environment().clear()
                     pb.environment().putAll(getTermuxEnv())
+                    commandLease.ownershipToken?.let { token ->
+                        pb.environment()[PACKAGE_PROCESS_OWNER_ENV] = token
+                    }
                 }
                 .start()
 
             if (!activeCommands.attach(lease, process)) {
-                process.destroyForcibly()
+                terminateProcess(process, 200, commandLease.ownershipToken)
                 return "Error: Command was cancelled before it started"
             }
-
             val output = StringBuilder()
             val reader = java.io.InputStreamReader(process.inputStream)
             val buffer = CharArray(1024)
@@ -2887,6 +2813,12 @@ $stagedProfile
                 onOutput?.invoke(chunk)
             }
             process.waitFor()
+            check(
+                waitForOwnedPackageProcesses(commandLease.ownershipToken) ==
+                    PackageProcessSettlement.SETTLED,
+            ) {
+                "Package processes did not settle"
+            }
             Log.d(TAG, "Command finished with exit code: ${process.exitValue()}")
 
             if (process.exitValue() != 0) {
@@ -2895,29 +2827,194 @@ $stagedProfile
 
             output.toString()
         } catch (e: Exception) {
+            process?.let {
+                terminateProcess(it, 200, commandLease.ownershipToken)
+            }
             Log.e(TAG, "Command execution failed: ${e.message}")
             "Error: ${e.message}"
         } finally {
-            activeCommands.release(lease)
+            releaseCommandLease(commandLease)
         }
     }
 
-    fun interruptCommand() {
-        activeCommands.cancel()?.let { process ->
-            Log.d(TAG, "Interrupting active command...")
-            val rootPid = processPid(process)
-            val descendants = rootPid?.let(::descendantPids).orEmpty()
-            descendants.asReversed().forEach { pid -> android.os.Process.sendSignal(pid, 15) }
-            rootPid?.let { android.os.Process.sendSignal(it, 15) } ?: process.destroy()
-            try {
-                Thread.sleep(200)
-            } catch (_: InterruptedException) {
-                Thread.currentThread().interrupt()
+    private fun acquireCommandLease(interactive: Boolean): CommandLease? =
+        synchronized(packageOperationLock) {
+            val packageOperation = activePackageOperation
+            if (packageOperation != null) {
+                if (packageOperation.ownerThreadId != Thread.currentThread().id) {
+                    return@synchronized null
+                }
+                val ownershipToken = packageOperation.operationId.toString()
+                if (unsettledPackageOwnershipToken == ownershipToken) {
+                    if (processPidsOwnedByToken(ownershipToken).isNotEmpty()) {
+                        return@synchronized null
+                    }
+                    unsettledPackageOwnershipToken = null
+                }
+                if (!activeCommands.beginCommand(packageOperation.commandLane)) {
+                    return@synchronized null
+                }
+                CommandLease(
+                    packageOperation.commandLane,
+                    persistentLane = true,
+                    ownershipToken = ownershipToken,
+                )
+            } else {
+                if (!releaseQuarantinedPackageLaneIfSettled()) {
+                    return@synchronized null
+                }
+                activeCommands.reserve(interactive)
+                    ?.let {
+                        CommandLease(
+                            it,
+                            persistentLane = false,
+                            ownershipToken = null,
+                        )
+                    }
             }
-            descendants.asReversed().forEach { pid -> android.os.Process.sendSignal(pid, 9) }
-            if (process.isAlive) process.destroyForcibly()
+        }
+
+    private fun releaseCommandLease(commandLease: CommandLease) {
+        if (commandLease.persistentLane) {
+            activeCommands.finishCommand(commandLease.lease)
+        } else {
+            activeCommands.release(commandLease.lease)
         }
     }
+
+    private fun interruptOwnedPackageCommand(
+        operationId: Long,
+        gracePeriodMs: Long,
+    ): Boolean {
+        val cancellation = synchronized(packageOperationLock) {
+            val operation = activePackageOperation
+                ?.takeIf { it.operationId == operationId }
+                ?: return@synchronized null
+            activeCommands.cancelProcess(operation.commandLane)
+        } ?: return false
+        cancellation.process?.let {
+            terminateProcess(it, gracePeriodMs, operationId.toString())
+        }
+        return true
+    }
+
+    fun interruptCommand(gracePeriodMs: Long = 200) {
+        val process = synchronized(packageOperationLock) {
+            if (activePackageOperation != null) null else activeCommands.cancel()
+        }
+        process?.let { terminateProcess(it, gracePeriodMs) }
+    }
+
+    private fun terminateProcess(
+        process: Process,
+        gracePeriodMs: Long,
+        ownershipToken: String? = null,
+    ) {
+        Log.d(TAG, "Interrupting active command...")
+        val rootPid = processPid(process)
+        if (rootPid != null) {
+            ownedProcessTerminator(ownershipToken).terminate(rootPid, gracePeriodMs)
+        } else {
+            process.destroy()
+        }
+        ownershipToken?.let { token ->
+            val detached = tokenOwnedProcessTerminator(token)
+            if (!detached.awaitGroupExit(groupId = 0, timeoutMs = 0)) {
+                detached.terminateGroup(groupId = 0, gracePeriodMs = gracePeriodMs)
+                if (
+                    !detached.awaitGroupExit(
+                        groupId = 0,
+                        timeoutMs = PACKAGE_PROCESS_FORCE_GRACE_MILLIS,
+                    )
+                ) {
+                    markUnsettledPackageOwnership(token)
+                }
+            }
+        }
+        if (process.isAlive) {
+            process.destroyForcibly()
+        }
+    }
+
+    private fun waitForOwnedPackageProcesses(
+        ownershipToken: String?,
+    ): PackageProcessSettlement {
+        if (ownershipToken == null) return PackageProcessSettlement.SETTLED
+        val waiter = tokenOwnedProcessTerminator(ownershipToken)
+        if (
+            waiter.awaitGroupExit(
+                groupId = 0,
+                timeoutMs = PACKAGE_PROCESS_SETTLE_MILLIS,
+            )
+        ) {
+            return PackageProcessSettlement.SETTLED
+        }
+        Log.w(TAG, "Package processes did not settle; terminating owned workers")
+        waiter.terminateGroup(
+            groupId = 0,
+            gracePeriodMs = PACKAGE_PROCESS_FORCE_GRACE_MILLIS,
+        )
+        val settled = waiter.awaitGroupExit(
+            groupId = 0,
+            timeoutMs = PACKAGE_PROCESS_FORCE_GRACE_MILLIS,
+        )
+        if (!settled) markUnsettledPackageOwnership(ownershipToken)
+        return if (settled) {
+            PackageProcessSettlement.TERMINATED
+        } else {
+            PackageProcessSettlement.SURVIVORS
+        }
+    }
+
+    private fun markUnsettledPackageOwnership(ownershipToken: String) {
+        synchronized(packageOperationLock) {
+            unsettledPackageOwnershipToken = ownershipToken
+        }
+    }
+
+    private fun ownedProcessTerminator(
+        ownershipToken: String?,
+    ): OwnedProcessTreeTerminator =
+        OwnedProcessTreeTerminator(
+            descendantsOf = ::descendantPids,
+            identityOf = ::processIdentity,
+            signal = android.os.Process::sendSignal,
+            elapsedRealtime = android.os.SystemClock::elapsedRealtime,
+            sleep = { duration ->
+                try {
+                    Thread.sleep(duration)
+                } catch (_: InterruptedException) {
+                    Thread.currentThread().interrupt()
+                }
+            },
+            membersOfGroup = if (ownershipToken == null) {
+                { emptyList() }
+            } else {
+                ::processGroupPids
+            },
+            isOwned = { pid ->
+                ownershipToken == null || processOwnershipToken(pid) == ownershipToken
+            },
+        )
+
+    private fun tokenOwnedProcessTerminator(
+        ownershipToken: String,
+    ): OwnedProcessTreeTerminator =
+        OwnedProcessTreeTerminator(
+            descendantsOf = { emptyList() },
+            identityOf = ::processIdentity,
+            signal = android.os.Process::sendSignal,
+            elapsedRealtime = android.os.SystemClock::elapsedRealtime,
+            sleep = { duration ->
+                try {
+                    Thread.sleep(duration)
+                } catch (_: InterruptedException) {
+                    Thread.currentThread().interrupt()
+                }
+            },
+            membersOfGroup = { processPidsOwnedByToken(ownershipToken) },
+            isOwned = { pid -> processOwnershipToken(pid) == ownershipToken },
+        )
 
     private fun processPid(process: Process): Int? = runCatching {
         var type: Class<*>? = process.javaClass
@@ -2947,16 +3044,51 @@ $stagedProfile
         return result
     }
 
-    private fun clearStalePackageLocks() {
-        listOf(
-            File(prefixDir, "var/lib/dpkg/lock"),
-            File(prefixDir, "var/lib/dpkg/lock-frontend"),
-            File(prefixDir, "var/cache/apt/archives/lock"),
-            File(prefixDir, "var/lib/apt/lists/lock"),
-        ).forEach { lock ->
-            if (lock.exists() && !lock.delete()) {
-                Log.w(TAG, "Could not remove stale package lock: ${lock.absolutePath}")
-            }
-        }
+    private fun isolatedPackageCommand(command: List<String>): List<String> {
+        val setsid = sequenceOf(
+            File("/system/bin/setsid"),
+            File(binDir, "setsid"),
+        ).firstOrNull(File::canExecute) ?: return command
+        return listOf(setsid.absolutePath) + command
     }
+
+    private fun processGroupPids(groupId: Int): List<Int> =
+        File("/proc").listFiles()
+            ?.asSequence()
+            ?.mapNotNull { entry -> entry.name.toIntOrNull() }
+            ?.filter { pid -> processStatFields(pid)?.getOrNull(2)?.toIntOrNull() == groupId }
+            ?.toList()
+            .orEmpty()
+
+    private fun processIdentity(pid: Int): String? {
+        val fields = processStatFields(pid) ?: return null
+        return processIdentityFromStatFields(fields)
+    }
+
+    private fun processOwnershipToken(pid: Int): String? = runCatching {
+        File("/proc/$pid/environ").readBytes()
+            .toString(Charsets.UTF_8)
+            .split('\u0000')
+            .firstOrNull { it.startsWith("$PACKAGE_PROCESS_OWNER_ENV=") }
+            ?.substringAfter('=')
+    }.getOrNull()
+
+    private fun processPidsOwnedByToken(ownershipToken: String): List<Int> =
+        File("/proc").listFiles()
+            ?.asSequence()
+            ?.mapNotNull { entry -> entry.name.toIntOrNull() }
+            ?.filter { pid ->
+                processIdentity(pid) != null &&
+                    processOwnershipToken(pid) == ownershipToken
+            }
+            ?.toList()
+            .orEmpty()
+
+    private fun processStatFields(pid: Int): List<String>? = runCatching {
+        val stat = File("/proc/$pid/stat").readText()
+        stat.substring(stat.lastIndexOf(") ") + 2)
+            .trim()
+            .split(Regex("\\s+"))
+    }.getOrNull()
+
 }

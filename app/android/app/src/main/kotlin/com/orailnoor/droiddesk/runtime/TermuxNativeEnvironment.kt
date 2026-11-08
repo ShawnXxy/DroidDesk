@@ -10,7 +10,6 @@ internal interface LegacyRuntimePort {
     val desktop: String
     val rootfsPath: String
     val rootfsSizeBytes: Long
-    val optionalApps: Map<String, Boolean>
     val paths: EnvironmentPaths
 
     fun provision(
@@ -28,11 +27,6 @@ internal interface LegacyRuntimePort {
         stdin: Boolean,
     ): ExecutionResult
     fun executeDesktop(command: String): Result<Unit>
-    fun installOptionalApp(
-        appId: String,
-        onProgress: (Double, String) -> Unit,
-        onLog: (String) -> Unit,
-    ): Result<Unit>
     fun waitForDesktopReady(desktop: String, timeoutMs: Long): Boolean
     fun applyDisplayProfile(profile: DisplayProfile, onComplete: (Result<Unit>) -> Unit)
     fun cancelDisplayProfile()
@@ -88,14 +82,6 @@ internal abstract class LegacyEnvironmentAdapter(
         }
     }
 
-    override fun optionalAppsStatus(): Map<String, Boolean> = port.optionalApps
-
-    override fun installOptionalApp(
-        appId: String,
-        onProgress: (Double, String) -> Unit,
-        onLog: (String) -> Unit,
-    ): Result<Unit> = port.installOptionalApp(appId, onProgress, onLog)
-
     override fun waitForDesktopReady(desktop: String, timeoutMs: Long): Boolean =
         port.waitForDesktopReady(desktop, timeoutMs)
 
@@ -127,8 +113,6 @@ internal class TermuxNativeEnvironment(
             override val desktop: String get() = runtime.getInstalledDE()
             override val rootfsPath: String = ""
             override val rootfsSizeBytes: Long = 0
-            override val optionalApps: Map<String, Boolean>
-                get() = runtime.getOptionalAppsStatus()
             override val paths: EnvironmentPaths
                 get() {
                     val home = File(filesDir, "home")
@@ -189,20 +173,6 @@ internal class TermuxNativeEnvironment(
 
             override fun executeDesktop(command: String): Result<Unit> =
                 runtime.executeDesktopCommand(command)
-
-            override fun installOptionalApp(
-                appId: String,
-                onProgress: (Double, String) -> Unit,
-                onLog: (String) -> Unit,
-            ): Result<Unit> {
-                runtime.setInstallLogSink(onLog)
-                return try {
-                    if (runtime.installOptionalApp(appId, onProgress)) Result.success(Unit)
-                    else Result.failure(IllegalStateException("Optional app installation failed"))
-                } finally {
-                    runtime.setInstallLogSink(null)
-                }
-            }
 
             override fun waitForDesktopReady(desktop: String, timeoutMs: Long): Boolean =
                 runtime.waitForDesktopReady(desktop, timeoutMs)

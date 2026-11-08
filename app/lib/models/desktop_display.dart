@@ -22,6 +22,15 @@ enum DesktopRenderPolicy {
   final String wireValue;
 }
 
+enum DesktopExternalInputRoute {
+  automatic('automatic'),
+  native('native'),
+  phoneRelay('phoneRelay');
+
+  const DesktopExternalInputRoute(this.wireValue);
+  final String wireValue;
+}
+
 class DesktopDisplayInfo {
   const DesktopDisplayInfo({
     required this.id,
@@ -202,6 +211,7 @@ class DesktopDisplaySettings {
     required this.renderPolicy,
     required this.uiScalePercent,
     required this.inputMode,
+    required this.inputRoute,
   }) {
     if (displayKey.isEmpty ||
         (uiScalePercent != null && !uiScales.contains(uiScalePercent)) ||
@@ -221,11 +231,18 @@ class DesktopDisplaySettings {
       (policy) => policy.wireValue == map['renderPolicy'],
     );
     if (policy.isEmpty) throw const FormatException('Invalid render policy');
+    final inputRoute = DesktopExternalInputRoute.values.where(
+      (route) => route.wireValue == map['inputRoute'],
+    );
+    if (inputRoute.isEmpty) {
+      throw const FormatException('Invalid external input route');
+    }
     return DesktopDisplaySettings(
       displayKey: _required<String>(map, 'displayKey'),
       renderPolicy: policy.single,
       uiScalePercent: scale,
       inputMode: mode,
+      inputRoute: inputRoute.single,
     );
   }
 
@@ -234,12 +251,14 @@ class DesktopDisplaySettings {
   final DesktopRenderPolicy renderPolicy;
   final int? uiScalePercent;
   final int inputMode;
+  final DesktopExternalInputRoute inputRoute;
 
   Map<String, Object?> toMap() => {
     'displayKey': displayKey,
     'renderPolicy': renderPolicy.wireValue,
     'uiScalePercent': uiScalePercent,
     'inputMode': inputMode,
+    'inputRoute': inputRoute.wireValue,
   };
 }
 

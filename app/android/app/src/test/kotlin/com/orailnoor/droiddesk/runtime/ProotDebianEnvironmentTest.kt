@@ -1,5 +1,6 @@
 package com.orailnoor.droiddesk.runtime
 
+import com.orailnoor.droiddesk.packages.AndroidProotPackagePort
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -59,7 +60,6 @@ class ProotDebianEnvironmentTest {
         assertEquals("debian-bookworm", status.distro)
         assertEquals(host.rootfs.absolutePath, status.rootfsPath)
         assertEquals("/home/droiddesk", environment.paths().guestHome)
-        assertEquals(mapOf("code_oss" to true), environment.optionalAppsStatus())
     }
 
     @Test
@@ -99,10 +99,135 @@ class ProotDebianEnvironmentTest {
         )
     }
 
+    @Test
+    fun packagePortUsesBoundedRecipeOwnedCommandsAndHostState() {
+        val host = FakeEnvironmentHost().apply {
+            File(rootfs, "var/lib/dpkg/status").apply {
+                parentFile!!.mkdirs()
+                writeText(
+                    """
+                        Package: firefox-esr
+                        Status: install ok installed
+                        Version: 128.9.0esr
+                        Architecture: arm64
+                    """.trimIndent(),
+                )
+            }
+        }
+        val port = AndroidProotPackagePort(host)
+
+        assertEquals(host.rootfs, port.rootfsDir)
+        assertEquals("arm64", port.architecture())
+        assertEquals(mapOf("firefox-esr" to "128.9.0esr"), port.installedPackages())
+        assertEquals(host.availableBytes(), port.availableBytes())
+
+        port.runRoot(
+            executable = "apt-get",
+            arguments = listOf("install", "-y", "firefox-esr"),
+            environment = mapOf("DEBIAN_FRONTEND" to "noninteractive"),
+            timeoutMs = 120_000,
+            onOutput = {},
+        )
+        port.runDesktop(
+            executable = "xfdesktop",
+            arguments = listOf("--reload"),
+            environment = mapOf("DISPLAY" to ":0"),
+            timeoutMs = 30_000,
+            onOutput = {},
+        )
+        assertTrue(port.beginOperation(17))
+        assertTrue(port.cancelOwnedProcess(17, 5_000))
+        port.finishOperation(17)
+
+        assertTrue(
+            host.calls.any {
+                it == "execute:root:env DEBIAN_FRONTEND='noninteractive' " +
+                    "timeout --signal=TERM --kill-after=5s 120s " +
+                    "'apt-get' 'install' '-y' 'firefox-esr':false:false"
+            },
+        )
+        assertTrue(
+            host.calls.any {
+                it == "execute:droiddesk:env DISPLAY=':0' " +
+                    "timeout --signal=TERM --kill-after=5s 30s " +
+                    "'xfdesktop' '--reload':false:false"
+            },
+        )
+        assertEquals(listOf(5_000L), host.cancelGracePeriods)
+    }
+
+    @Test
+    fun packagePortDelegatesStorageSizingWithoutRunningAContainerCommand() {
+        val host = FakeEnvironmentHost()
+        val measured = mutableListOf<File>()
+        val port = AndroidProotPackagePort(
+            host,
+            DirectorySizer { directory ->
+                measured += directory
+                4096L
+            },
+        )
+
+        assertEquals(4096L, port.directoryBytes(host.rootfsPath()))
+        assertEquals(listOf(host.rootfsPath()), measured)
+        assertTrue(host.calls.none { it.startsWith("execute:") })
+    }
+
+    @Test
+    fun packagePortReadsArchitectureWithoutConsumingTheCommandChannel() {
+        val host = FakeEnvironmentHost().apply {
+            File(rootfs, "var/lib/dpkg/status").apply {
+                parentFile!!.mkdirs()
+                writeText(
+                    """
+                        Package: adduser
+                        Status: install ok installed
+                        Version: 3.134
+                        Architecture: all
+
+                        Package: libc6
+                        Status: install ok installed
+                        Version: 2.36
+                        Architecture: arm64
+                    """.trimIndent(),
+                )
+            }
+        }
+
+        val architecture = AndroidProotPackagePort(host).architecture()
+
+        assertEquals("arm64", architecture)
+        assertTrue(host.calls.none { it.contains("dpkg --print-architecture") })
+    }
+
+    @Test
+    fun packagePortPropagatesOperationOwnershipIntoGuestCommand() {
+        val host = FakeEnvironmentHost().apply {
+            activeOwnershipToken = "47"
+        }
+
+        AndroidProotPackagePort(host).runRoot(
+            executable = "dpkg",
+            arguments = listOf("--configure", "-a"),
+            environment = emptyMap(),
+            timeoutMs = 30_000,
+            onOutput = {},
+        )
+
+        assertTrue(
+            host.calls.single().contains(
+                "$PACKAGE_PROCESS_OWNER_ENV='47'",
+            ),
+        )
+    }
+
     private class FakeEnvironmentHost : ProotDebianHost {
         val calls = mutableListOf<String>()
         val rootfs: File = Files.createTempDirectory("proot-rootfs").toFile()
-        override fun availableBytes(): Long = Long.MAX_VALUE
+        val commandOutputs = mutableMapOf<String, String>()
+        val cancelGracePeriods = mutableListOf<Long>()
+        var activeOwnershipToken: String? = null
+        override fun availableBytes(): Long = 64L * 1024L * 1024L * 1024L
         override fun ensureToolchain(
             onProgress: (Double, String) -> Unit,
             onLog: (String) -> Unit,
@@ -140,7 +265,6 @@ class ProotDebianEnvironmentTest {
         override fun isRunning() = false
         override fun rootfsPath() = rootfs
         override fun rootfsSizeBytes() = 1024L
-        override fun optionalAppsStatus() = mapOf("code_oss" to true)
         override fun executeActive(
             user: String,
             command: String,
@@ -149,7 +273,21 @@ class ProotDebianEnvironmentTest {
             stdin: Boolean,
         ): ExecutionResult {
             calls += "execute:$user:$command:$interactive:$stdin"
-            return ExecutionResult(0, "ok")
+            return ExecutionResult(0, commandOutputs[command] ?: "ok")
+        }
+
+        override fun beginActivePackageCommand(operationId: Long): Boolean = true
+
+        override fun finishActivePackageCommand(operationId: Long) = Unit
+
+        override fun activePackageOwnershipToken(): String? = activeOwnershipToken
+
+        override fun cancelActivePackageCommand(
+            operationId: Long,
+            gracePeriodMs: Long,
+        ): Boolean {
+            cancelGracePeriods += gracePeriodMs
+            return true
         }
     }
 

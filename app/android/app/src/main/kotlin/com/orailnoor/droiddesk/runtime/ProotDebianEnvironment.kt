@@ -3,6 +3,7 @@ package com.orailnoor.droiddesk.runtime
 import android.content.Context
 import android.os.Handler
 import android.os.Looper
+import android.util.Log
 import com.orailnoor.droiddesk.display.DisplayProfile
 import java.io.File
 import java.io.FileInputStream
@@ -99,7 +100,6 @@ interface ProotDebianHost : ProotProvisioningHost, ProotDesktopSessionHost {
     fun rootfsPath(): File
     fun rootfsSizeBytes(): Long
     fun sharedHomeDirectories(): Map<String, File> = emptyMap()
-    fun optionalAppsStatus(): Map<String, Boolean>
     fun executeActive(
         user: String,
         command: String,
@@ -107,6 +107,13 @@ interface ProotDebianHost : ProotProvisioningHost, ProotDesktopSessionHost {
         interactive: Boolean = false,
         stdin: Boolean = false,
     ): ExecutionResult
+    fun beginActivePackageCommand(operationId: Long): Boolean = true
+    fun finishActivePackageCommand(operationId: Long) = Unit
+    fun activePackageOwnershipToken(): String? = null
+    fun cancelActivePackageCommand(
+        operationId: Long,
+        gracePeriodMs: Long,
+    ): Boolean = false
 
     override fun isDesktopReady(): Boolean =
         readReadyMarker() != null && rootfsPath().isDirectory
@@ -184,8 +191,6 @@ internal class ProotDebianEnvironment(
         is ExecutionRequest.Desktop -> host.executeActive("droiddesk", request.command)
     }
 
-    override fun optionalAppsStatus(): Map<String, Boolean> = host.optionalAppsStatus()
-
     override fun waitForDesktopReady(desktop: String, timeoutMs: Long): Boolean =
         session.waitForDesktopReady(timeoutMs)
 
@@ -217,14 +222,6 @@ internal class ProotDebianEnvironment(
         ).exitCode == 0
     }
 
-    override fun installOptionalApp(
-        appId: String,
-        onProgress: (Double, String) -> Unit,
-        onLog: (String) -> Unit,
-    ): Result<Unit> = Result.failure(
-        UnsupportedOperationException("Debian optional app installation is not configured: $appId"),
-    )
-
     override fun paths(): EnvironmentPaths {
         val rootfs = host.rootfsPath()
         val home = File(rootfs, "home/droiddesk")
@@ -245,6 +242,7 @@ internal class ProotDebianEnvironment(
 internal class AndroidProotDebianHost(
     context: Context,
     private val linuxRuntime: LinuxRuntime,
+    private val directorySizer: DirectorySizer = AndroidDirectorySizer,
 ) : ProotDebianHost {
     private val appContext = context.applicationContext
     private val filesDir = appContext.filesDir
@@ -492,12 +490,7 @@ internal class AndroidProotDebianHost(
         if (!rootfsSizeRefreshInFlight.compareAndSet(false, true)) return
         ROOTFS_SIZE_EXECUTOR.execute {
             try {
-                val size = rootfsPath()
-                    .takeIf(File::isDirectory)
-                    ?.walkTopDown()
-                    ?.filter(File::isFile)
-                    ?.sumOf(File::length)
-                    ?: 0L
+                val size = directorySizer.bytes(rootfsPath())
                 val refreshedAt = System.currentTimeMillis()
                 cachedRootfsSizeBytes = size
                 rootfsSizeRefreshedAt = refreshedAt
@@ -505,26 +498,12 @@ internal class AndroidProotDebianHost(
                     .putLong(KEY_ROOTFS_SIZE_BYTES, size)
                     .putLong(KEY_ROOTFS_SIZE_REFRESHED_AT, refreshedAt)
                     .apply()
+            } catch (error: Throwable) {
+                Log.w(TAG, "Could not refresh Debian PRoot size", error)
             } finally {
                 rootfsSizeRefreshInFlight.set(false)
             }
         }
-    }
-
-    override fun optionalAppsStatus(): Map<String, Boolean> {
-        val rootfs = rootfsPath()
-        return mapOf(
-            "firefox" to File(rootfs, "usr/bin/firefox").exists(),
-            "code_oss" to (
-                File(rootfs, "usr/bin/code").exists() ||
-                    File(rootfs, "usr/bin/code-oss").exists()
-                ),
-            "nodejs" to File(rootfs, "usr/bin/node").exists(),
-            "imagemagick" to (
-                File(rootfs, "usr/bin/magick").exists() ||
-                    File(rootfs, "usr/bin/convert").exists()
-                ),
-        )
     }
 
     override fun executeActive(
@@ -543,6 +522,20 @@ internal class AndroidProotDebianHost(
             stdin,
         )
 
+    override fun beginActivePackageCommand(operationId: Long): Boolean =
+        linuxRuntime.beginOwnedPackageCommand(operationId)
+
+    override fun finishActivePackageCommand(operationId: Long) =
+        linuxRuntime.finishOwnedPackageCommand(operationId)
+
+    override fun activePackageOwnershipToken(): String? =
+        linuxRuntime.activePackageOwnershipToken()
+
+    override fun cancelActivePackageCommand(
+        operationId: Long,
+        gracePeriodMs: Long,
+    ): Boolean = linuxRuntime.cancelOwnedPackageCommand(operationId, gracePeriodMs)
+
     override fun launchCommand(profile: DisplayProfile): List<String> {
         val binds = sharedFolderBinds()
         return commandBuilder.login(
@@ -550,7 +543,7 @@ internal class AndroidProotDebianHost(
             arguments = listOf("/usr/local/bin/droiddesk-start-xfce"),
             environment = mapOf(
                 "DISPLAY" to ":0",
-                "PULSE_SERVER" to GUEST_PULSE_SERVER,
+                "PULSE_SERVER" to linuxRuntime.guestPulseServer,
                 "PULSE_COOKIE" to PROOT_PULSE_COOKIE_FILE,
                 "XDG_RUNTIME_DIR" to "/tmp/runtime-droiddesk",
                 "LIBGL_ALWAYS_SOFTWARE" to "1",
@@ -626,7 +619,7 @@ internal class AndroidProotDebianHost(
             arguments = listOf("bash", "-lc", prootBusAwareCommand(command)),
             environment = mapOf(
                 "DISPLAY" to ":0",
-                "PULSE_SERVER" to GUEST_PULSE_SERVER,
+                "PULSE_SERVER" to linuxRuntime.guestPulseServer,
                 "PULSE_COOKIE" to PROOT_PULSE_COOKIE_FILE,
                 "XDG_RUNTIME_DIR" to "/tmp/runtime-droiddesk",
             ),
@@ -663,6 +656,7 @@ internal class AndroidProotDebianHost(
     }
 
     private companion object {
+        const val TAG = "ProotDebianHost"
         const val KEY_ROOTFS_SIZE_BYTES = "rootfs_size_bytes"
         const val KEY_ROOTFS_SIZE_REFRESHED_AT = "rootfs_size_refreshed_at"
         const val ROOTFS_SIZE_CACHE_TTL_MS = 10 * 60 * 1000L

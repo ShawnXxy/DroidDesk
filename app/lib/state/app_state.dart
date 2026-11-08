@@ -7,6 +7,7 @@ import 'package:droiddesk/services/update_service.dart';
 import 'package:droiddesk/theme/droid_theme.dart';
 import 'package:droiddesk/models/desktop_display.dart';
 import 'package:droiddesk/models/linux_environment.dart';
+import 'package:droiddesk/models/package_store.dart';
 
 /// Central state management for the entire DroidDesk app.
 class AppState extends ChangeNotifier {
@@ -19,7 +20,8 @@ class AppState extends ChangeNotifier {
   bool _sessionControlBusy = false;
 
   DesktopDisplayState get desktopDisplays => _desktopDisplays;
-  bool get desktopDisplayBusy => _desktopOperationBusy || _sessionControlBusy || _desktopDisplays.isMoving;
+  bool get desktopDisplayBusy =>
+      _desktopOperationBusy || _sessionControlBusy || _desktopDisplays.isMoving;
   String? get desktopOperationError => _desktopOperationError;
   String? get desktopDisplayError =>
       _desktopOperationError ?? _desktopDisplays.error?.toString();
@@ -85,14 +87,19 @@ class AppState extends ChangeNotifier {
 
   Future<void> setAutoOpenOnMonitor(bool enabled) async {
     if (!_allowDisplayRouting()) return;
-    await _runDesktopOperation(() => DroidDeskPlatform.setAutoOpenOnMonitor(enabled));
+    await _runDesktopOperation(
+      () => DroidDeskPlatform.setAutoOpenOnMonitor(enabled),
+    );
   }
 
   Future<void> openDesktopOnDisplay(DesktopDisplayInfo display) async {
     if (!_allowDisplayRouting()) return;
-    await _runDesktopOperation(() => DroidDeskPlatform.openDesktopOnDisplay(
-        displayId: display.id, displayKey: display.key,
-      ));
+    await _runDesktopOperation(
+      () => DroidDeskPlatform.openDesktopOnDisplay(
+        displayId: display.id,
+        displayKey: display.key,
+      ),
+    );
   }
 
   Future<void> moveDesktopToPhone() async {
@@ -103,17 +110,25 @@ class AppState extends ChangeNotifier {
   bool _allowDisplayRouting() {
     if (_disposed) return false;
     if (_desktopDisplays.crossDisplayMovesAllowed) return true;
-    _recordDisplayError(StateError('The phone or TNT launcher selects the display environment'));
+    _recordDisplayError(
+      StateError('The phone or TNT launcher selects the display environment'),
+    );
     return false;
   }
 
   Future<void> saveDesktopDisplaySettings(DesktopDisplaySettings settings) =>
-      _runDesktopOperation(() => DroidDeskPlatform.saveDesktopDisplaySettings(settings));
+      _runDesktopOperation(
+        () => DroidDeskPlatform.saveDesktopDisplaySettings(settings),
+      );
 
-  Future<void> _runDesktopOperation(Future<DesktopDisplayState> Function() operation) async {
+  Future<void> _runDesktopOperation(
+    Future<DesktopDisplayState> Function() operation,
+  ) async {
     if (_disposed) return;
     if (desktopDisplayBusy) {
-      _recordDisplayError(StateError('Another desktop display action is in progress'));
+      _recordDisplayError(
+        StateError('Another desktop display action is in progress'),
+      );
       return;
     }
     _desktopOperationBusy = true;
@@ -161,12 +176,6 @@ class AppState extends ChangeNotifier {
   bool _isInstallingDE = false;
   String? _statusMessage;
   String _setupLog = '';
-  Map<String, bool> _optionalApps = {};
-  String? _installingOptionalApp;
-  double _optionalInstallProgress = 0.0;
-  String _optionalInstallStatus = '';
-  String _optionalInstallLog = '';
-  bool _isProotTerminal = false;
   LinuxEnvironmentStatus? _environmentStatus;
   LinuxEnvironmentKind _selectedEnvironment = LinuxEnvironmentKind.prootDebian;
   bool _environmentSelectionExplicit = false;
@@ -214,12 +223,6 @@ class AppState extends ChangeNotifier {
   bool get isInstallingDE => _isInstallingDE;
   Map<String, dynamic> get deviceInfo => _deviceInfo;
   String? get errorMessage => _errorMessage;
-  Map<String, bool> get optionalApps => _optionalApps;
-  String? get installingOptionalApp => _installingOptionalApp;
-  double get optionalInstallProgress => _optionalInstallProgress;
-  String get optionalInstallStatus => _optionalInstallStatus;
-  String get optionalInstallLog => _optionalInstallLog;
-  bool get isProotTerminal => _isProotTerminal;
   LinuxEnvironmentStatus? get environmentStatus => _environmentStatus;
   LinuxEnvironmentKind get selectedEnvironment => _selectedEnvironment;
 
@@ -227,8 +230,7 @@ class AppState extends ChangeNotifier {
     final status = _environmentStatus;
     if (status == null) return false;
     return switch (_selectedEnvironment) {
-      LinuxEnvironmentKind.prootDebian =>
-        status.capabilities.prootInstallable,
+      LinuxEnvironmentKind.prootDebian => status.capabilities.prootInstallable,
       LinuxEnvironmentKind.termuxNative =>
         !status.capabilities.host.state.blocksProvisioning &&
             !status.capabilities.localExecution.state.blocksProvisioning,
@@ -272,8 +274,7 @@ class AppState extends ChangeNotifier {
     final primaryBlockingReason = environmentBlockingReason;
     return [
       for (final entry in checks.entries)
-        if (entry.value.state !=
-                CapabilityEvidenceState.supportedAndProbed &&
+        if (entry.value.state != CapabilityEvidenceState.supportedAndProbed &&
             entry.value.reason?.isNotEmpty == true &&
             entry.value.reason != primaryBlockingReason)
           '${entry.key}: ${entry.value.reason}',
@@ -300,8 +301,7 @@ class AppState extends ChangeNotifier {
   String? get avfDiagnostic {
     final capabilities = _environmentStatus?.capabilities;
     if (capabilities == null ||
-        capabilities.avfFeature.state ==
-            CapabilityEvidenceState.unavailable) {
+        capabilities.avfFeature.state == CapabilityEvidenceState.unavailable) {
       return null;
     }
     return capabilities.avfPermission.reason ??
@@ -327,8 +327,10 @@ class AppState extends ChangeNotifier {
 
   Future<void> initialize() async {
     _attachDisplayCallbacks();
-    DroidDeskPlatform.onPackageOperationProgress = _onPackageProgress;
-    DroidDeskPlatform.onPackageOperationLog = _onPackageLog;
+    DroidDeskPlatform.onPackageStoreOperationEvent = _receivePackageStoreEvent;
+    DroidDeskPlatform.onPackageStoreOperationResult =
+        _receivePackageStoreResult;
+    DroidDeskPlatform.onPackageStoreError = _receivePackageStoreError;
     _lifecycleListener ??= AppLifecycleListener(
       onResume: () {
         refreshStatus();
@@ -391,14 +393,6 @@ class AppState extends ChangeNotifier {
           _setupLog = _setupLog.substring(_setupLog.length - 20000);
         }
       }
-      if (_installingOptionalApp != null) {
-        _optionalInstallLog += cleanedText;
-        if (_optionalInstallLog.length > 20000) {
-          _optionalInstallLog = _optionalInstallLog.substring(
-            _optionalInstallLog.length - 20000,
-          );
-        }
-      }
       final lines = cleanedText.split('\n');
 
       for (int i = 0; i < lines.length; i++) {
@@ -411,13 +405,8 @@ class AppState extends ChangeNotifier {
       notifyListeners();
     };
 
-    DroidDeskPlatform.onOptionalInstallProgress = (progress, status) {
-      _optionalInstallProgress = progress.clamp(0.0, 1.0);
-      _optionalInstallStatus = status;
-      notifyListeners();
-    };
-
     await refreshStatus();
+    await _restorePackageOperation();
     await loadDeviceInfo();
     await refreshDesktopDisplays();
     DroidDeskPlatform.onUpdateProgress = _onUpdateProgress;
@@ -432,11 +421,24 @@ class AppState extends ChangeNotifier {
   @override
   void dispose() {
     _disposed = true;
-    if (DroidDeskPlatform.onDesktopDisplayStateChanged == _receiveDesktopDisplays) {
+    if (DroidDeskPlatform.onDesktopDisplayStateChanged ==
+        _receiveDesktopDisplays) {
       DroidDeskPlatform.onDesktopDisplayStateChanged = null;
     }
-    if (DroidDeskPlatform.onDesktopDisplayError == _receiveDesktopDisplayError) {
+    if (DroidDeskPlatform.onDesktopDisplayError ==
+        _receiveDesktopDisplayError) {
       DroidDeskPlatform.onDesktopDisplayError = null;
+    }
+    if (DroidDeskPlatform.onPackageStoreOperationEvent ==
+        _receivePackageStoreEvent) {
+      DroidDeskPlatform.onPackageStoreOperationEvent = null;
+    }
+    if (DroidDeskPlatform.onPackageStoreOperationResult ==
+        _receivePackageStoreResult) {
+      DroidDeskPlatform.onPackageStoreOperationResult = null;
+    }
+    if (DroidDeskPlatform.onPackageStoreError == _receivePackageStoreError) {
+      DroidDeskPlatform.onPackageStoreError = null;
     }
     _lifecycleListener?.dispose();
     super.dispose();
@@ -498,9 +500,6 @@ class AppState extends ChangeNotifier {
         _selectedEnvironment = status.kind;
       }
 
-      if (_installedDE.isNotEmpty) {
-        await refreshOptionalApps();
-      }
       if (_disposed) return;
       notifyListeners();
     } catch (e) {
@@ -527,6 +526,12 @@ class AppState extends ChangeNotifier {
   }
 
   void selectEnvironment(LinuxEnvironmentKind environment) {
+    if (_activePackageOperationId != null || _packageRequestPending) {
+      _errorMessage =
+          'Cannot change Linux environment while a package operation is running';
+      notifyListeners();
+      return;
+    }
     _selectedEnvironment = environment;
     _environmentSelectionExplicit = true;
     _errorMessage = null;
@@ -695,37 +700,6 @@ class AppState extends ChangeNotifier {
     }
   }
 
-  // ── Optional applications ──
-
-  Future<void> refreshOptionalApps() async {
-    try {
-      final apps = await DroidDeskPlatform.getOptionalApps();
-      if (_disposed) return;
-      _optionalApps = apps;
-      notifyListeners();
-    } catch (_) {
-      // The desktop remains usable even if package status cannot be queried.
-    }
-  }
-
-  Future<bool> installOptionalApp(String appId) async {
-    if (_installingOptionalApp != null) return false;
-    _installingOptionalApp = appId;
-    _optionalInstallProgress = 0.0;
-    _optionalInstallStatus = 'Preparing installation...';
-    _optionalInstallLog = '';
-    notifyListeners();
-
-    try {
-      final installed = await DroidDeskPlatform.installOptionalApp(appId);
-      await refreshOptionalApps();
-      return installed;
-    } finally {
-      _installingOptionalApp = null;
-      notifyListeners();
-    }
-  }
-
   // ── In-app updates ──
 
   String _appVersion = '';
@@ -787,7 +761,10 @@ class AppState extends ChangeNotifier {
     try {
       final installed = await _installedVersion();
       if (installed.isEmpty) return;
-      final release = await UpdateService.check(installedVersion: installed, manual: manual);
+      final release = await UpdateService.check(
+        installedVersion: installed,
+        manual: manual,
+      );
       if (release != null || manual) {
         if (_availableUpdate?.tag != release?.tag) _downloadedUpdatePath = null;
         _availableUpdate = release;
@@ -836,8 +813,11 @@ class AppState extends ChangeNotifier {
           'cancelled' => null,
           'signature_mismatch' =>
             'This release is signed with a different key. Install it once from the release page.',
-          'size_mismatch' || 'network' => 'The download did not finish. Check your connection and try again.',
-          _ => result['message']?.toString() ?? 'The update could not be downloaded.',
+          'size_mismatch' || 'network' =>
+            'The download did not finish. Check your connection and try again.',
+          _ =>
+            result['message']?.toString() ??
+                'The update could not be downloaded.',
         };
         notifyListeners();
         return false;
@@ -870,10 +850,18 @@ class AppState extends ChangeNotifier {
   List<String> _activePackageIconNames = const [];
   bool _packageRemoving = false;
   bool _packageCancelling = false;
+  bool _packageCancellable = false;
+  bool _packageRequestPending = false;
   double _packageProgress = 0;
   String _packageStatus = '';
   String _packageLog = '';
-  PackageOperationResult? _lastPackageResult;
+  int? _activePackageOperationId;
+  int _latestPackageOperationId = 0;
+  LinuxEnvironmentKind? _activePackageEnvironment;
+  PackageOperationKind? _activePackageKind;
+  PackageOperationPhase? _activePackagePhase;
+  PackageOperationResult? _lastPackageStoreResult;
+  PackageOperationPresentationResult? _lastPackageResult;
   int _packageResultId = 0;
 
   String? get activePackage => _activePackage;
@@ -881,77 +869,381 @@ class AppState extends ChangeNotifier {
   List<String> get activePackageIconNames => _activePackageIconNames;
   bool get packageRemoving => _packageRemoving;
   bool get packageCancelling => _packageCancelling;
+  bool get packageCancellable => _packageCancellable;
   double get packageProgress => _packageProgress;
   String get packageStatus => _packageStatus;
   String get packageLog => _packageLog;
+  int? get activePackageOperationId => _activePackageOperationId;
+  LinuxEnvironmentKind? get activePackageEnvironment =>
+      _activePackageEnvironment;
+  PackageOperationKind? get activePackageKind => _activePackageKind;
+  PackageOperationPhase? get activePackagePhase => _activePackagePhase;
+  PackageOperationResult? get lastPackageStoreResult => _lastPackageStoreResult;
+  String get packageOperationTitle {
+    if (_packageCancelling) return 'Cancelling package operation';
+    return switch (_activePackageKind) {
+      PackageOperationKind.remove => 'Removing $_activePackageName',
+      PackageOperationKind.upgrade => 'Updating $_activePackageName',
+      PackageOperationKind.upgradeAll => 'Updating packages',
+      PackageOperationKind.cleanCache => 'Cleaning package cache',
+      PackageOperationKind.install || null => 'Installing $_activePackageName',
+    };
+  }
 
   /// Result of the most recent finished operation; [packageResultId] changes with each one.
-  PackageOperationResult? get lastPackageResult => _lastPackageResult;
+  PackageOperationPresentationResult? get lastPackageResult =>
+      _lastPackageResult;
   int get packageResultId => _packageResultId;
 
-  void _onPackageProgress(double progress, String status) {
-    if (_activePackage == null) return;
-    _packageProgress = progress.clamp(0.0, 1.0);
-    _packageStatus = status;
+  void _startPackageOperation(
+    String? entryId,
+    String displayName,
+    List<String> iconNames,
+    PackageOperationKind kind,
+    LinuxEnvironmentKind environment,
+  ) {
+    _activePackage = entryId ?? updatesOperation;
+    _activePackageName = displayName;
+    _activePackageIconNames = iconNames;
+    _packageRemoving = kind == PackageOperationKind.remove;
+    _packageCancelling = false;
+    _packageCancellable = false;
+    _packageRequestPending = true;
+    _packageProgress = 0;
+    _packageStatus = switch (kind) {
+      PackageOperationKind.remove => 'Preparing removal...',
+      PackageOperationKind.upgrade => 'Preparing update...',
+      PackageOperationKind.upgradeAll => 'Preparing package updates...',
+      PackageOperationKind.cleanCache => 'Preparing cache cleanup...',
+      PackageOperationKind.install => 'Preparing $displayName...',
+    };
+    _packageLog = '';
+    _activePackageOperationId = null;
+    _activePackageEnvironment = environment;
+    _activePackageKind = kind;
+    _activePackagePhase = PackageOperationPhase.preparing;
     notifyListeners();
   }
 
-  void _onPackageLog(String text) {
-    if (_activePackage == null) return;
-    _packageLog += text;
-    if (_packageLog.length > 12000) {
-      _packageLog = _packageLog.substring(_packageLog.length - 12000);
+  void _receivePackageStoreResult(PackageOperationResult result) {
+    if (_disposed) return;
+    if (result.operationId < _latestPackageOperationId) {
+      unawaited(_acknowledgePackageResult(result.operationId));
+      return;
+    }
+    final activeOperationId = _activePackageOperationId;
+    if (activeOperationId != null && result.operationId != activeOperationId) {
+      return;
+    }
+    if (activeOperationId == null &&
+        _packageRequestPending &&
+        result.environmentKind != _activePackageEnvironment) {
+      return;
+    }
+    if (activeOperationId == null &&
+        !_packageRequestPending &&
+        result.operationId == _latestPackageOperationId) {
+      unawaited(_acknowledgePackageResult(result.operationId));
+      return;
+    }
+    final error = result.error;
+    if (error != null) _errorMessage = '${error.code}: ${error.message}';
+    _finishPackageOperation(
+      result,
+      _activePackageName.isEmpty
+          ? result.entryId ?? 'packages'
+          : _activePackageName,
+      _activePackageIconNames,
+    );
+    unawaited(_acknowledgePackageResult(result.operationId));
+  }
+
+  Future<void> _acknowledgePackageResult(int operationId) async {
+    try {
+      await DroidDeskPlatform.acknowledgePackageStoreOperationResult(
+        operationId,
+      );
+    } on PlatformException {
+      // The result remains available for replay on the next engine.
+    }
+  }
+
+  void _receivePackageStoreEvent(PackageOperationEvent event) {
+    if (_disposed) return;
+    if (_activePackageOperationId == null) {
+      if (!_packageRequestPending ||
+          event.environmentKind != _activePackageEnvironment ||
+          event.operationId <= _latestPackageOperationId) {
+        return;
+      }
+      _activePackageOperationId = event.operationId;
+      _latestPackageOperationId = event.operationId;
+    }
+    if (event.operationId != _activePackageOperationId ||
+        event.environmentKind != _activePackageEnvironment) {
+      return;
+    }
+    _activePackagePhase = event.phase;
+    if (event.progress != null) _packageProgress = event.progress!;
+    _packageStatus = event.message;
+    _packageCancellable = event.cancellable;
+    final logChunk = event.logChunk;
+    if (logChunk != null) {
+      _packageLog += logChunk;
+      if (_packageLog.length > 12000) {
+        _packageLog = _packageLog.substring(_packageLog.length - 12000);
+      }
     }
     notifyListeners();
   }
 
-  void _startPackageOperation(
-    String package,
-    String displayName,
-    List<String> iconNames, {
-    required bool removing,
-  }) {
-    _activePackage = package;
-    _activePackageName = displayName;
-    _activePackageIconNames = iconNames;
-    _packageRemoving = removing;
-    _packageCancelling = false;
-    _packageProgress = 0;
-    _packageStatus = removing ? 'Preparing removal...' : 'Preparing $displayName...';
-    _packageLog = '';
+  void _receivePackageStoreError(FormatException error) {
+    if (_disposed) return;
+    _errorMessage = 'Invalid package store state: $error';
     notifyListeners();
   }
 
-  void _finishPackageOperation(bool ok) {
-    final result = PackageOperationResult(
-      package: _activePackage ?? '',
-      displayName: _activePackageName,
-      iconNames: _activePackageIconNames,
-      removed: _packageRemoving,
-      cancelled: _packageCancelling,
-      ok: ok,
-    );
+  Future<void> _restorePackageOperation() async {
+    try {
+      final result = await DroidDeskPlatform.queryPackageStore(
+        environment: _activePackageEnvironment ?? _selectedEnvironment,
+        query: PackageStoreQueryKind.operationState,
+      );
+      if (_disposed) return;
+      final operation = result.operation;
+      if (operation != null) {
+        _activePackageOperationId = operation.operationId;
+        _latestPackageOperationId =
+            operation.operationId > _latestPackageOperationId
+            ? operation.operationId
+            : _latestPackageOperationId;
+        _activePackageEnvironment = operation.environmentKind;
+        _activePackageKind = operation.kind;
+        _activePackagePhase = operation.phase;
+        _activePackage = operation.entryId ?? updatesOperation;
+        _activePackageName = operation.entryId ?? 'packages';
+        _activePackageIconNames = const [];
+        _packageRemoving = operation.kind == PackageOperationKind.remove;
+        _packageCancelling = false;
+        _packageCancellable = operation.cancellable;
+        _packageRequestPending = false;
+        _packageProgress = operation.progress ?? 0;
+        _packageStatus = operation.message;
+        _packageLog = operation.logTail;
+        notifyListeners();
+      }
+      final completedResult = result.completedResult;
+      if (completedResult != null) {
+        _receivePackageStoreResult(completedResult);
+        if (operation != null &&
+            completedResult.operationId < operation.operationId) {
+          unawaited(_acknowledgePackageResult(completedResult.operationId));
+        }
+      }
+    } on PlatformException catch (error) {
+      if (_disposed) return;
+      _errorMessage =
+          '${error.code}: ${error.message ?? 'Package store state failed'}';
+      notifyListeners();
+    } on FormatException catch (error) {
+      _receivePackageStoreError(error);
+    }
+  }
+
+  void _resetPackageOperation() {
     _activePackage = null;
+    _activePackageOperationId = null;
+    _activePackageEnvironment = null;
+    _activePackageKind = null;
+    _activePackagePhase = null;
+    _packageRequestPending = false;
     _packageCancelling = false;
-    _lastPackageResult = result;
+    _packageCancellable = false;
+  }
+
+  void _finishPackageOperation(
+    PackageOperationResult result,
+    String displayName,
+    List<String> iconNames,
+  ) {
+    _latestPackageOperationId = result.operationId > _latestPackageOperationId
+        ? result.operationId
+        : _latestPackageOperationId;
+    _lastPackageStoreResult = result;
+    _lastPackageResult = PackageOperationPresentationResult(
+      result: result,
+      displayName: displayName,
+      iconNames: iconNames,
+    );
+    _resetPackageOperation();
     _packageResultId++;
     notifyListeners();
   }
 
-  /// Installs a native package; returns false if another operation is running or it failed.
+  Future<PackageOperationResult> installPackageEntry(
+    PackageStoreEntry entry, {
+    required LinuxEnvironmentKind environment,
+    bool acceptExperimentalRisk = false,
+  }) => _runPackageStoreOperation(
+    kind: PackageOperationKind.install,
+    entry: entry,
+    environment: environment,
+    acceptExperimentalRisk: acceptExperimentalRisk,
+  );
+
+  Future<PackageOperationResult> removePackageEntry(
+    PackageStoreEntry entry, {
+    required LinuxEnvironmentKind environment,
+  }) => _runPackageStoreOperation(
+    kind: PackageOperationKind.remove,
+    entry: entry,
+    environment: environment,
+  );
+
+  Future<PackageOperationResult> upgradePackageEntry(
+    PackageStoreEntry entry, {
+    required LinuxEnvironmentKind environment,
+  }) => _runPackageStoreOperation(
+    kind: PackageOperationKind.upgrade,
+    entry: entry,
+    environment: environment,
+  );
+
+  Future<PackageOperationResult> upgradeAllPackageEntries({
+    required LinuxEnvironmentKind environment,
+  }) => _runPackageStoreOperation(
+    kind: PackageOperationKind.upgradeAll,
+    environment: environment,
+  );
+
+  Future<PackageOperationResult> cleanSelectedPackageCache({
+    required LinuxEnvironmentKind environment,
+  }) => _runPackageStoreOperation(
+    kind: PackageOperationKind.cleanCache,
+    environment: environment,
+  );
+
+  Future<PackageOperationResult> _runPackageStoreOperation({
+    required PackageOperationKind kind,
+    required LinuxEnvironmentKind environment,
+    PackageStoreEntry? entry,
+    bool acceptExperimentalRisk = false,
+  }) async {
+    if (_activePackageOperationId != null || _packageRequestPending) {
+      return _localPackageFailure(
+        kind,
+        entry?.entryId,
+        'OPERATION_IN_PROGRESS',
+        'Another package operation is already running',
+        PackageOperationOutcome.rejected,
+      );
+    }
+    final displayName = entry?.displayName ?? 'packages';
+    final iconNames = entry?.iconNames ?? const <String>[];
+    _startPackageOperation(
+      entry?.entryId,
+      displayName,
+      iconNames,
+      kind,
+      environment,
+    );
+    try {
+      final result = await DroidDeskPlatform.runPackageStoreOperation(
+        environment: environment,
+        operation: kind,
+        entryId: entry?.entryId,
+        acceptExperimentalRisk: acceptExperimentalRisk,
+      );
+      if (_disposed) return result;
+      final activeOperationId = _activePackageOperationId;
+      if (activeOperationId == null) {
+        if (result.operationId <= _latestPackageOperationId) return result;
+        _activePackageOperationId = result.operationId;
+      } else if (activeOperationId != result.operationId) {
+        final mismatch = _localPackageFailure(
+          kind,
+          entry?.entryId,
+          'OPERATION_ID_MISMATCH',
+          'Package operation result did not match the active operation',
+          PackageOperationOutcome.failed,
+          operationId: result.operationId,
+          environment: environment,
+        );
+        _errorMessage = '${mismatch.error!.code}: ${mismatch.error!.message}';
+        _finishPackageOperation(mismatch, displayName, iconNames);
+        return mismatch;
+      }
+      final error = result.error;
+      if (error != null) {
+        _errorMessage = '${error.code}: ${error.message}';
+      }
+      _finishPackageOperation(result, displayName, iconNames);
+      if (error?.code == 'TARGET_CHANGED') await refreshStatus();
+      return result;
+    } on PlatformException catch (error) {
+      final result = _localPackageFailure(
+        kind,
+        entry?.entryId,
+        error.code,
+        error.message ?? 'Package operation failed',
+        PackageOperationOutcome.failed,
+      );
+      _errorMessage =
+          '${error.code}: ${error.message ?? 'Package operation failed'}';
+      _finishPackageOperation(result, displayName, iconNames);
+      return result;
+    } on FormatException catch (error) {
+      final result = _localPackageFailure(
+        kind,
+        entry?.entryId,
+        'INVALID_NATIVE_STATE',
+        error.toString(),
+        PackageOperationOutcome.failed,
+      );
+      _receivePackageStoreError(error);
+      _finishPackageOperation(result, displayName, iconNames);
+      return result;
+    }
+  }
+
+  PackageOperationResult _localPackageFailure(
+    PackageOperationKind kind,
+    String? entryId,
+    String code,
+    String message,
+    PackageOperationOutcome outcome, {
+    int? operationId,
+    LinuxEnvironmentKind? environment,
+  }) => PackageOperationResult(
+    schemaVersion: 1,
+    operationId: operationId ?? _activePackageOperationId ?? 1,
+    environmentKind:
+        environment ?? _activePackageEnvironment ?? _selectedEnvironment,
+    kind: kind,
+    entryId: entryId,
+    outcome: outcome,
+    message: message,
+    entry: null,
+    bytesFreed: null,
+    warnings: const [],
+    error: PackageStoreError(
+      code: code,
+      message: message,
+      logTail: _packageLog,
+    ),
+  );
+
+  /// Temporary compatibility wrapper for the existing App Store screen.
   Future<bool> installPackage(
     String package, {
     String? displayName,
     List<String> iconNames = const [],
   }) async {
-    if (_activePackage != null) return false;
-    _startPackageOperation(package, displayName ?? package, iconNames, removing: false);
-    var ok = false;
-    try {
-      ok = await DroidDeskPlatform.installNativePackage(package);
-    } catch (_) {}
-    _finishPackageOperation(ok);
-    return ok;
+    final result = await installPackageEntry(
+      _legacyPackageEntry(package, displayName, iconNames),
+      environment: _selectedEnvironment,
+    );
+    return result.outcome == PackageOperationOutcome.succeeded;
   }
 
   Future<bool> removePackage(
@@ -959,42 +1251,74 @@ class AppState extends ChangeNotifier {
     String? displayName,
     List<String> iconNames = const [],
   }) async {
-    if (_activePackage != null) return false;
-    _startPackageOperation(package, displayName ?? package, iconNames, removing: true);
-    var ok = false;
-    try {
-      ok = await DroidDeskPlatform.removeNativePackage(package);
-    } catch (_) {}
-    _finishPackageOperation(ok);
-    return ok;
+    final result = await removePackageEntry(
+      _legacyPackageEntry(package, displayName, iconNames),
+      environment: _selectedEnvironment,
+    );
+    return result.outcome == PackageOperationOutcome.succeeded;
   }
 
   /// Package id used for the "update everything" operation.
   static const updatesOperation = '__updates__';
 
-  bool get isUpdatingAll => _activePackage == updatesOperation;
+  bool get isUpdatingAll =>
+      _activePackageKind == PackageOperationKind.upgradeAll;
 
   /// Upgrades all non-core packages through the same progress UI as installs.
   Future<bool> updateAllPackages() async {
-    if (_activePackage != null) return false;
-    _startPackageOperation(updatesOperation, 'packages', const [], removing: false);
-    _packageStatus = 'Checking for updates...';
-    var ok = false;
-    try {
-      ok = await DroidDeskPlatform.upgradeAllPackages();
-    } catch (_) {}
-    _finishPackageOperation(ok);
-    return ok;
+    final result = await upgradeAllPackageEntries(
+      environment: _selectedEnvironment,
+    );
+    return result.outcome == PackageOperationOutcome.succeeded;
   }
 
   Future<void> cancelPackageOperation() async {
-    if (_activePackage == null || _packageCancelling || _packageRemoving) {
+    final operationId = _activePackageOperationId;
+    if (operationId == null || _packageCancelling || !_packageCancellable) {
       return;
     }
     _packageCancelling = true;
-    _packageStatus = 'Cancelling installation...';
+    _packageStatus = 'Cancelling package operation...';
     notifyListeners();
-    await DroidDeskPlatform.cancelNativePackageOperation();
+    await DroidDeskPlatform.cancelPackageStoreOperation(operationId);
+  }
+
+  PackageStoreEntry _legacyPackageEntry(
+    String package,
+    String? displayName,
+    List<String> iconNames,
+  ) {
+    final entryId = switch (package) {
+      'firefox' => 'app.firefox',
+      'code-oss' || 'code' => 'app.code-oss',
+      'libreoffice' => 'app.libreoffice',
+      'gimp' => 'app.gimp',
+      'blender' => 'app.blender',
+      'vlc' => 'app.vlc',
+      'nodejs' => 'tool.nodejs',
+      'python' => 'tool.python',
+      'imagemagick' => 'tool.imagemagick',
+      _ => 'repo.$package',
+    };
+    return PackageStoreEntry(
+      entryId: entryId,
+      displayName: displayName ?? package,
+      summary: 'Linux package',
+      category: 'System',
+      iconNames: iconNames,
+      gui: iconNames.isNotEmpty,
+      supportLevel: entryId.startsWith('repo.')
+          ? PackageSupportLevel.repository
+          : PackageSupportLevel.supported,
+      state: PackageEntryState.available,
+      availableVersion: null,
+      installedVersion: null,
+      removable: true,
+      limitations: const [],
+      sourceLabel: _selectedEnvironment == LinuxEnvironmentKind.prootDebian
+          ? 'Debian Bookworm'
+          : 'Termux repositories',
+    );
   }
 
   /// Hides the "finished" card on Home.
@@ -1006,9 +1330,7 @@ class AppState extends ChangeNotifier {
 
   // ── Session Control ──
 
-  Future<void> startLinux({
-    String mode = 'x11',
-  }) async {
+  Future<void> startLinux({String mode = 'x11'}) async {
     if (_disposed) return;
     if (desktopDisplayBusy) {
       _recordDisplayError(StateError('Another desktop action is in progress'));
@@ -1106,17 +1428,6 @@ class AppState extends ChangeNotifier {
     }
   }
 
-  void useNativeTerminal() {
-    _isProotTerminal = false;
-    notifyListeners();
-  }
-
-  Future<void> startDebianShell() async {
-    _isProotTerminal = true;
-    clearTerminal();
-    await executeCommand('start-debian');
-  }
-
   void appendTerminalOutput(String output) {
     if (_terminalOutput.isEmpty) _terminalOutput.add('');
     _terminalOutput[_terminalOutput.length - 1] += output;
@@ -1144,34 +1455,56 @@ class AppState extends ChangeNotifier {
 }
 
 /// Outcome of a finished App Store install or removal.
-class PackageOperationResult {
-  final String package;
+class PackageOperationPresentationResult {
+  final PackageOperationResult result;
   final String displayName;
   final List<String> iconNames;
-  final bool removed;
-  final bool cancelled;
-  final bool ok;
 
-  const PackageOperationResult({
-    required this.package,
+  const PackageOperationPresentationResult({
+    required this.result,
     required this.displayName,
     required this.iconNames,
-    required this.removed,
-    required this.cancelled,
-    required this.ok,
   });
 
-  bool get isUpdateAll => package == AppState.updatesOperation;
+  String get package => result.entryId ?? AppState.updatesOperation;
+  bool get removed => result.kind == PackageOperationKind.remove;
+  bool get cancelled => result.outcome == PackageOperationOutcome.cancelled;
+  bool get ok => result.outcome == PackageOperationOutcome.succeeded;
+  bool get isUpdateAll => result.kind == PackageOperationKind.upgradeAll;
 
-  String get message => isUpdateAll
-      ? (cancelled
-          ? 'Update cancelled'
-          : ok
-              ? 'Packages updated'
-              : 'Some updates failed')
-      : cancelled
-      ? '$displayName installation cancelled'
-      : removed
-          ? (ok ? '$displayName removed' : 'Could not remove $displayName')
-          : (ok ? '$displayName installed' : '$displayName installation failed');
+  String get message => switch (result.kind) {
+    PackageOperationKind.install => cancelled
+        ? '$displayName installation cancelled'
+        : ok
+        ? '$displayName installed'
+        : '$displayName installation failed',
+    PackageOperationKind.remove => cancelled
+        ? '$displayName removal cancelled'
+        : ok
+        ? '$displayName removed'
+        : 'Could not remove $displayName',
+    PackageOperationKind.upgrade => cancelled
+        ? '$displayName update cancelled'
+        : ok
+        ? '$displayName updated'
+        : 'Could not update $displayName',
+    PackageOperationKind.upgradeAll => cancelled
+        ? 'Update cancelled'
+        : ok
+        ? 'Packages updated'
+        : 'Some updates failed',
+    PackageOperationKind.cleanCache => cancelled
+        ? 'Cache cleanup cancelled'
+        : ok
+        ? 'Package cache cleaned'
+        : 'Could not clean package cache',
+  };
+
+  String get successDetail => switch (result.kind) {
+    PackageOperationKind.install => 'Find it in the desktop app menu',
+    PackageOperationKind.remove => 'The application was removed',
+    PackageOperationKind.upgrade => 'The installed application is up to date',
+    PackageOperationKind.upgradeAll => 'Installed applications are up to date',
+    PackageOperationKind.cleanCache => 'Downloaded package files were removed',
+  };
 }

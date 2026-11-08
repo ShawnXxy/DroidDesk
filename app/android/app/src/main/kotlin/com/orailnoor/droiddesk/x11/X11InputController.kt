@@ -1,6 +1,7 @@
 package com.orailnoor.droiddesk.x11
 
 import android.view.MotionEvent
+import android.view.KeyEvent
 import android.view.View
 import android.graphics.Matrix
 import com.termux.x11.LorieView
@@ -101,6 +102,12 @@ class X11InputController(
     fun applyProfile(profile: DisplayProfile) {
         if (isCurrent()) setMode(profile.settings.inputMode)
     }
+
+    fun dispatchExternalKeyEvent(event: KeyEvent): Boolean =
+        isCurrent() && inputHandler.sendKeyEvent(event)
+
+    fun dispatchExternalMotionEvent(view: View, event: MotionEvent): Boolean =
+        handleMotionEvent(view, event)
 
     private fun handleMotionEvent(view: View, event: MotionEvent): Boolean =
         isCurrent() && inputHandler.handleTouchEvent(lorieView, view, event)

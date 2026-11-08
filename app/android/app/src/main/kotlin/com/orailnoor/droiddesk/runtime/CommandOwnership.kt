@@ -1,5 +1,7 @@
 package com.orailnoor.droiddesk.runtime
 
+internal const val PACKAGE_PROCESS_OWNER_ENV = "DROIDDESK_PACKAGE_OPERATION_ID"
+
 internal enum class CommandInputState {
     READY,
     STARTING,
@@ -12,12 +14,19 @@ internal data class CommandInput<T>(
     val process: T? = null,
 )
 
+internal data class CommandCancellation<T>(
+    val owned: Boolean,
+    val process: T?,
+)
+
 internal class CommandOwnership<T> {
     internal class Lease internal constructor(internal val token: Any)
 
     private data class Owner<T>(
         val token: Any,
         val acceptsInput: Boolean,
+        var commandActive: Boolean,
+        var commandCancelled: Boolean = false,
         var process: T? = null,
     )
 
@@ -27,15 +36,49 @@ internal class CommandOwnership<T> {
     fun reserve(acceptsInput: Boolean): Lease? = synchronized(lock) {
         if (owner != null) return@synchronized null
         val token = Any()
-        owner = Owner(token, acceptsInput)
+        owner = Owner(token, acceptsInput, commandActive = true)
         Lease(token)
+    }
+
+    fun reserveLane(acceptsInput: Boolean): Lease? = synchronized(lock) {
+        if (owner != null) return@synchronized null
+        val token = Any()
+        owner = Owner(token, acceptsInput, commandActive = false)
+        Lease(token)
+    }
+
+    fun beginCommand(lease: Lease): Boolean = synchronized(lock) {
+        val current = owner
+        if (current?.token !== lease.token || current.commandActive) {
+            return@synchronized false
+        }
+        current.commandActive = true
+        current.commandCancelled = false
+        true
     }
 
     fun attach(lease: Lease, process: T): Boolean = synchronized(lock) {
         val current = owner
-        if (current?.token !== lease.token) return@synchronized false
+        if (
+            current?.token !== lease.token ||
+            !current.commandActive ||
+            current.commandCancelled ||
+            current.process != null
+        ) {
+            return@synchronized false
+        }
         current.process = process
         true
+    }
+
+    fun finishCommand(lease: Lease) {
+        synchronized(lock) {
+            val current = owner
+            if (current?.token !== lease.token) return
+            current.process = null
+            current.commandActive = false
+            current.commandCancelled = false
+        }
     }
 
     fun input(): CommandInput<T> = synchronized(lock) {
@@ -56,6 +99,18 @@ internal class CommandOwnership<T> {
 
     fun cancel(): T? = synchronized(lock) {
         owner?.process.also { owner = null }
+    }
+
+    fun cancelProcess(lease: Lease): CommandCancellation<T> = synchronized(lock) {
+        val current = owner
+        if (current?.token !== lease.token || !current.commandActive) {
+            return@synchronized CommandCancellation(owned = false, process = null)
+        }
+        current.commandCancelled = true
+        CommandCancellation(
+            owned = true,
+            process = current.process.also { current.process = null },
+        )
     }
 
     fun isBusy(): Boolean = synchronized(lock) { owner != null }
