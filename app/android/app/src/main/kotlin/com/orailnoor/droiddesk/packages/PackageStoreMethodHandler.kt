@@ -73,11 +73,15 @@ internal class PackageStoreMethodHandler(
     }
 
     private fun operationId(arguments: Map<*, *>): Long {
-        val operationId = arguments["operationId"]
-        if (operationId !is Number || operationId.toLong() <= 0) {
+        val operationId = when (val value = arguments["operationId"]) {
+            is Int -> value.toLong()
+            is Long -> value
+            else -> invalid("operationId must be a positive integer")
+        }
+        if (operationId <= 0) {
             invalid("operationId must be a positive integer")
         }
-        return operationId.toLong()
+        return operationId
     }
 
     private fun optionalString(
@@ -105,8 +109,16 @@ internal class PackageStoreMethodHandler(
         default: Int,
     ): Int {
         val value = arguments[key] ?: return default
-        if (value !is Number) invalid("$key must be an integer")
-        return value.toInt()
+        return when (value) {
+            is Int -> value
+            is Long -> {
+                if (value !in Int.MIN_VALUE.toLong()..Int.MAX_VALUE.toLong()) {
+                    invalid("$key must be an integer")
+                }
+                value.toInt()
+            }
+            else -> invalid("$key must be an integer")
+        }
     }
 
     private fun optionalBoolean(

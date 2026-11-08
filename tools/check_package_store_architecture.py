@@ -35,7 +35,7 @@ RUNTIME_STORE_METHODS = (
     "repairStorePackageStateAfterCancellation",
 )
 DIRECT_RUNTIME_CALL = re.compile(
-    r"linuxRuntime\.(?:" +
+    r"linuxRuntime\s*\.\s*(?:" +
     "|".join(re.escape(method) for method in RUNTIME_STORE_METHODS) +
     r")\b"
 )

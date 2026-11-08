@@ -265,6 +265,48 @@ void main() {
     expect(call.arguments, {'operationId': 77});
   });
 
+  test('operationMessagingDistinguishesUpgradeAndCacheCleanup', () async {
+    await state.initialize();
+    native.operationReply = Completer<Map<Object?, Object?>>();
+
+    final cleanFuture = state.cleanSelectedPackageCache(
+      environment: LinuxEnvironmentKind.prootDebian,
+    );
+    await Future<void>.delayed(Duration.zero);
+
+    expect(state.packageOperationTitle, 'Cleaning package cache');
+    native.operationReply!.complete(
+      packageResultPayload(operationId: 42)
+        ..['kind'] = 'cleanCache'
+        ..['entryId'] = null
+        ..['bytesFreed'] = 4096,
+    );
+    await cleanFuture;
+    expect(state.lastPackageResult!.message, 'Package cache cleaned');
+    expect(
+      state.lastPackageResult!.successDetail,
+      'Downloaded package files were removed',
+    );
+
+    native.operationReply = Completer<Map<Object?, Object?>>();
+    final upgradeFuture = state.upgradePackageEntry(
+      packageStoreEntry(),
+      environment: LinuxEnvironmentKind.prootDebian,
+    );
+    await Future<void>.delayed(Duration.zero);
+
+    expect(state.packageOperationTitle, 'Updating Firefox ESR');
+    native.operationReply!.complete(
+      packageResultPayload(operationId: 43)..['kind'] = 'upgrade',
+    );
+    await upgradeFuture;
+    expect(state.lastPackageResult!.message, 'Firefox ESR updated');
+    expect(
+      state.lastPackageResult!.successDetail,
+      'The installed application is up to date',
+    );
+  });
+
   test('environmentSelectionIsBlockedWhileMutationRuns', () async {
     native.operationState = packageQueryPayload(
       operation: packageOperationSnapshot(operationId: 77),

@@ -83,6 +83,39 @@ class DisplaySourceMergeTest {
     }
 
     @Test
+    fun identicalMonitorsUseConnectionScopedSettingsKeys() {
+        val productKey = "external:3:RTK|3:447|7:RTK FHD"
+        val source = MutableDisplaySource(
+            listOf(
+                DisplayCandidate(
+                    id = 5,
+                    name = "RTK FHD",
+                    isDefault = false,
+                    settingsKey = productKey,
+                ),
+                DisplayCandidate(
+                    id = 6,
+                    name = "RTK FHD",
+                    isDefault = false,
+                    settingsKey = productKey,
+                ),
+            ),
+        )
+        val repository = DisplayRepository(source)
+        repository.start {}
+
+        val firstSnapshot = repository.snapshot().associateBy(DesktopDisplay::id)
+        assertNotEquals(
+            firstSnapshot.getValue(5).settingsKey,
+            firstSnapshot.getValue(6).settingsKey,
+        )
+
+        source.replace(listOf(source.snapshot().first()))
+        val remaining = repository.snapshot().single()
+        assertEquals(firstSnapshot.getValue(5).settingsKey, remaining.settingsKey)
+    }
+
+    @Test
     fun android11DoesNotReadApi31MonitorProductInfo() {
         var productInfoRead = false
 

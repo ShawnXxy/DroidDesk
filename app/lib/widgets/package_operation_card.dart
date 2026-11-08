@@ -144,13 +144,6 @@ class _PackageOperationCardState extends State<PackageOperationCard> {
 
   Widget _running(AppState state) {
     final value = state.packageProgress > 0 ? state.packageProgress : null;
-    final verb = state.packageCancelling
-        ? 'Cancelling'
-        : state.packageRemoving
-        ? 'Removing'
-        : state.isUpdatingAll
-        ? 'Updating'
-        : 'Installing';
     final target = switch (state.activePackageEnvironment) {
       LinuxEnvironmentKind.termuxNative => 'Termux Native',
       LinuxEnvironmentKind.prootDebian => 'Debian PRoot',
@@ -181,7 +174,7 @@ class _PackageOperationCardState extends State<PackageOperationCard> {
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       Text(
-                        '$verb ${state.activePackageName}',
+                        state.packageOperationTitle,
                         style: DroidTheme.headingSm.copyWith(fontSize: 15),
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
@@ -309,8 +302,8 @@ class _PackageOperationCardState extends State<PackageOperationCard> {
                         ? '${result.result.error!.code}: ${result.result.error!.message}'
                         : result.result.warnings.isNotEmpty
                         ? result.result.warnings.first.message
-                        : !result.isUpdateAll && success && !result.removed
-                        ? 'Find it in the desktop app menu'
+                        : success
+                        ? result.successDetail
                         : 'Open the App Store for details',
                     style: DroidTheme.bodySm,
                   ),

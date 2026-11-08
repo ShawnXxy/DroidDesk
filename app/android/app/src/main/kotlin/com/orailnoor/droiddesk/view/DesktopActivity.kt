@@ -33,6 +33,7 @@ import android.content.res.ColorStateList
 import android.content.res.Configuration
 import android.graphics.Rect
 import android.graphics.Matrix
+import android.hardware.input.InputManager
 import com.orailnoor.droiddesk.R
 import com.orailnoor.droiddesk.service.DroidDeskService
 import com.termux.x11.MainActivity as TermuxMainActivity
@@ -62,6 +63,11 @@ import com.orailnoor.droiddesk.display.PixelSize
 import com.orailnoor.droiddesk.display.PixelInsets
 import com.orailnoor.droiddesk.display.DesktopDisplayException
 
+internal fun shouldObserveInputDeviceChanges(
+    sdkInt: Int,
+    displayId: Int,
+): Boolean = sdkInt >= 37 && displayId != android.view.Display.DEFAULT_DISPLAY
+
 class DesktopActivity : Activity() {
     private var lorieView: LorieView? = null
     private var connectionRequested = false
@@ -78,6 +84,16 @@ class DesktopActivity : Activity() {
     private val displayCoordinator = DesktopDisplayCoordinator.shared
     private var rendererLease: RendererLease? = null
     private var rendererReleased = false
+    private var inputDeviceListenerRegistered = false
+    private val inputDeviceHandler = Handler(Looper.getMainLooper())
+    private val inputDeviceListener = object : InputManager.InputDeviceListener {
+        override fun onInputDeviceAdded(deviceId: Int) = scheduleDesktopInputRefresh()
+        override fun onInputDeviceRemoved(deviceId: Int) = scheduleDesktopInputRefresh()
+        override fun onInputDeviceChanged(deviceId: Int) = scheduleDesktopInputRefresh()
+    }
+    private val refreshDesktopInput = Runnable {
+        if (!rendererReleased && isCurrentRenderer()) attachDesktopInput()
+    }
     private var displayRequestId = 0L
     private var sessionEpoch = 0L
     private var readinessThread: Thread? = null
@@ -411,6 +427,7 @@ class DesktopActivity : Activity() {
     private fun attachDesktopInput() {
         val lease = rendererLease ?: return
         if (!isCurrentRenderer()) return
+        updateInputDeviceListener(lease.displayId)
         val environment = DisplayEnvironmentPolicy.forDevice(Build.DEVICE)
             .environmentFor(lease.displayId)
         val profileKind = currentProfileKind()
@@ -494,6 +511,34 @@ class DesktopActivity : Activity() {
         lorieView?.requestFocus()
         inputController?.reacquireFocus()
         applyWindowGeometry()
+    }
+
+    private fun updateInputDeviceListener(displayId: Int) {
+        if (!shouldObserveInputDeviceChanges(Build.VERSION.SDK_INT, displayId)) {
+            unregisterInputDeviceListener()
+            return
+        }
+        if (inputDeviceListenerRegistered) return
+        getSystemService(InputManager::class.java).registerInputDeviceListener(
+            inputDeviceListener,
+            inputDeviceHandler,
+        )
+        inputDeviceListenerRegistered = true
+    }
+
+    private fun scheduleDesktopInputRefresh() {
+        if (!inputDeviceListenerRegistered || rendererReleased) return
+        inputDeviceHandler.removeCallbacks(refreshDesktopInput)
+        inputDeviceHandler.post(refreshDesktopInput)
+    }
+
+    private fun unregisterInputDeviceListener() {
+        inputDeviceHandler.removeCallbacks(refreshDesktopInput)
+        if (!inputDeviceListenerRegistered) return
+        getSystemService(InputManager::class.java).unregisterInputDeviceListener(
+            inputDeviceListener,
+        )
+        inputDeviceListenerRegistered = false
     }
 
     private fun currentProfileKind(): ProfileKind = DisplayProfilePolicy.classify(
@@ -1245,6 +1290,7 @@ class DesktopActivity : Activity() {
     private fun detachRenderer() {
         if (rendererReleased) return
         rendererReleased = true
+        unregisterInputDeviceListener()
         sessionStartPending = false
         awaitingSessionStart = false
         profileRevision++

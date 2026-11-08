@@ -149,12 +149,12 @@ internal class PackageOperationCoordinator(
     }
 
     fun cancel(operationId: Long): Boolean {
-        return synchronized(lock) {
-            val current = active?.takeIf {
+        val store = synchronized(lock) {
+            active?.takeIf {
                 it.operation.operationId == operationId && it.snapshot.cancellable
-            } ?: return@synchronized false
-            current.store.cancel(operationId)
-        }
+            }?.store
+        } ?: return false
+        return store.cancel(operationId)
     }
 
     fun snapshot(): PackageOperationSnapshot? = synchronized(lock) {

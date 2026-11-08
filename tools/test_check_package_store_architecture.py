@@ -68,6 +68,7 @@ class PackageStoreArchitectureGuardTest(unittest.TestCase):
             "linuxRuntime.removeStorePackages(packages, onProgress)",
             "linuxRuntime.upgradeStorePackages(packages, onProgress)",
             "linuxRuntime.cleanStorePackageCache(onOutput)",
+            "linuxRuntime\n    .cleanStorePackageCache(onOutput)",
         ):
             with self.subTest(direct_call=direct_call):
                 result = self.run_guard(

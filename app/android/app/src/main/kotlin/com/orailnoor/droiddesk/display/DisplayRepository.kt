@@ -87,6 +87,7 @@ class DisplayRepository(private val source: DesktopDisplaySource) {
     constructor(context: Context) : this(AndroidDisplaySource(context.applicationContext))
 
     private val keys = mutableMapOf<Int, String>()
+    private val ambiguousSettingsKeys = mutableSetOf<String>()
     private var listener: ((List<DesktopDisplay>) -> Unit)? = null
     private var last = emptyList<DesktopDisplay>()
     private var started = false
@@ -95,13 +96,27 @@ class DisplayRepository(private val source: DesktopDisplaySource) {
         val candidates = source.snapshot()
         val liveIds = candidates.map { it.id }.toSet()
         keys.keys.retainAll(liveIds)
-        return candidates.filter {
+        val visible = candidates.filter {
             it.isValid && !it.isPrivate && (it.isDefault || it.isOn)
-        }.map {
+        }
+        visible.groupingBy(DisplayCandidate::settingsKey).eachCount()
+            .filterValues { it > 1 }
+            .keys
+            .let(ambiguousSettingsKeys::addAll)
+        return visible.map {
             val eligible = it.isDefault || it.allowed
+            val connectionKey = keys.getOrPut(it.id) { UUID.randomUUID().toString() }
+            // Android exposes product identity but no public stable connector address. Keep the
+            // product key for a sole monitor; simultaneous identical monitors become
+            // connection-scoped so their settings cannot overwrite each other.
+            val settingsKey = if (it.settingsKey in ambiguousSettingsKeys) {
+                "${it.settingsKey}|connection:$connectionKey"
+            } else {
+                it.settingsKey
+            }
             DesktopDisplay(
-                it.id, keys.getOrPut(it.id) { UUID.randomUUID().toString() }, it.name,
-                it.isDefault, eligible, if (eligible) null else it.reason, it.settingsKey,
+                it.id, connectionKey, it.name,
+                it.isDefault, eligible, if (eligible) null else it.reason, settingsKey,
             )
         }
     }
@@ -130,6 +145,7 @@ class DisplayRepository(private val source: DesktopDisplaySource) {
         started = false
         listener = null
         keys.clear()
+        ambiguousSettingsKeys.clear()
         last = emptyList()
     }
 }

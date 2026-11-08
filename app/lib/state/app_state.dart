@@ -879,6 +879,16 @@ class AppState extends ChangeNotifier {
   PackageOperationKind? get activePackageKind => _activePackageKind;
   PackageOperationPhase? get activePackagePhase => _activePackagePhase;
   PackageOperationResult? get lastPackageStoreResult => _lastPackageStoreResult;
+  String get packageOperationTitle {
+    if (_packageCancelling) return 'Cancelling package operation';
+    return switch (_activePackageKind) {
+      PackageOperationKind.remove => 'Removing $_activePackageName',
+      PackageOperationKind.upgrade => 'Updating $_activePackageName',
+      PackageOperationKind.upgradeAll => 'Updating packages',
+      PackageOperationKind.cleanCache => 'Cleaning package cache',
+      PackageOperationKind.install || null => 'Installing $_activePackageName',
+    };
+  }
 
   /// Result of the most recent finished operation; [packageResultId] changes with each one.
   PackageOperationPresentationResult? get lastPackageResult =>
@@ -900,9 +910,13 @@ class AppState extends ChangeNotifier {
     _packageCancellable = false;
     _packageRequestPending = true;
     _packageProgress = 0;
-    _packageStatus = kind == PackageOperationKind.remove
-        ? 'Preparing removal...'
-        : 'Preparing $displayName...';
+    _packageStatus = switch (kind) {
+      PackageOperationKind.remove => 'Preparing removal...',
+      PackageOperationKind.upgrade => 'Preparing update...',
+      PackageOperationKind.upgradeAll => 'Preparing package updates...',
+      PackageOperationKind.cleanCache => 'Preparing cache cleanup...',
+      PackageOperationKind.install => 'Preparing $displayName...',
+    };
     _packageLog = '';
     _activePackageOperationId = null;
     _activePackageEnvironment = environment;
@@ -1458,15 +1472,39 @@ class PackageOperationPresentationResult {
   bool get ok => result.outcome == PackageOperationOutcome.succeeded;
   bool get isUpdateAll => result.kind == PackageOperationKind.upgradeAll;
 
-  String get message => isUpdateAll
-      ? (cancelled
-            ? 'Update cancelled'
-            : ok
-            ? 'Packages updated'
-            : 'Some updates failed')
-      : cancelled
-      ? '$displayName installation cancelled'
-      : removed
-      ? (ok ? '$displayName removed' : 'Could not remove $displayName')
-      : (ok ? '$displayName installed' : '$displayName installation failed');
+  String get message => switch (result.kind) {
+    PackageOperationKind.install => cancelled
+        ? '$displayName installation cancelled'
+        : ok
+        ? '$displayName installed'
+        : '$displayName installation failed',
+    PackageOperationKind.remove => cancelled
+        ? '$displayName removal cancelled'
+        : ok
+        ? '$displayName removed'
+        : 'Could not remove $displayName',
+    PackageOperationKind.upgrade => cancelled
+        ? '$displayName update cancelled'
+        : ok
+        ? '$displayName updated'
+        : 'Could not update $displayName',
+    PackageOperationKind.upgradeAll => cancelled
+        ? 'Update cancelled'
+        : ok
+        ? 'Packages updated'
+        : 'Some updates failed',
+    PackageOperationKind.cleanCache => cancelled
+        ? 'Cache cleanup cancelled'
+        : ok
+        ? 'Package cache cleaned'
+        : 'Could not clean package cache',
+  };
+
+  String get successDetail => switch (result.kind) {
+    PackageOperationKind.install => 'Find it in the desktop app menu',
+    PackageOperationKind.remove => 'The application was removed',
+    PackageOperationKind.upgrade => 'The installed application is up to date',
+    PackageOperationKind.upgradeAll => 'Installed applications are up to date',
+    PackageOperationKind.cleanCache => 'Downloaded package files were removed',
+  };
 }

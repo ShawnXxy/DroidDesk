@@ -297,6 +297,37 @@ class PackageOperationCoordinatorTest {
         )
     }
 
+    @Test
+    fun cancellationDoesNotHoldTheCoordinatorLockWhileTheStoreWaits() {
+        val store = DelayedCancelStore(EnvironmentKind.TERMUX_NATIVE)
+        val coordinator = PackageOperationCoordinator()
+        val worker = thread {
+            coordinator.execute(
+                environmentKind = EnvironmentKind.TERMUX_NATIVE,
+                request = installRequest(),
+                store = store,
+                observer = {},
+            )
+        }
+        assertTrue(store.started.await(5, TimeUnit.SECONDS))
+        val operationId = coordinator.snapshot()!!.operationId
+        val cancelWorker = thread { coordinator.cancel(operationId) }
+        assertTrue(store.cancelEntered.await(5, TimeUnit.SECONDS))
+
+        val subscribed = CountDownLatch(1)
+        val subscribeWorker = thread {
+            coordinator.subscribe(onEvent = {}, onResult = {})
+            subscribed.countDown()
+        }
+
+        assertTrue(subscribed.await(1, TimeUnit.SECONDS))
+        store.releaseCancel.countDown()
+        store.releaseOperation.countDown()
+        subscribeWorker.join(5_000)
+        cancelWorker.join(5_000)
+        worker.join(5_000)
+    }
+
     private fun manager(
         stores: List<EnvironmentPackageStore>,
         activeKind: () -> EnvironmentKind,
