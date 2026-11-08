@@ -15,20 +15,12 @@ internal class DisplayConnectionIdentityPolicy {
 
     fun resolve(
         displayId: Int,
-        platformDescription: String,
+        platformUniqueId: String?,
         fallbackIdentity: String,
     ): DisplayConnectionIdentity {
-        val fieldStart = platformDescription.lastIndexOf(UNIQUE_ID_FIELD_NAME)
-        val identityField = platformDescription
-            .takeIf { fieldStart >= 0 }
-            ?.substring(fieldStart)
-        val platformIdentity = identityField
-            ?.let(UNIQUE_ID_FIELD_PATTERN::find)
-            ?.takeIf { it.range.first == 0 }
-            ?.groupValues
-            ?.get(1)
+        val connectionIdentity = platformUniqueId
             ?.takeUnless { it.isBlank() || it == NULL_IDENTITY }
-        val connectionIdentity = platformIdentity ?: fallbackIdentity
+            ?: fallbackIdentity
         val generation = generations[displayId] ?: 0L
         val identityBytes =
             "$displayId\u0000$generation\u0000$connectionIdentity"
@@ -52,8 +44,6 @@ internal class DisplayConnectionIdentityPolicy {
     }
 
     private companion object {
-        const val UNIQUE_ID_FIELD_NAME = ", uniqueId"
         const val NULL_IDENTITY = "null"
-        val UNIQUE_ID_FIELD_PATTERN = Regex("^, uniqueId \"([^\"]*)\", app ")
     }
 }
