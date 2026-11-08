@@ -6,6 +6,7 @@ import com.orailnoor.droiddesk.display.placement.AcceptedDisplayHandoffRegistry
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertSame
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
@@ -127,7 +128,7 @@ class DesktopDisplayLauncherPolicyTest {
     }
 
     @Test
-    fun removalBetweenOnCreateAndOnResumeRejectsWithoutThrowing() {
+    fun sameIdReplacementBetweenOnCreateAndOnResumeStaysUnavailable() {
         val handoffs = AcceptedDisplayHandoffRegistry()
         val evidence = evidence(displayId = 30, fallbackIdentity = "external:4:HDMI")
         val connectionKey = handoffs.resolve(evidence).connectionKey
@@ -148,17 +149,46 @@ class DesktopDisplayLauncherPolicyTest {
         handoffs.displayRemoved(30)
         handoffs.displayAdded(30)
 
-        assertSame(
-            AcceptedDisplayHandoffAdmission.Rejected,
+        assertNull(
+            resolveObservedDisplayConnection(
+                registry = handoffs,
+                owner = desktopOwner,
+                requestedDisplayId = 30,
+                requestedConnectionKey = connectionKey,
+                evidence = evidence,
+            ),
+        )
+    }
+
+    @Test
+    fun movedSyntheticActivityResolvesTheObservedDisplayConnection() {
+        val handoffs = AcceptedDisplayHandoffRegistry()
+        val launchEvidence = evidence(displayId = 30, fallbackIdentity = "external:4:HDMI")
+        val launchConnectionKey = handoffs.resolve(launchEvidence).connectionKey
+        val desktopOwner = Any()
+        assertAcceptedConnection(
+            launchConnectionKey,
             syntheticDisplayHandoff(
                 registry = handoffs,
                 owner = desktopOwner,
                 displayId = 30,
-                connectionKey = connectionKey,
-                currentEvidence = evidence,
+                connectionKey = launchConnectionKey,
+                currentEvidence = launchEvidence,
                 previousEvidence = null,
             ),
         )
+
+        val observed = resolveObservedDisplayConnection(
+            registry = handoffs,
+            owner = desktopOwner,
+            requestedDisplayId = 30,
+            requestedConnectionKey = launchConnectionKey,
+            evidence = evidence(displayId = 31, fallbackIdentity = "external:7:Display"),
+        )!!
+
+        assertEquals(31, observed.displayId)
+        assertEquals("external:7:Display", observed.connectionIdentity)
+        assertNotEquals(launchConnectionKey, observed.connectionKey)
     }
 
     @Test

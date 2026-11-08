@@ -79,10 +79,8 @@ internal fun translateAndroidDesktopLaunchFailure(error: Throwable): DesktopDisp
     }
 
 internal fun syntheticDisplayHandoff(
-    registry: AcceptedDisplayHandoffRegistry,
-    owner: Any,
-    displayId: Int,
-    connectionKey: String,
+    registry: AcceptedDisplayHandoffRegistry, owner: Any,
+    displayId: Int, connectionKey: String,
     currentEvidence: AcceptedDisplayHandoffEvidence?,
     previousEvidence: AcceptedDisplayHandoffEvidence?,
 ): AcceptedDisplayHandoffAdmission =
@@ -95,6 +93,32 @@ internal fun syntheticDisplayHandoff(
             previous = previousEvidence,
         ),
     )
+
+internal fun resolveObservedDisplayConnection(
+    registry: AcceptedDisplayHandoffRegistry, owner: Any,
+    requestedDisplayId: Int, requestedConnectionKey: String,
+    evidence: AcceptedDisplayHandoffEvidence,
+): DisplayConnectionIdentity? {
+    if (evidence.displayId != requestedDisplayId) {
+        registry.unbind(owner)
+        return registry.resolve(evidence)
+    }
+    return when (
+        val admission = syntheticDisplayHandoff(
+            registry = registry,
+            owner = owner,
+            displayId = requestedDisplayId,
+            connectionKey = requestedConnectionKey,
+            currentEvidence = evidence,
+            previousEvidence = null,
+        )
+    ) {
+        is AcceptedDisplayHandoffAdmission.Accepted -> admission.connection
+        AcceptedDisplayHandoffAdmission.AwaitingEvidence,
+        AcceptedDisplayHandoffAdmission.Rejected,
+        -> null
+    }
+}
 
 class DesktopDisplayLauncher {
     companion object {
@@ -143,11 +167,7 @@ internal class AndroidDesktopDisplayHost(
         context: Context,
         repository: DisplayRepository,
         environmentPolicy: DisplayEnvironmentPolicy,
-    ) : this(
-        context,
-        repository,
-        environmentPolicy.desktopPlacementStrategy(),
-    )
+    ) : this(context, repository, environmentPolicy.desktopPlacementStrategy())
 
     private val handler = Handler(Looper.getMainLooper())
     private val displayManager = context.getSystemService(DisplayManager::class.java)
@@ -157,9 +177,7 @@ internal class AndroidDesktopDisplayHost(
     private var localDesktop: WeakReference<DesktopActivity>? = null
     private val displayListener = object : DisplayManager.DisplayListener {
         override fun onDisplayAdded(displayId: Int) = handoffs.displayAdded(displayId)
-
         override fun onDisplayChanged(displayId: Int) = handoffs.displayChanged(displayId)
-
         override fun onDisplayRemoved(displayId: Int) = handoffs.displayRemoved(displayId)
     }
 
@@ -251,31 +269,21 @@ internal class AndroidDesktopDisplayHost(
     override fun focus(requestId: Long): Boolean =
         placementStrategy.focus(this, requestId)
 
-    override fun cancelLaunch(requestId: Long) {
-        placementStrategy.cancel(this, requestId)
-    }
+    override fun cancelLaunch(requestId: Long) = placementStrategy.cancel(this, requestId)
 
-    override fun launchLocal(request: DesktopLaunchRequest) {
+    override fun launchLocal(request: DesktopLaunchRequest) =
         launchLocalActivity(resolveLaunchRequest(request))
-    }
 
-    override fun launchOnDisplay(request: DesktopLaunchRequest) {
+    override fun launchOnDisplay(request: DesktopLaunchRequest) =
         launchOnDisplayActivity(resolveLaunchRequest(request))
-    }
 
-    override fun focusLocal(requestId: Long): Boolean =
-        focusLocalActivity(requestId)
+    override fun focusLocal(requestId: Long): Boolean = focusLocalActivity(requestId)
 
-    override fun focusTask(requestId: Long): Boolean =
-        focusTaskActivity(requestId)
+    override fun focusTask(requestId: Long): Boolean = focusTaskActivity(requestId)
 
-    override fun cancelLocal(requestId: Long) {
-        cancelLocalActivity(requestId)
-    }
+    override fun cancelLocal(requestId: Long) = cancelLocalActivity(requestId)
 
-    override fun cancelTask(requestId: Long) {
-        cancelTaskActivities(requestId)
-    }
+    override fun cancelTask(requestId: Long) = cancelTaskActivities(requestId)
 
     private fun activeBoundActivity(): Activity? =
         boundActivity?.get()?.takeUnless { it.isDestroyed || it.isFinishing }
@@ -334,21 +342,13 @@ internal class AndroidDesktopDisplayHost(
     ): DisplayConnectionIdentity? {
         val request = syntheticHandoffRequest(activity)
             ?: return handoffs.resolve(evidence.connectionEvidence)
-        return when (
-            val admission = syntheticDisplayHandoff(
-                registry = handoffs,
-                owner = activity,
-                displayId = request.displayId,
-                connectionKey = request.connectionKey,
-                currentEvidence = evidence.connectionEvidence,
-                previousEvidence = null,
-            )
-        ) {
-            is AcceptedDisplayHandoffAdmission.Accepted -> admission.connection
-            AcceptedDisplayHandoffAdmission.AwaitingEvidence,
-            AcceptedDisplayHandoffAdmission.Rejected,
-            -> null
-        }
+        return resolveObservedDisplayConnection(
+            registry = handoffs,
+            owner = activity,
+            requestedDisplayId = request.displayId,
+            requestedConnectionKey = request.connectionKey,
+            evidence = evidence.connectionEvidence,
+        )
     }
 
     private fun launchLocalActivity(request: DesktopLaunchRequest) {
