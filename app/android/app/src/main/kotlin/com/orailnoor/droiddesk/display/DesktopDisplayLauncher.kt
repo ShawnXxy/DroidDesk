@@ -94,31 +94,12 @@ internal fun acceptedSyntheticDisplayHandoff(
         ),
     ) as? AcceptedDisplayHandoffAdmission.Accepted
 
-internal fun requireAcceptedSyntheticDisplayHandoff(
-    registry: AcceptedDisplayHandoffRegistry, owner: Any,
-    displayId: Int, connectionKey: String,
-    currentEvidence: AcceptedDisplayHandoffEvidence?,
-    previousEvidence: AcceptedDisplayHandoffEvidence?,
-): AcceptedDisplayHandoffAdmission.Accepted =
-    checkNotNull(
-        acceptedSyntheticDisplayHandoff(
-            registry,
-            owner,
-            displayId,
-            connectionKey,
-            currentEvidence,
-            previousEvidence,
-        ),
-    ) { "Synthetic display handoff requires accepted display evidence" }
-
 internal fun resolveObservedDisplayConnection(
     registry: AcceptedDisplayHandoffRegistry, owner: Any,
     requestedDisplayId: Int, requestedConnectionKey: String,
     evidence: AcceptedDisplayHandoffEvidence,
 ): DisplayConnectionIdentity? {
-    if (evidence.displayId != requestedDisplayId) {
-        return registry.resolve(evidence)
-    }
+    if (evidence.displayId != requestedDisplayId) return registry.resolve(evidence)
     return (
         registry.admit(
             owner,
@@ -201,7 +182,7 @@ internal class AndroidDesktopDisplayHost(
             ?.connectionEvidence
         if (activity is DesktopActivity) {
             syntheticHandoffRequest(activity)?.let { request ->
-                val admission = acceptedSyntheticDisplayHandoff(
+                val accepted = acceptedSyntheticDisplayHandoff(
                     registry = handoffs,
                     owner = activity,
                     displayId = request.displayId,
@@ -209,7 +190,7 @@ internal class AndroidDesktopDisplayHost(
                     currentEvidence = boundDisplayEvidence(activity)?.connectionEvidence,
                     previousEvidence = previousEvidence,
                 )
-                if (admission !is AcceptedDisplayHandoffAdmission.Accepted) {
+                if (accepted == null) {
                     handoffs.unbind(activity)
                     if (boundActivity?.get() === activity) boundActivity = null
                     if (localDesktop?.get() === activity) localDesktop = null

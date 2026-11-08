@@ -106,22 +106,22 @@ class DesktopDisplayLauncherPolicyTest {
         val evidence = evidence(displayId = 30, fallbackIdentity = "external:4:HDMI")
         val connectionKey = handoffs.resolve(evidence).connectionKey
 
-        val first = requireAcceptedSyntheticDisplayHandoff(
+        val first = acceptedSyntheticDisplayHandoff(
             registry = handoffs,
             owner = Any(),
             displayId = 30,
             connectionKey = connectionKey,
             currentEvidence = evidence,
             previousEvidence = null,
-        )
-        val second = requireAcceptedSyntheticDisplayHandoff(
+        )!!
+        val second = acceptedSyntheticDisplayHandoff(
             registry = handoffs,
             owner = Any(),
             displayId = 30,
             connectionKey = connectionKey,
             currentEvidence = evidence,
             previousEvidence = null,
-        )
+        )!!
 
         assertAcceptedConnection(connectionKey, first)
         assertAcceptedConnection(connectionKey, second)
@@ -136,19 +136,29 @@ class DesktopDisplayLauncherPolicyTest {
 
         assertAcceptedConnection(
             connectionKey,
-            requireAcceptedSyntheticDisplayHandoff(
+            acceptedSyntheticDisplayHandoff(
                 registry = handoffs,
                 owner = desktopOwner,
                 displayId = 30,
                 connectionKey = connectionKey,
                 currentEvidence = null,
                 previousEvidence = evidence,
-            ),
+            )!!,
         )
 
         handoffs.displayRemoved(30)
         handoffs.displayAdded(30)
 
+        assertNull(
+            acceptedSyntheticDisplayHandoff(
+                registry = handoffs,
+                owner = desktopOwner,
+                displayId = 30,
+                connectionKey = connectionKey,
+                currentEvidence = null,
+                previousEvidence = null,
+            ),
+        )
         assertNull(
             resolveObservedDisplayConnection(
                 registry = handoffs,
@@ -168,14 +178,14 @@ class DesktopDisplayLauncherPolicyTest {
         val desktopOwner = Any()
         assertAcceptedConnection(
             launchConnectionKey,
-            requireAcceptedSyntheticDisplayHandoff(
+            acceptedSyntheticDisplayHandoff(
                 registry = handoffs,
                 owner = desktopOwner,
                 displayId = 30,
                 connectionKey = launchConnectionKey,
                 currentEvidence = launchEvidence,
                 previousEvidence = null,
-            ),
+            )!!,
         )
 
         val observed = resolveObservedDisplayConnection(
@@ -191,7 +201,7 @@ class DesktopDisplayLauncherPolicyTest {
         assertNotEquals(launchConnectionKey, observed.connectionKey)
         assertAcceptedConnection(
             launchConnectionKey,
-            requireAcceptedSyntheticDisplayHandoff(
+            acceptedSyntheticDisplayHandoff(
                 registry = handoffs,
                 owner = desktopOwner,
                 displayId = 30,
@@ -201,7 +211,7 @@ class DesktopDisplayLauncherPolicyTest {
                     fallbackIdentity = "external:7:Display",
                 ),
                 previousEvidence = null,
-            ),
+            )!!,
         )
     }
 
@@ -239,35 +249,35 @@ class DesktopDisplayLauncherPolicyTest {
     }
 
     @Test
-    fun syntheticBindRejectsAwaitingOrStaleAdmissionBeforeClaim() {
+    fun syntheticBindReturnsNullForAwaitingOrStaleAdmissionBeforeClaim() {
         val evidence = evidence(displayId = 30, fallbackIdentity = "external:4:HDMI")
         val awaitingRegistry = AcceptedDisplayHandoffRegistry()
         val connectionKey = awaitingRegistry.resolve(evidence).connectionKey
 
-        assertThrows(IllegalStateException::class.java) {
-            requireAcceptedSyntheticDisplayHandoff(
+        assertNull(
+            acceptedSyntheticDisplayHandoff(
                 registry = awaitingRegistry,
                 owner = Any(),
                 displayId = 30,
                 connectionKey = connectionKey,
                 currentEvidence = null,
                 previousEvidence = null,
-            )
-        }
+            ),
+        )
 
         val staleRegistry = AcceptedDisplayHandoffRegistry()
         val staleKey = staleRegistry.resolve(evidence).connectionKey
         staleRegistry.displayRemoved(30)
-        assertThrows(IllegalStateException::class.java) {
-            requireAcceptedSyntheticDisplayHandoff(
+        assertNull(
+            acceptedSyntheticDisplayHandoff(
                 registry = staleRegistry,
                 owner = Any(),
                 displayId = 30,
                 connectionKey = staleKey,
                 currentEvidence = evidence,
                 previousEvidence = null,
-            )
-        }
+            ),
+        )
     }
 
     @Test
@@ -344,27 +354,27 @@ class DesktopDisplayLauncherPolicyTest {
             val previousEvidence = displayEvidence
             owner = Any()
             displayEvidence = null
-            return requireAcceptedSyntheticDisplayHandoff(
+            return acceptedSyntheticDisplayHandoff(
                 registry = handoffs,
                 owner = owner,
                 displayId = displayId,
                 connectionKey = connectionKey,
                 currentEvidence = null,
                 previousEvidence = previousEvidence,
-            )
+            )!!
         }
 
         fun bindDesktopOnResumeWithoutEvidence(
             connectionKey: String,
         ): AcceptedDisplayHandoffAdmission.Accepted =
-            requireAcceptedSyntheticDisplayHandoff(
+            acceptedSyntheticDisplayHandoff(
                 registry = handoffs,
                 owner = owner,
                 displayId = displayId,
                 connectionKey = connectionKey,
                 currentEvidence = null,
                 previousEvidence = null,
-            )
+            )!!
 
         fun confirmDelayedDecorEvidence(
             connectionKey: String,
