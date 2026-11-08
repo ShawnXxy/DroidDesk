@@ -3,12 +3,16 @@ package com.orailnoor.droiddesk.runtime
 import android.content.Context
 import android.content.pm.PackageManager
 import android.os.Build
+import android.util.Log
 import java.util.concurrent.Callable
+import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executor
+import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.Future
+import java.util.concurrent.RejectedExecutionException
+import java.util.concurrent.ScheduledExecutorService
 import java.util.concurrent.TimeUnit
-import java.util.concurrent.TimeoutException
 import java.util.concurrent.atomic.AtomicBoolean
 
 interface RuntimeCapabilitySource {
@@ -28,11 +32,67 @@ interface RuntimeCapabilitySource {
     fun hasVmPermissions(): Boolean
 }
 
-class RuntimeCapabilityProbe(
+class RuntimeCapabilityProbe private constructor(
     private val source: RuntimeCapabilitySource,
-    private val requiredBytes: Long = DEFAULT_REQUIRED_BYTES,
-    private val timeoutMillis: Long = DEFAULT_TIMEOUT_MILLIS,
+    private val requiredBytes: Long,
+    private val timeouts: ProbeTimeouts,
+    private val hooks: ProbeExecutionHooks,
 ) {
+    constructor(
+        source: RuntimeCapabilitySource,
+        requiredBytes: Long = DEFAULT_REQUIRED_BYTES,
+        timeouts: ProbeTimeouts = ProbeTimeouts(),
+    ) : this(
+        source = source,
+        requiredBytes = requiredBytes,
+        timeouts = timeouts,
+        hooks = ProbeExecutionHooks(),
+    )
+
+    constructor(
+        source: RuntimeCapabilitySource,
+        requiredBytes: Long,
+        timeoutMillis: Long,
+    ) : this(
+        source = source,
+        requiredBytes = requiredBytes,
+        timeouts = ProbeTimeouts(
+            localExecutionMs = timeoutMillis,
+            prootMs = timeoutMillis,
+            x11Ms = timeoutMillis,
+            audioMs = timeoutMillis,
+            clipboardMs = timeoutMillis,
+            chrootMs = timeoutMillis,
+            rendererMs = timeoutMillis,
+        ),
+        hooks = ProbeExecutionHooks(),
+    )
+
+    constructor(
+        source: RuntimeCapabilitySource,
+        timeoutMillis: Long,
+    ) : this(
+        source = source,
+        requiredBytes = DEFAULT_REQUIRED_BYTES,
+        timeoutMillis = timeoutMillis,
+    )
+
+    internal constructor(
+        source: RuntimeCapabilitySource,
+        requiredBytes: Long,
+        timeouts: ProbeTimeouts,
+        timeoutExecutorFactory: () -> ScheduledExecutorService,
+        beforeOutcomePublication: () -> Unit = {},
+    ) : this(
+        source = source,
+        requiredBytes = requiredBytes,
+        timeouts = timeouts,
+        hooks = ProbeExecutionHooks(
+            timeoutExecutorFactory = timeoutExecutorFactory,
+            beforeOutcomePublication = beforeOutcomePublication,
+        ),
+    )
+
     fun pending(): RuntimeCapabilities {
         val pending = CapabilityEvidence(
             EvidenceState.PRESENT_UNVERIFIED,
@@ -81,28 +141,67 @@ class RuntimeCapabilityProbe(
 
     fun probe(): RuntimeCapabilities {
         val executor = Executors.newCachedThreadPool()
+        val timeoutExecutor = hooks.timeoutExecutorFactory()
         try {
             val host = hostEvidence()
-            val deadlineNanos = System.nanoTime() +
-                TimeUnit.MILLISECONDS.toNanos(timeoutMillis)
-            val localExecutionFuture = executor.submit(Callable(source::probeLocalExecution))
-            val prootFuture = executor.submit(Callable(source::probeProot))
-            val x11Future = executor.submit(Callable(source::probeX11))
-            val audioFuture = executor.submit(Callable(source::probeAudio))
-            val clipboardFuture = executor.submit(Callable(source::probeClipboard))
-            val chrootFuture = executor.submit(Callable(source::probeChroot))
-            val rendererFuture = executor.submit(Callable(source::probeRenderer))
+            val localExecutionFuture = submit(
+                executor,
+                timeouts.localExecutionMs,
+                source::probeLocalExecution,
+            )
+            val prootFuture = submit(
+                executor,
+                timeouts.prootMs,
+                source::probeProot,
+            )
+            val x11Future = submit(
+                executor,
+                timeouts.x11Ms,
+                source::probeX11,
+            )
+            val audioFuture = submit(
+                executor,
+                timeouts.audioMs,
+                source::probeAudio,
+            )
+            val clipboardFuture = submit(
+                executor,
+                timeouts.clipboardMs,
+                source::probeClipboard,
+            )
+            val chrootFuture = submit(
+                executor,
+                timeouts.chrootMs,
+                source::probeChroot,
+            )
+            val rendererFuture = submit(
+                executor,
+                timeouts.rendererMs,
+                source::probeRenderer,
+            )
+            listOf<TimedFuture<*>>(
+                localExecutionFuture,
+                prootFuture,
+                x11Future,
+                audioFuture,
+                clipboardFuture,
+                chrootFuture,
+                rendererFuture,
+            ).forEach { probe ->
+                executor.execute {
+                    registerTimeout(timeoutExecutor, probe)
+                }
+            }
             val localExecution = awaitEvidence(
                 localExecutionFuture,
-                deadlineNanos,
                 "App-private ELF",
             )
-            val proot = awaitEvidence(prootFuture, deadlineNanos, "PRoot")
-            val x11 = awaitEvidence(x11Future, deadlineNanos, "X11")
-            val audio = awaitEvidence(audioFuture, deadlineNanos, "PulseAudio")
-            val clipboard = awaitEvidence(clipboardFuture, deadlineNanos, "Clipboard")
-            val chroot = awaitEvidence(chrootFuture, deadlineNanos, "chroot")
-            val rendererProbe = awaitRenderer(rendererFuture, deadlineNanos)
+            val proot = awaitEvidence(prootFuture, "PRoot")
+            val x11 = awaitEvidence(x11Future, "X11")
+            val audio = awaitEvidence(audioFuture, "PulseAudio")
+            val clipboard = awaitEvidence(clipboardFuture, "Clipboard")
+            val chroot = awaitEvidence(chrootFuture, "chroot")
+            val rendererProbe = awaitRenderer(rendererFuture)
             val avfPresent = source.hasAvfFeature()
             val avfFeature = if (avfPresent) {
                 CapabilityEvidence(
@@ -143,6 +242,7 @@ class RuntimeCapabilityProbe(
                 distribution = distributionContract(),
             )
         } finally {
+            timeoutExecutor.shutdownNow()
             executor.shutdownNow()
         }
     }
@@ -180,12 +280,10 @@ class RuntimeCapabilityProbe(
     )
 
     private fun awaitEvidence(
-        future: Future<CapabilityEvidence>,
-        deadlineNanos: Long,
+        probe: TimedFuture<CapabilityEvidence>,
         name: String,
     ): CapabilityEvidence = await(
-        future = future,
-        deadlineNanos = deadlineNanos,
+        probe = probe,
         name = name,
         fallback = {
             CapabilityEvidence(EvidenceState.FAILED_SELF_TEST, it)
@@ -193,11 +291,9 @@ class RuntimeCapabilityProbe(
     )
 
     private fun awaitRenderer(
-        future: Future<RendererProbe>,
-        deadlineNanos: Long,
+        probe: TimedFuture<RendererProbe>,
     ): RendererProbe = await(
-        future = future,
-        deadlineNanos = deadlineNanos,
+        probe = probe,
         name = "Renderer",
         fallback = {
             RendererProbe(
@@ -207,20 +303,82 @@ class RuntimeCapabilityProbe(
         },
     )
 
+    private fun <T> submit(
+        executor: ExecutorService,
+        timeoutMillis: Long,
+        probe: () -> T,
+    ): TimedFuture<T> {
+        val deadlineNanos = System.nanoTime() +
+            TimeUnit.MILLISECONDS.toNanos(timeoutMillis)
+        val terminal = ProbeTerminal<T>(deadlineNanos)
+        val future = executor.submit(
+            Callable {
+                val candidate: ProbeOutcome<T> = try {
+                    ProbeOutcome.Success(probe())
+                } catch (error: Throwable) {
+                    ProbeOutcome.Failure(error)
+                }
+                hooks.beforeOutcomePublication()
+                terminal.publish(candidate)
+            },
+        )
+        return TimedFuture(
+            future = future,
+            deadlineNanos = deadlineNanos,
+            timeoutMillis = timeoutMillis,
+            terminal = terminal,
+        )
+    }
+
+    private fun registerTimeout(
+        timeoutExecutor: ScheduledExecutorService,
+        probe: TimedFuture<*>,
+    ) {
+        if (probe.terminal.current() != null) return
+        try {
+            timeoutExecutor.schedule(
+                {
+                    if (probe.terminal.timeout()) probe.future.cancel(true)
+                },
+                maxOf(0L, probe.deadlineNanos - System.nanoTime()),
+                TimeUnit.NANOSECONDS,
+            )
+        } catch (error: RejectedExecutionException) {
+            if (!timeoutExecutor.isShutdown) {
+                Log.w(
+                    "RuntimeCapabilityProbe",
+                    "Timeout registration failed; collection will enforce the deadline",
+                    error,
+                )
+            }
+        }
+    }
+
     private fun <T> await(
-        future: Future<T>,
-        deadlineNanos: Long,
+        probe: TimedFuture<T>,
         name: String,
         fallback: (String) -> T,
     ): T {
-        val remainingNanos = maxOf(0L, deadlineNanos - System.nanoTime())
-        return try {
-            future.get(remainingNanos, TimeUnit.NANOSECONDS)
-        } catch (_: TimeoutException) {
-            future.cancel(true)
-            fallback("$name probe timed out after ${timeoutMillis}ms")
-        } catch (error: Exception) {
-            fallback("$name probe failed: ${error.cause?.message ?: error.message ?: "unknown error"}")
+        if (probe.terminal.current() == null) {
+            val remainingNanos = maxOf(0L, probe.deadlineNanos - System.nanoTime())
+            val completed = try {
+                probe.terminal.completed.await(remainingNanos, TimeUnit.NANOSECONDS)
+            } catch (error: InterruptedException) {
+                return fallback(
+                    "$name probe failed: ${error.message ?: "interrupted while awaiting evidence"}",
+                )
+            }
+            if (!completed && probe.terminal.timeout()) probe.future.cancel(true)
+        }
+        return when (val outcome = probe.terminal.current()) {
+            is ProbeOutcome.Success -> outcome.value
+            is ProbeOutcome.Failure -> fallback(
+                "$name probe failed: " +
+                    (outcome.error.message ?: outcome.error.toString()),
+            )
+            ProbeOutcome.TimedOut ->
+                fallback("$name probe timed out after ${probe.timeoutMillis}ms")
+            null -> fallback("$name probe failed: unknown error")
         }
     }
 
@@ -228,11 +386,66 @@ class RuntimeCapabilityProbe(
         const val MIN_API = 28
         const val REQUIRED_ABI = "arm64-v8a"
         const val LOCAL_LINUX_TARGET_SDK = 28
+        @Deprecated("Use ProbeTimeouts for per-capability budgets")
         const val DEFAULT_TIMEOUT_MILLIS = 1_000L
         const val DEFAULT_REQUIRED_BYTES = 2L * 1024L * 1024L * 1024L
         const val PENDING_REASON = "Capability probe is pending"
     }
 }
+
+private data class ProbeExecutionHooks(
+    val timeoutExecutorFactory: () -> ScheduledExecutorService = {
+        Executors.newSingleThreadScheduledExecutor { task ->
+            Thread(task, "RuntimeCapabilityTimeouts").apply { isDaemon = true }
+        }
+    },
+    val beforeOutcomePublication: () -> Unit = {},
+)
+
+private sealed interface ProbeOutcome<out T> {
+    data class Success<T>(val value: T) : ProbeOutcome<T>
+    data class Failure(val error: Throwable) : ProbeOutcome<Nothing>
+    data object TimedOut : ProbeOutcome<Nothing>
+}
+
+private class ProbeTerminal<T>(
+    private val deadlineNanos: Long,
+) {
+    val completed = CountDownLatch(1)
+
+    @Volatile private var outcome: ProbeOutcome<T>? = null
+
+    fun current(): ProbeOutcome<T>? = outcome
+
+    fun publish(candidate: ProbeOutcome<T>) {
+        synchronized(this) {
+            if (outcome != null) return
+            outcome = if (System.nanoTime() < deadlineNanos) {
+                candidate
+            } else {
+                ProbeOutcome.TimedOut
+            }
+            completed.countDown()
+        }
+    }
+
+    fun timeout(): Boolean = synchronized(this) {
+        if (outcome != null) {
+            false
+        } else {
+            outcome = ProbeOutcome.TimedOut
+            completed.countDown()
+            true
+        }
+    }
+}
+
+private data class TimedFuture<T>(
+    val future: Future<*>,
+    val deadlineNanos: Long,
+    val timeoutMillis: Long,
+    val terminal: ProbeTerminal<T>,
+)
 
 internal class RuntimeCapabilityCache(
     private val load: () -> RuntimeCapabilities,
@@ -241,6 +454,13 @@ internal class RuntimeCapabilityCache(
         Thread(task, "RuntimeCapabilityProbe").apply { isDaemon = true }
     },
     private val refreshIntervalMillis: Long = 10_000L,
+    private val onRefreshFailure: (Throwable) -> Unit = {
+        Log.w(
+            "RuntimeCapabilityProbe",
+            "Capability refresh failed; retaining cached evidence",
+            it,
+        )
+    },
 ) {
     @Volatile private var cached = initial
     @Volatile private var refreshedAt = 0L
@@ -261,9 +481,9 @@ internal class RuntimeCapabilityCache(
         if (!refreshInFlight.compareAndSet(false, true)) return
         executor.execute {
             try {
-                runCatching(load).onSuccess {
-                    cached = it
-                }
+                runCatching(load)
+                    .onSuccess { cached = it }
+                    .onFailure(onRefreshFailure)
             } finally {
                 refreshedAt = System.currentTimeMillis()
                 refreshInFlight.set(false)
