@@ -22,6 +22,15 @@ internal fun pulseAudioTcpPort(packageName: String): Int {
     return 4714 + bucket.toInt()
 }
 
+internal fun hostAudioTcpSetupBody(
+    port: Int,
+    cookiePath: String,
+    guestServer: String,
+): String =
+    "limit 10 pactl load-module module-native-protocol-tcp " +
+        "listen=127.0.0.1 port=$port auth-cookie='$cookiePath'\n" +
+        "PULSE_SERVER='$guestServer' PULSE_COOKIE='$cookiePath' limit 2 pactl info"
+
 internal fun hostPulseAudioLibraryPath(
     sdkInt: Int,
     prefixLibraryPath: String,
@@ -61,6 +70,143 @@ internal fun startPulseAudioDaemonWithFallback(
     return startFallback() && isReady()
 }
 
+internal fun startPulseAudioCandidateWithFallback(
+    libraryPath: String,
+    startAAudio: (String) -> Result<Unit>,
+    isReady: (String) -> Result<Unit>,
+    stop: (String) -> Result<Unit>,
+    startFallback: (String) -> Result<Unit>,
+): Result<Unit> {
+    val failures = mutableListOf<Throwable>()
+    var terminalCleanupFailure: HostAudioCleanupException? = null
+    fun attempt(action: () -> Result<Unit>): Boolean =
+        runCatching { action().getOrThrow() }.fold(
+            onSuccess = { true },
+            onFailure = { failures += it; false },
+        )
+    val started = startPulseAudioDaemonWithFallback(
+        startAAudio = { attempt { startAAudio(libraryPath) } },
+        isReady = { attempt { isReady(libraryPath) } },
+        stop = {
+            var cleaned = false
+            repeat(2) { if (!cleaned) cleaned = attempt { stop(libraryPath) } }
+            if (!cleaned) {
+                val primary = failures.firstOrNull()
+                    ?: IllegalStateException("AAudio startup failed without evidence: $libraryPath")
+                terminalCleanupFailure = HostAudioCleanupException(libraryPath, primary)
+            }
+        },
+        startFallback = {
+            terminalCleanupFailure == null && attempt { startFallback(libraryPath) }
+        },
+    )
+    if (started) return Result.success(Unit)
+    terminalCleanupFailure?.let { terminal ->
+        failures.drop(1).filterNot { it === terminal }.forEach(terminal::addSuppressed)
+        return Result.failure(terminal)
+    }
+    val primary = failures.firstOrNull()
+        ?: IllegalStateException("PulseAudio startup failed without evidence: $libraryPath")
+    failures.drop(1).filterNot { it === primary }.forEach(primary::addSuppressed)
+    return Result.failure(primary)
+}
+
+internal fun runHostAudioCommand(
+    libraryPath: String,
+    operation: String,
+    body: String,
+    execute: (String) -> String,
+): Result<Unit> {
+    val command = """
+        set -e
+        export LD_LIBRARY_PATH='$libraryPath'
+        limit() {
+            if command -v timeout >/dev/null 2>&1; then timeout "${'$'}@"; else shift; "${'$'}@"; fi
+        }
+        $body
+    """.trimIndent()
+    return runCatching { execute(command) }.fold(
+        onSuccess = { output ->
+            if (output.startsWith("Error:")) {
+                Result.failure(
+                    IllegalStateException(
+                        "Host audio $operation failed for LD_LIBRARY_PATH=$libraryPath: $output",
+                    ),
+                )
+            } else {
+                Result.success(Unit)
+            }
+        },
+        onFailure = { failure ->
+            Result.failure(
+                IllegalStateException(
+                    "Host audio $operation failed for LD_LIBRARY_PATH=$libraryPath",
+                    failure,
+                ),
+            )
+        },
+    )
+}
+
+internal fun runHostAudioCandidate(
+    libraryPath: String,
+    attempt: () -> Unit,
+): Result<Unit> {
+    val result = runCatching(attempt)
+    val failure = result.exceptionOrNull() ?: return result
+    return Result.failure(
+        if (failure is HostAudioCleanupException) failure else
+            IllegalStateException(
+                "Host audio candidate failed for LD_LIBRARY_PATH=$libraryPath",
+                failure,
+            ),
+    )
+}
+
+internal fun verifiedHostProcessAlive(
+    processName: String,
+    probeExecutable: Boolean,
+    probeExitCode: Int?,
+    probeOutput: String,
+): Boolean {
+    check(probeExecutable) {
+        "Host process probe is unavailable: $processName"
+    }
+    val exitCode = checkNotNull(probeExitCode) {
+        "Could not verify whether host process is running: $processName"
+    }
+    return when (exitCode) {
+        0 -> true
+        1 -> false
+        else -> error(
+            "Could not verify host process $processName: " +
+                "pgrep exited $exitCode${probeOutput.trim().takeIf(String::isNotEmpty)?.let { ": $it" }.orEmpty()}",
+        )
+    }
+}
+
+internal fun prepareNativeSessionAudio(
+    startAudio: () -> Result<Unit>,
+    ensureAudio: () -> Result<Unit>,
+    onFailure: (Throwable) -> Unit,
+) {
+    val initialStart = runCatching { startAudio().getOrThrow() }
+    if (initialStart.isSuccess) return
+
+    val initialFailure = initialStart.exceptionOrNull()!!
+    val recovery = runCatching {
+        ensureAudio().getOrThrow()
+        startAudio().getOrThrow()
+    }
+    val recoveryFailure = recovery.exceptionOrNull()
+    if (recoveryFailure != null) {
+        if (recoveryFailure !== initialFailure) {
+            initialFailure.addSuppressed(recoveryFailure)
+        }
+        onFailure(initialFailure)
+    }
+}
+
 internal fun nativePackageUpgradeCommand(packages: List<String>): String =
     "timeout --signal=TERM --kill-after=5s 1800s " +
         "env DEBIAN_FRONTEND=noninteractive apt-get " +
@@ -83,6 +229,16 @@ internal fun processIdentityFromStatFields(fields: List<String>): String? {
 class LinuxRuntime(context: Context) {
     private val context = context.applicationContext
     private val hostPulseAudioTcpPort = pulseAudioTcpPort(this.context.packageName)
+    private val hostAudioAdapter = HostAudioAdapter(
+        port = object : HostAudioPort {
+            override fun startWithLibraryPath(libraryPath: String): Result<Unit> =
+                startPulseAudioWithLibraryPath(libraryPath)
+
+            override fun stopAfterFailedStart(): Result<Unit> =
+                stopFailedPulseAudioCandidate()
+        },
+        preferences = SharedPreferencesHostAudioPreferenceStore(this.context),
+    )
     internal val guestPulseServer = "tcp:127.0.0.1:$hostPulseAudioTcpPort"
 
     companion object {
@@ -559,79 +715,88 @@ class LinuxRuntime(context: Context) {
         check(File(binDir, "pulseaudio").canExecute()) {
             "The host PulseAudio package is unavailable"
         }
-        val audioLibraryPath = hostPulseAudioLibraryPath(
+        hostAudioAdapter.start(
             sdkInt = Build.VERSION.SDK_INT,
+            appVersionCode = installedAppVersionCode(),
             prefixLibraryPath = libDir.absolutePath,
-        )
-        fun audioCommand(body: String): Boolean {
-            val output = executeCommand(
+        ).getOrThrow()
+        Unit
+    }
+
+    private fun startPulseAudioWithLibraryPath(
+        audioLibraryPath: String,
+    ): Result<Unit> = runHostAudioCandidate(audioLibraryPath) {
+        fun audioCommand(
+            libraryPath: String,
+            operation: String,
+            body: String,
+        ): Result<Unit> =
+            runHostAudioCommand(
+                libraryPath = libraryPath,
+                operation = operation,
+                body = body,
+                execute = ::executeCommand,
+            )
+
+        fun stopDaemon(@Suppress("UNUSED_PARAMETER") libraryPath: String): Result<Unit> =
+            stopFailedPulseAudioCandidate()
+
+        fun waitUntilReady(libraryPath: String): Result<Unit> =
+            audioCommand(
+                libraryPath,
+                "verify daemon readiness",
                 """
-                set -e
-                export LD_LIBRARY_PATH='$audioLibraryPath'
-                limit() {
-                    if command -v timeout >/dev/null 2>&1; then timeout "${'$'}@"; else shift; "${'$'}@"; fi
-                }
-                $body
+                for attempt in 1 2 3 4 5; do
+                    if limit 2 pactl info; then exit 0; fi
+                    sleep 0.1
+                done
+                exit 1
                 """.trimIndent(),
             )
-            return !output.startsWith("Error:")
-        }
 
-        fun stopDaemon() {
-            audioCommand("pkill -9 -x pulseaudio >/dev/null 2>&1 || true")
-        }
+        stopDaemon(audioLibraryPath).getOrThrow()
+        startPulseAudioCandidateWithFallback(
+            libraryPath = audioLibraryPath,
+            startAAudio = { libraryPath ->
+                audioCommand(
+                    libraryPath,
+                    "start AAudio daemon",
+                    """
+                    limit 10 pulseaudio --start --exit-idle-time=-1 \
+                        --load=module-aaudio-sink
+                    """.trimIndent(),
+                )
+            },
+            isReady = ::waitUntilReady,
+            stop = ::stopDaemon,
+            startFallback = { libraryPath ->
+                audioCommand(
+                    libraryPath,
+                    "start compatibility daemon",
+                    "limit 10 pulseaudio --start --exit-idle-time=-1",
+                )
+            },
+        ).getOrThrow()
 
-        fun waitUntilReady(): Boolean = audioCommand(
-            """
-            for attempt in 1 2 3 4 5; do
-                if limit 2 pactl info >/dev/null 2>&1; then exit 0; fi
-                sleep 0.1
-            done
-            exit 1
-            """.trimIndent(),
-        )
-
-        stopDaemon()
-        check(
-            startPulseAudioDaemonWithFallback(
-                startAAudio = {
-                    audioCommand(
-                        """
-                        limit 10 pulseaudio --start --exit-idle-time=-1 \
-                            --load=module-aaudio-sink >/dev/null 2>&1
-                        """.trimIndent(),
-                    )
-                },
-                isReady = ::waitUntilReady,
-                stop = ::stopDaemon,
-                startFallback = {
-                    audioCommand(
-                        "limit 10 pulseaudio --start --exit-idle-time=-1 >/dev/null 2>&1",
-                    )
-                },
+        audioCommand(
+            libraryPath = audioLibraryPath,
+            operation = "load TCP module and verify server",
+            body = hostAudioTcpSetupBody(
+                port = hostPulseAudioTcpPort,
+                cookiePath = File(homeDir, ".config/pulse/cookie").absolutePath,
+                guestServer = guestPulseServer,
             ),
-        ) {
-            "PulseAudio did not become ready with AAudio or the compatibility fallback"
-        }
+        ).getOrThrow()
+    }
 
-        val output = executeCommand(
-            """
-            set -e
-            export LD_LIBRARY_PATH='$audioLibraryPath'
-            limit() {
-                if command -v timeout >/dev/null 2>&1; then timeout "${'$'}@"; else shift; "${'$'}@"; fi
-            }
-            pactl load-module module-native-protocol-tcp \
-                listen=127.0.0.1 \
-                port=$hostPulseAudioTcpPort \
-                auth-cookie='${File(homeDir, ".config/pulse/cookie").absolutePath}' \
-                >/dev/null
-            PULSE_SERVER='$guestPulseServer' \
-                PULSE_COOKIE='${File(homeDir, ".config/pulse/cookie").absolutePath}' \
-                limit 2 pactl info >/dev/null 2>&1
-            """.trimIndent(),
-        )
-        check(!output.startsWith("Error:")) { output }
+    private fun installedAppVersionCode(): Long {
+        val packageInfo = context.packageManager.getPackageInfo(context.packageName, 0)
+        @Suppress("DEPRECATION")
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            packageInfo.longVersionCode
+        } else {
+            packageInfo.versionCode.toLong()
+        }
     }
 
     fun ensureHostAudio(onLog: (String) -> Unit = {}): Result<Unit> = runCatching {
@@ -658,7 +823,22 @@ class LinuxRuntime(context: Context) {
         stopHostProcess("pulseaudio").getOrThrow()
     }
 
-    fun stopHostProcess(processName: String): Result<Unit> = runCatching {
+    private fun stopFailedPulseAudioCandidate(): Result<Unit> =
+        stopHostProcess(
+            processName = "pulseaudio",
+            isAlive = ::verifiedHostProcessAlive,
+        )
+
+    fun stopHostProcess(processName: String): Result<Unit> =
+        stopHostProcess(
+            processName = processName,
+            isAlive = ::hostProcessAlive,
+        )
+
+    private fun stopHostProcess(
+        processName: String,
+        isAlive: (String) -> Boolean,
+    ): Result<Unit> = runCatching {
         require(processName.matches(Regex("[a-zA-Z0-9._-]+"))) {
             "Invalid host process name: $processName"
         }
@@ -666,7 +846,7 @@ class LinuxRuntime(context: Context) {
         check(pkill.canExecute()) { "Host process terminator is unavailable" }
         stopHostProcessWithFallback(
             processName = processName,
-            isAlive = { hostProcessAlive(processName) },
+            isAlive = { isAlive(processName) },
             terminate = { force ->
                 val process = ProcessBuilder(
                     pkill.absolutePath,
@@ -691,7 +871,11 @@ class LinuxRuntime(context: Context) {
                 }
             },
             awaitExit = { timeoutMillis ->
-                waitForHostProcessExit(processName, timeoutMillis)
+                waitForHostProcessExit(
+                    processName = processName,
+                    timeoutMillis = timeoutMillis,
+                    isAlive = isAlive,
+                )
             }
         )
     }
@@ -709,16 +893,36 @@ class LinuxRuntime(context: Context) {
         return probeProcess(listOf(pgrep.absolutePath, "-x", processName))?.exitCode == 0
     }
 
+    private fun verifiedHostProcessAlive(processName: String): Boolean {
+        require(processName.matches(Regex("[a-zA-Z0-9._-]+"))) {
+            "Invalid host process name: $processName"
+        }
+        val pgrep = File(binDir, "pgrep")
+        val probe =
+            if (pgrep.canExecute()) {
+                probeProcess(listOf(pgrep.absolutePath, "-x", processName))
+            } else {
+                null
+            }
+        return verifiedHostProcessAlive(
+            processName = processName,
+            probeExecutable = pgrep.canExecute(),
+            probeExitCode = probe?.exitCode,
+            probeOutput = probe?.output.orEmpty(),
+        )
+    }
+
     private fun waitForHostProcessExit(
         processName: String,
         timeoutMillis: Long,
+        isAlive: (String) -> Boolean = ::hostProcessAlive,
     ): Boolean {
         val deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMillis)
         do {
-            if (!hostProcessAlive(processName)) return true
+            if (!isAlive(processName)) return true
             Thread.sleep(50)
         } while (System.nanoTime() < deadline)
-        return !hostProcessAlive(processName)
+        return !isAlive(processName)
     }
 
     fun probeClipboard(): CapabilityEvidence {
@@ -2555,6 +2759,14 @@ class LinuxRuntime(context: Context) {
             throw IllegalStateException("The desktop session bus could not start", e)
         }
 
+        prepareNativeSessionAudio(
+            startAudio = ::startPulseAudio,
+            ensureAudio = { ensureHostAudio() },
+            onFailure = { failure ->
+                Log.w(TAG, "Host audio is unavailable for the native desktop", failure)
+            },
+        )
+
         // The Termux startxfce4 wrapper falls back to Android's /bin/sh when an
         // X server already exists, which corrupts DISPLAY on recent Android
         // releases. The session binary starts the same XFCE components and
@@ -2580,37 +2792,6 @@ $stagedProfile
             else
                 echo "DIAG: xrdb unavailable; live profile application will report the missing helper"
             fi
-
-            # PulseAudio daemonizes, so it outlives a stopped session. A wedged
-            # one makes every pactl/pulseaudio call (and XFCE's event sounds)
-            # block forever, leaving a black desktop. Never wait on audio
-            # without a time limit, and always start from a fresh daemon.
-            limit() {
-                if command -v timeout >/dev/null 2>&1; then timeout "${'$'}@"; else shift; "${'$'}@"; fi
-            }
-            pkill -9 -x pulseaudio >/dev/null 2>&1 || true
-
-            # Native Android audio. AAudio is reliable on modern Android while
-            # OpenSL ES remains the compatibility fallback for older devices.
-            if [ "${if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) "1" else "0"}" = "1" ]; then
-                limit 10 pulseaudio --start --exit-idle-time=-1 \
-                    --load=module-aaudio-sink >/dev/null 2>&1 || true
-                audio_ready=0
-                for attempt in 1 2 3 4 5 6 7 8 9 10; do
-                    if limit 2 pactl list short sinks 2>/dev/null | grep -q AAudio_sink; then
-                        audio_ready=1
-                        break
-                    fi
-                    sleep 0.1
-                done
-                if [ "${'$'}audio_ready" != "1" ]; then
-                    pkill -9 -x pulseaudio >/dev/null 2>&1 || true
-                    limit 10 pulseaudio --start --exit-idle-time=-1 >/dev/null 2>&1 || true
-                fi
-            else
-                limit 10 pulseaudio --start --exit-idle-time=-1 >/dev/null 2>&1 || true
-            fi
-            echo "DIAG: PulseAudio sinks: ${'$'}(limit 2 pactl list short sinks 2>/dev/null | cut -f2 | tr '\n' ' ')"
 
             echo "DIAG: Launching $desktopCommand natively on DISPLAY=:0 ..."
             exec $desktopCommand
