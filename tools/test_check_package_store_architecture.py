@@ -62,18 +62,29 @@ class PackageStoreArchitectureGuardTest(unittest.TestCase):
                 self.assertIn(legacy_name, result.stdout + result.stderr)
 
     def test_main_activity_direct_linux_runtime_store_call_fails(self) -> None:
-        result = self.run_guard(
-            {
-                "app/lib/services/platform_bridge.dart": "",
-                "app/android/app/src/main/kotlin/com/orailnoor/droiddesk/"
-                "MainActivity.kt": "linuxRuntime.getUpgradablePackages(true)",
-                "app/android/app/src/main/kotlin/com/orailnoor/droiddesk/runtime/"
-                "LinuxRuntime.kt": "",
-            }
-        )
+        for direct_call in (
+            "linuxRuntime.getUpgradablePackages(true)",
+            "linuxRuntime.installStorePackages(packages, onProgress)",
+            "linuxRuntime.removeStorePackages(packages, onProgress)",
+            "linuxRuntime.upgradeStorePackages(packages, onProgress)",
+            "linuxRuntime.cleanStorePackageCache(onOutput)",
+        ):
+            with self.subTest(direct_call=direct_call):
+                result = self.run_guard(
+                    {
+                        "app/lib/services/platform_bridge.dart": "",
+                        "app/android/app/src/main/kotlin/com/orailnoor/droiddesk/"
+                        "MainActivity.kt": direct_call,
+                        "app/android/app/src/main/kotlin/com/orailnoor/droiddesk/runtime/"
+                        "LinuxRuntime.kt": "",
+                    }
+                )
 
-        self.assertNotEqual(0, result.returncode)
-        self.assertIn("direct LinuxRuntime package-store call", result.stdout + result.stderr)
+                self.assertNotEqual(0, result.returncode)
+                self.assertIn(
+                    "direct LinuxRuntime package-store call",
+                    result.stdout + result.stderr,
+                )
 
     def test_unscoped_legacy_package_store_preferences_fail(self) -> None:
         result = self.run_guard(

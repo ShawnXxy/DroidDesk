@@ -61,6 +61,20 @@ internal fun performDesktopTeardown(
     return failure
 }
 
+internal fun <T : AutoCloseable> prepareDesktopStop(
+    acquireAdmission: () -> T,
+    startStopping: () -> Unit,
+): Result<T> = runCatching {
+    val admission = acquireAdmission()
+    try {
+        startStopping()
+        admission
+    } catch (error: Exception) {
+        admission.close()
+        throw error
+    }
+}
+
 /**
  * Foreground service that keeps the Linux runtime alive.
  *
@@ -92,21 +106,35 @@ class DroidDeskService : Service() {
         ) {
             val app = context.applicationContext
             val coordinator = DesktopDisplayCoordinator.shared
-            if (reason == DesktopStopReason.USER) coordinator.cancelPendingRestart()
-            coordinator.startStopping(preserveRestart = reason == DesktopStopReason.ENVIRONMENT_CHANGE)
+            val environments = ProcessLinuxEnvironmentRegistry.get(app).environmentManager
+            val admission = prepareDesktopStop(
+                acquireAdmission = environments::acquireStopAdmission,
+                startStopping = {
+                    if (reason == DesktopStopReason.USER) coordinator.cancelPendingRestart()
+                    coordinator.startStopping(
+                        preserveRestart = reason == DesktopStopReason.ENVIRONMENT_CHANGE,
+                    )
+                },
+            ).getOrElse { failure ->
+                completion(Result.failure(failure))
+                return
+            }
             executeSession {
-                val environments = ProcessLinuxEnvironmentRegistry.get(app).environmentManager
-                val failure = performDesktopTeardown(
-                    stopEnvironment = { environments.stop().getOrThrow() },
-                    stopLegacyBridge = ::stopLegacyIntentBridge,
-                    stopDisplayService = {
-                        app.stopService(Intent(app, X11ServerService::class.java))
-                        Unit
-                    },
-                    onFailure = { operation, error ->
-                        Log.e(TAG, "$operation failed", error)
-                    },
-                )
+                val failure = try {
+                    performDesktopTeardown(
+                        stopEnvironment = { admission.stop().getOrThrow() },
+                        stopLegacyBridge = ::stopLegacyIntentBridge,
+                        stopDisplayService = {
+                            app.stopService(Intent(app, X11ServerService::class.java))
+                            Unit
+                        },
+                        onFailure = { operation, error ->
+                            Log.e(TAG, "$operation failed", error)
+                        },
+                    )
+                } finally {
+                    admission.close()
+                }
                 mainHandler.post {
                     coordinator.finishStopping(failure)
                     if (failure == null) {

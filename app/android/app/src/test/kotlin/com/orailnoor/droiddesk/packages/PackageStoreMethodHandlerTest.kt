@@ -89,6 +89,29 @@ class PackageStoreMethodHandlerTest {
         assertEquals("Debian mirror unavailable", actual.message)
     }
 
+    @Test
+    fun invalidCatalogLimitsReturnInvalidArgument() {
+        val handler = PackageStoreMethodHandler(
+            manager(CapturingStore(EnvironmentKind.TERMUX_NATIVE)) {
+                EnvironmentKind.TERMUX_NATIVE
+            },
+        )
+
+        for (limit in listOf(0, 101)) {
+            val error = assertThrows(PackageStoreException::class.java) {
+                handler.query(
+                    mapOf(
+                        "environmentKind" to "termuxNative",
+                        "queryKind" to "catalog",
+                        "limit" to limit,
+                    ),
+                )
+            }
+
+            assertEquals("INVALID_ARGUMENT", error.code)
+        }
+    }
+
     private fun manager(
         store: EnvironmentPackageStore,
         activeKind: () -> EnvironmentKind,

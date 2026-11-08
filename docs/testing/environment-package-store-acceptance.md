@@ -1,45 +1,72 @@
 # Environment Package Store Acceptance
 
-This document records the physical acceptance of one exact, uncommitted APK
-across Smartisan R2 and Nubia NX888J. Do not commit implementation changes until
-every required row passes with the same APK SHA-256.
+This document records the full package-store transaction baseline and the
+physical review-fix acceptance across Smartisan R2 and Nubia NX888J. Do not
+commit implementation changes until every affected physical scenario passes
+with the same current review APK SHA-256.
 
 ## Build identity
 
 | Field | Result |
 |---|---|
 | Source branch | `shawnxxy-environment-package-store` |
-| Source commit | `6275899e432cc7a0d2bd3ef868a25a47672bc7b6` plus the uncommitted package-store working tree |
+| Source commit | `bcbd9571adb01668181c0a264071051964465b5f` plus the uncommitted review-fix working tree |
 | Working tree | Dirty by design; no checkpoint commit exists |
 | APK path | `app/build/acceptance/DroidDesk-package-store-acceptance.apk` |
 | Package ID | `com.orailnoor.droiddesk.monitoracceptance` |
 | Version | `1.3.1-monitor-acceptance` (`6`) |
 | ABI | `arm64-v8a` |
-| APK SHA-256 | `a60f85beb964d2573735dcbb7da08d1f219ab61d90ed809fc7ce2575aedca714` |
+| Current review APK SHA-256 | `eb5030a19e9df867a9f918fdcff753d6f8c8cf197043a26d3ece8e6c23ad9ad9` |
+| Full transaction baseline APK SHA-256 | `a60f85beb964d2573735dcbb7da08d1f219ab61d90ed809fc7ce2575aedca714` |
 | Signer certificate SHA-256 | `91e55ef8c4b136268e59c7b79fb42d66604e762f1bb2ff11a2a750d44f4e9672` |
-| Build time | 2026-11-07 22:10 +08:00 |
+| Current review build time | 2026-11-08 01:00 +08:00 |
 
 ## Device availability
 
 Smartisan R2 (`darwin`, Android 11) was tested by wireless ADB at
-`192.168.31.162:5555`. Its physical HDMI display used dynamic display IDs up to
-`68` at 2160 × 1440, with TNT windowing on display `100003`. The exact final APK
-passed phone and physical TNT startup, TNT Go mouse/keyboard input, the Android
-window border controls, XFCE/GIMP, package-operation navigation, return to the
-same desktop session, and Stop Server cleanup. Android 11 also caught and
-verified the API-level guard around API 31 monitor product information.
+`192.168.31.162:5555`. Its physical HDMI display used a current physical
+display ID of `69` at 2160 × 1440, with TNT windowing on display `100003`. The
+current review APK passed phone and physical TNT startup, TNT Go
+mouse/keyboard input, the Android window border controls, XFCE/GIMP,
+background/return PID stability, package-operation navigation, Stop rejection
+during an active mutation, and final Stop Server cleanup. Android 11 also
+caught and verified the API-level guard around API 31 monitor product
+information.
 
 Nubia NX888J (`PQ85A02`, Android 16) was tested by wireless ADB at
-`192.168.31.47:5555`. Its HDMI logical display changed across reconnects
-(`2`, `5`, then `7`) while the physical monitor remained 2160 × 1440. The
-exact final APK opened XFCE on the live display, captured the TNT Go
-mouse/keyboard through the phone relay, preserved the full external viewport,
-returned the same Linux session to display `0` after unplug, and stopped
-without residual processes. The new input-route setting was exercised as
-`Automatic`, `Android native`, and `Phone relay`; the native override disabled
-the relay as requested, the relay override restored input, and `Automatic`
-selected the relay on API 36. The override is stored by stable monitor product
-identity rather than the transient display ID.
+`192.168.31.50:5555`. Its current review run used dynamic HDMI display `8`
+while the physical RTK FHD monitor remained 2160 × 1440. The current review APK
+opened XFCE on the live display, selected the phone relay in `Automatic` mode,
+captured the TNT Go mouse/keyboard, preserved the full external viewport,
+survived rejected Stop requests and display disable/enable generation changes,
+returned the same Linux session to display `0` after physical unplug, and
+stopped without residual processes. The input-route setting remains stored by
+stable monitor product identity rather than the transient display ID.
+
+## Review-fix delta acceptance
+
+The full install/remove/cancel/cache matrix below was established with the
+baseline APK. The current review APK was then installed over the same package
+data and rootfs and revalidated every changed seam plus all four required
+physical scenarios.
+
+| Review fix / scenario | Current review APK result |
+|---|---|
+| Pinned external-source keyring and atomic replacement | Targeted Android tests passed; the gated experimental source path has no production inspector adapter |
+| Catalog limit validation | Invalid constructor limits map to typed `INVALID_ARGUMENT`; targeted and full Android tests passed |
+| Stop admission ordering | On R2/TNT, Nubia phone, and Nubia HDMI, Stop during an active VLC install was rejected before renderer/session teardown; the operation completed and later Stop succeeded |
+| Relay owner cleanup | Nubia display disable/enable replaced Desktop/Relay tasks `866`/`867` with `869`/`870`; cleanup from the old generation did not close the new visible relay |
+| Captured-pointer forwarding | Android reported the phone relay as the current pointer-capture owner; the user confirmed physical mouse/touchpad, click, keyboard input, and full 2160 × 1440 viewport control after capture |
+| Architecture guard expansion | Guard unit tests and the repository scan passed for all current direct `LinuxRuntime` package-store methods |
+| R2 phone / TNT | Same APK passed startup, physical input, XFCE/GIMP, background/return, mutation rejection, reinstall, and final cleanup |
+| Nubia phone / HDMI | Same APK passed phone mode, dynamic display `8`, Automatic phone relay, physical input, mutation rejection with relay captured, generation replacement, physical unplug recovery, and final cleanup |
+
+One ADB-created hidden R2 TNT task retained an old `Removing VLC` render frame
+after the native operation had completed. Live inspection showed
+`activePackage=null`, `activeOperationId=null`, no package worker, and a
+completed result. Replacing the obsolete task cleared the frame. The behavior
+was not reproduced in the normal user launch path and did not require a code
+change.
 
 ## Operation evidence
 
@@ -143,10 +170,14 @@ cleanup used as acceptance evidence.
 
 ## Final decision
 
-- Acceptance status: **Passed**
+- Current review APK acceptance status: **Passed**
+- Accepted APK SHA-256:
+  `eb5030a19e9df867a9f918fdcff753d6f8c8cf197043a26d3ece8e6c23ad9ad9`
 - Blocking failures: **None**
 - Remaining limitation: Android 16 and older do not expose public input-device
   display association. Automatic mode therefore uses desktop-mode evidence and
   offers a per-monitor native/phone-relay override; Android 37 can use the
   public association API.
+- R2 and Nubia wireless ADB remain enabled by user request until the change is
+  merged; this is intentional and is not an acceptance residue.
 - Commit permitted: **Yes**

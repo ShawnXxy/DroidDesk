@@ -7,18 +7,22 @@ internal class PackageStoreMethodHandler(
 ) {
     fun query(arguments: Map<*, *>): Map<String, Any?> {
         val environment = parseEnvironment(arguments["environmentKind"])
-        val request = when (val queryKind = arguments["queryKind"]) {
-            "catalog" -> PackageStoreQuery.Catalog(
-                search = optionalString(arguments, "search", ""),
-                limit = optionalInt(arguments, "limit", 60),
-            )
-            "installed" -> PackageStoreQuery.Installed
-            "updates" -> PackageStoreQuery.Updates(
-                refreshIndex = optionalBoolean(arguments, "refreshIndex", false),
-            )
-            "storage" -> PackageStoreQuery.Storage
-            "operationState" -> PackageStoreQuery.OperationState
-            else -> invalid("Unknown package store query: $queryKind")
+        val request = try {
+            when (val queryKind = arguments["queryKind"]) {
+                "catalog" -> PackageStoreQuery.Catalog(
+                    search = optionalString(arguments, "search", ""),
+                    limit = optionalInt(arguments, "limit", 60),
+                )
+                "installed" -> PackageStoreQuery.Installed
+                "updates" -> PackageStoreQuery.Updates(
+                    refreshIndex = optionalBoolean(arguments, "refreshIndex", false),
+                )
+                "storage" -> PackageStoreQuery.Storage
+                "operationState" -> PackageStoreQuery.OperationState
+                else -> invalid("Unknown package store query: $queryKind")
+            }
+        } catch (error: IllegalArgumentException) {
+            invalid(error.message ?: "Invalid package store query")
         }
         return manager.query(environment, request)
             .getOrElse { throw it }

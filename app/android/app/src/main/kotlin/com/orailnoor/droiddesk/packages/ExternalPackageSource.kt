@@ -1,6 +1,8 @@
 package com.orailnoor.droiddesk.packages
 
 import java.io.File
+import java.nio.file.Files
+import java.nio.file.StandardCopyOption
 import java.security.MessageDigest
 
 internal data class SourceVerification(
@@ -12,8 +14,14 @@ internal data class SourceVerification(
 
 internal interface ExternalSourceInspector {
     fun download(uri: String): ByteArray
-    fun keyFingerprints(keyData: ByteArray): Set<String>
-    fun dearmor(keyData: ByteArray): ByteArray
+    /**
+     * Returns a binary keyring containing only the pinned primary key and its
+     * associated signing subkeys, or null when the primary key is absent.
+     */
+    fun exportPinnedKeyring(
+        keyData: ByteArray,
+        primaryFingerprint: String,
+    ): ByteArray?
     fun inspectDeb(packageData: ByteArray): SourceVerification
 }
 
@@ -25,22 +33,24 @@ internal class ExternalPackageSourceException(
 internal class ExternalPackageSource(
     private val rootfsDir: File,
     private val inspector: ExternalSourceInspector,
+    private val activate: (File, File) -> Unit = ::replaceAtomically,
 ) {
     fun configureSignedRepository(
         source: PackageRecipeSource.SignedAptRepository,
     ) {
         verifyArm64(source.architecture)
         val keyData = inspector.download(source.keyUri)
-        val fingerprints = inspector.keyFingerprints(keyData)
-            .map(String::uppercase)
-            .toSet()
-        if (source.keyFingerprint.uppercase() !in fingerprints) {
+        val keyring = inspector.exportPinnedKeyring(
+            keyData,
+            source.keyFingerprint.uppercase(),
+        )
+        if (keyring == null || keyring.isEmpty()) {
             reject("Official signing key fingerprint did not match ${source.sourceId}")
         }
         val keyringPath = "/usr/share/keyrings/droiddesk-${source.sourceId}.gpg"
         atomicWrite(
             File(rootfsDir, keyringPath.removePrefix("/")),
-            inspector.dearmor(keyData),
+            keyring,
         )
         val sourceText = """
             Types: deb
@@ -95,13 +105,11 @@ internal class ExternalPackageSource(
         file.parentFile?.mkdirs()
         val temporary = File(file.parentFile, "${file.name}.tmp")
         temporary.writeBytes(data)
-        if (file.exists() && !file.delete()) {
+        try {
+            activate(temporary, file)
+        } catch (error: Exception) {
             temporary.delete()
-            reject("Could not replace ${file.absolutePath}")
-        }
-        if (!temporary.renameTo(file)) {
-            temporary.delete()
-            reject("Could not activate ${file.absolutePath}")
+            reject("Could not atomically replace ${file.absolutePath}: ${error.message}")
         }
     }
 
@@ -112,4 +120,13 @@ internal class ExternalPackageSource(
 
     private fun reject(message: String): Nothing =
         throw ExternalPackageSourceException("SOURCE_VERIFICATION_FAILED", message)
+}
+
+private fun replaceAtomically(source: File, destination: File) {
+    Files.move(
+        source.toPath(),
+        destination.toPath(),
+        StandardCopyOption.ATOMIC_MOVE,
+        StandardCopyOption.REPLACE_EXISTING,
+    )
 }

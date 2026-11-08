@@ -51,6 +51,7 @@ import com.orailnoor.droiddesk.display.DesktopDisplayCoordinator
 import com.orailnoor.droiddesk.display.DisplayEnvironmentPolicy
 import com.orailnoor.droiddesk.display.ExternalInputRoute
 import com.orailnoor.droiddesk.display.externalInputRoute
+import com.orailnoor.droiddesk.display.shouldFinishInputRelay
 import com.orailnoor.droiddesk.display.usesRendererPointerCapture
 import com.orailnoor.droiddesk.display.RendererLease
 import com.orailnoor.droiddesk.display.DisplayProfile
@@ -1249,7 +1250,9 @@ class DesktopActivity : Activity() {
         profileRevision++
         desktopReady = false
         val ownedLease = rendererLease
-        if (ownedLease != null && TermuxMainActivity.getInstance().isLorieViewOwner(ownedLease.generation)) {
+        val ownsLorieView = ownedLease != null &&
+            TermuxMainActivity.getInstance().isLorieViewOwner(ownedLease.generation)
+        if (ownsLorieView) {
             environmentManager.cancelDisplayProfile(EnvironmentKind.fromSessionMode(sessionMode))
         }
         val pendingProfiles = profileCompletions.toList()
@@ -1282,7 +1285,9 @@ class DesktopActivity : Activity() {
             ExternalDesktopInputBridge.detach(controller)
             controller.dispose()
         }
-        ExternalInputRelayActivity.finishIfOpen()
+        if (shouldFinishInputRelay(ownedLease != null, ownsLorieView)) {
+            ExternalInputRelayActivity.finishIfOpen()
+        }
         inputController = null
         lease?.let { TermuxMainActivity.getInstance().releaseLorieView(it.generation) }
         (lorieView?.parent as? ViewGroup)?.removeView(lorieView)

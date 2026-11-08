@@ -12,11 +12,31 @@ LEGACY_METHODS = (
     "cancelNativePackageOperation",
 )
 
+RUNTIME_STORE_METHODS = (
+    "searchNativePackages",
+    "getInstalledNativePackages",
+    "installStorePackage",
+    "removeStorePackage",
+    "getUpgradablePackages",
+    "upgradeAllPackages",
+    "getStorageInfo",
+    "cleanPackageCache",
+    "cancelPackageOperation",
+    "beginStorePackageOperation",
+    "finishStorePackageOperation",
+    "searchStorePackageRecords",
+    "upgradableStorePackageRecords",
+    "installCuratedStorePackage",
+    "installStorePackages",
+    "removeStorePackages",
+    "upgradeStorePackages",
+    "refreshStoreDesktopMenus",
+    "cleanStorePackageCache",
+    "repairStorePackageStateAfterCancellation",
+)
 DIRECT_RUNTIME_CALL = re.compile(
-    r"linuxRuntime\.(?:"
-    r"searchNativePackages|getInstalledNativePackages|installStorePackage|"
-    r"removeStorePackage|getUpgradablePackages|upgradeAllPackages|"
-    r"getStorageInfo|cleanPackageCache|cancelPackageOperation"
+    r"linuxRuntime\.(?:" +
+    "|".join(re.escape(method) for method in RUNTIME_STORE_METHODS) +
     r")\b"
 )
 

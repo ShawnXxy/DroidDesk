@@ -2,6 +2,10 @@ package com.orailnoor.droiddesk.runtime
 
 import android.content.Context
 
+internal interface EnvironmentStopAdmission : AutoCloseable {
+    fun stop(): Result<Unit>
+}
+
 internal class LinuxEnvironmentManager(
     adapters: List<EnvironmentAdapter>,
     private val capabilities: () -> RuntimeCapabilities,
@@ -77,17 +81,15 @@ internal class LinuxEnvironmentManager(
 
     fun stop(): Result<Unit> = runCatching {
         selectionGate.withSelectionTransition {
-            val currentCapabilities = capabilities()
-            val selectedKind = selectedKindOrNull()
-            for (candidate in adaptersInOrder) {
-                if (
-                    candidate.kind != selectedKind &&
-                    !candidate.status(currentCapabilities).running
-                ) {
-                    continue
-                }
-                candidate.stop().getOrThrow()
-            }
+            stopAdapters()
+        }
+    }
+
+    fun acquireStopAdmission(): EnvironmentStopAdmission {
+        val transition = selectionGate.acquireSelectionTransition()
+        return object : EnvironmentStopAdmission {
+            override fun stop(): Result<Unit> = runCatching { stopAdapters() }
+            override fun close() = transition.close()
         }
     }
 
@@ -126,6 +128,20 @@ internal class LinuxEnvironmentManager(
         expectedKind: EnvironmentKind,
         action: () -> T,
     ): T = selectionGate.withActivePackageTarget(expectedKind, action)
+
+    private fun stopAdapters() {
+        val currentCapabilities = capabilities()
+        val selectedKind = selectedKindOrNull()
+        for (candidate in adaptersInOrder) {
+            if (
+                candidate.kind != selectedKind &&
+                !candidate.status(currentCapabilities).running
+            ) {
+                continue
+            }
+            candidate.stop().getOrThrow()
+        }
+    }
 
     private fun selectedKindOrNull(
         detected: RuntimeCapabilities? = null,

@@ -38,17 +38,28 @@ internal class EnvironmentSelectionGate(
     }
 
     fun <T> withSelectionTransition(action: () -> T): T {
+        val admission = acquireSelectionTransition()
+        return try {
+            action()
+        } finally {
+            admission.close()
+        }
+    }
+
+    fun acquireSelectionTransition(): AutoCloseable {
         synchronized(lock) {
             if (selectionTransitionActive || packageOperationActive) {
                 throw EnvironmentSelectionBusyException()
             }
             selectionTransitionActive = true
         }
-        return try {
-            action()
-        } finally {
+        var closed = false
+        return AutoCloseable {
             synchronized(lock) {
-                selectionTransitionActive = false
+                if (!closed) {
+                    closed = true
+                    selectionTransitionActive = false
+                }
             }
         }
     }

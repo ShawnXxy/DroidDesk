@@ -62,6 +62,11 @@ fun shouldCaptureRelayedPointer(
 fun usesRendererPointerCapture(route: ExternalInputRoute): Boolean =
     route == ExternalInputRoute.NATIVE
 
+fun shouldFinishInputRelay(
+    hasRendererLease: Boolean,
+    ownsLorieView: Boolean,
+): Boolean = hasRendererLease && ownsLorieView
+
 data class DesktopStartupTarget(
     val displayId: Int,
     val displayKey: String,

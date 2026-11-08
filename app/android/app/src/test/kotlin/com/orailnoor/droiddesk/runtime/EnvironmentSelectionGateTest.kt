@@ -61,4 +61,17 @@ class EnvironmentSelectionGateTest {
             gate.withActivePackageTarget(EnvironmentKind.TERMUX_NATIVE) {}
         }
     }
+
+    @Test
+    fun acquiredTransitionBlocksPackagesUntilClosed() {
+        val gate = EnvironmentSelectionGate { EnvironmentKind.PROOT_DEBIAN }
+        val admission = gate.acquireSelectionTransition()
+
+        assertThrows(EnvironmentSelectionBusyException::class.java) {
+            gate.withActivePackageTarget(EnvironmentKind.PROOT_DEBIAN) {}
+        }
+
+        admission.close()
+        gate.withActivePackageTarget(EnvironmentKind.PROOT_DEBIAN) {}
+    }
 }

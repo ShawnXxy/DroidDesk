@@ -16,6 +16,15 @@ import android.widget.TextView
 import com.orailnoor.droiddesk.x11.ExternalDesktopInputBridge
 import java.lang.ref.WeakReference
 
+internal fun forwardRelayMotion(
+    isExternal: Boolean,
+    bridgeAttached: Boolean,
+    forward: () -> Boolean,
+): Boolean {
+    if (!isExternal || !bridgeAttached) return false
+    return forward()
+}
+
 class ExternalInputRelayActivity : Activity() {
     companion object {
         private var current = WeakReference<ExternalInputRelayActivity>(null)
@@ -42,19 +51,27 @@ class ExternalInputRelayActivity : Activity() {
         super.onCreate(savedInstanceState)
         current = WeakReference(this)
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-        setContentView(
-            TextView(this).apply {
-                setBackgroundColor(Color.rgb(12, 14, 18))
-                setTextColor(Color.WHITE)
-                textSize = 20f
-                gravity = Gravity.CENTER
-                text = "External desktop input is active\n\n" +
-                    "Use the connected mouse, touchpad, and keyboard to control Linux."
-                isFocusable = true
-                isFocusableInTouchMode = true
-                requestFocus()
-            },
-        )
+        val relayView = TextView(this).apply {
+            setBackgroundColor(Color.rgb(12, 14, 18))
+            setTextColor(Color.WHITE)
+            textSize = 20f
+            gravity = Gravity.CENTER
+            text = "External desktop input is active\n\n" +
+                "Use the connected mouse, touchpad, and keyboard to control Linux."
+            isFocusable = true
+            isFocusableInTouchMode = true
+            requestFocus()
+        }
+        relayView.setOnCapturedPointerListener { view, event ->
+            forwardRelayMotion(
+                isExternal = event.device?.isExternal == true,
+                bridgeAttached = ExternalDesktopInputBridge.isAttached(),
+            ) {
+                ExternalDesktopInputBridge.dispatchMotionEvent(view, event)
+                true
+            }
+        }
+        setContentView(relayView)
     }
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {
@@ -88,20 +105,26 @@ class ExternalInputRelayActivity : Activity() {
     }
 
     override fun dispatchGenericMotionEvent(event: MotionEvent): Boolean {
-        if (event.device?.isExternal == true && ExternalDesktopInputBridge.isAttached()) {
+        if (forwardRelayMotion(
+                isExternal = event.device?.isExternal == true,
+                bridgeAttached = ExternalDesktopInputBridge.isAttached(),
+            ) {
             maintainPointerCapture()
             ExternalDesktopInputBridge.dispatchMotionEvent(window.decorView, event)
-            return true
-        }
+            true
+        }) return true
         return super.dispatchGenericMotionEvent(event)
     }
 
     override fun dispatchTouchEvent(event: MotionEvent): Boolean {
-        if (event.device?.isExternal == true && ExternalDesktopInputBridge.isAttached()) {
+        if (forwardRelayMotion(
+                isExternal = event.device?.isExternal == true,
+                bridgeAttached = ExternalDesktopInputBridge.isAttached(),
+            ) {
             maintainPointerCapture()
             ExternalDesktopInputBridge.dispatchMotionEvent(window.decorView, event)
-            return true
-        }
+            true
+        }) return true
         return super.dispatchTouchEvent(event)
     }
 

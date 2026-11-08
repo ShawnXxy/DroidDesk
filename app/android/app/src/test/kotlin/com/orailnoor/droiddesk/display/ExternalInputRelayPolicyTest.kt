@@ -1,5 +1,7 @@
 package com.orailnoor.droiddesk.display
 
+import com.orailnoor.droiddesk.view.forwardRelayMotion
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -154,5 +156,52 @@ class ExternalInputRelayPolicyTest {
     fun phoneRelayOwnsPointerCaptureInsteadOfTheExternalRenderer() {
         assertFalse(usesRendererPointerCapture(ExternalInputRoute.PHONE_RELAY))
         assertTrue(usesRendererPointerCapture(ExternalInputRoute.NATIVE))
+    }
+
+    @Test
+    fun onlyTheRendererOwnerFinishesThePhoneRelay() {
+        assertFalse(
+            shouldFinishInputRelay(
+                hasRendererLease = false,
+                ownsLorieView = false,
+            ),
+        )
+        assertFalse(
+            shouldFinishInputRelay(
+                hasRendererLease = true,
+                ownsLorieView = false,
+            ),
+        )
+        assertTrue(
+            shouldFinishInputRelay(
+                hasRendererLease = true,
+                ownsLorieView = true,
+            ),
+        )
+    }
+
+    @Test
+    fun capturedPointerForwardsOnlyExternalAttachedInput() {
+        var forwarded = 0
+
+        assertTrue(
+            forwardRelayMotion(isExternal = true, bridgeAttached = true) {
+                forwarded++
+                true
+            },
+        )
+        assertFalse(
+            forwardRelayMotion(isExternal = false, bridgeAttached = true) {
+                forwarded++
+                true
+            },
+        )
+        assertFalse(
+            forwardRelayMotion(isExternal = true, bridgeAttached = false) {
+                forwarded++
+                true
+            },
+        )
+        assertEquals(1, forwarded)
     }
 }

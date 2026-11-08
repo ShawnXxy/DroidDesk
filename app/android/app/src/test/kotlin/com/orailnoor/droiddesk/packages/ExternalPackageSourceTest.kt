@@ -6,6 +6,7 @@ import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.io.File
+import java.io.IOException
 import java.nio.file.Files
 import java.security.MessageDigest
 
@@ -15,7 +16,7 @@ class ExternalPackageSourceTest {
     fun rejectsKeyFingerprintMismatch() {
         val rootfs = Files.createTempDirectory("external-source").toFile()
         val inspector = FakeExternalSourceInspector().apply {
-            fingerprints = setOf("0000000000000000000000000000000000000000")
+            pinnedKeyring = null
         }
         val installer = ExternalPackageSource(rootfs, inspector)
 
@@ -31,7 +32,6 @@ class ExternalPackageSourceTest {
     fun rejectsNonArm64RepositoryOrDeb() {
         val rootfs = Files.createTempDirectory("external-source").toFile()
         val inspector = FakeExternalSourceInspector().apply {
-            fingerprints = setOf(GOOGLE_FINGERPRINT)
             debVerification = SourceVerification(
                 architecture = "amd64",
                 version = MICROSOFT_VERSION,
@@ -105,7 +105,8 @@ class ExternalPackageSourceTest {
     fun writesDedicatedSignedBySourceWithoutAptKey() {
         val rootfs = Files.createTempDirectory("external-source").toFile()
         val inspector = FakeExternalSourceInspector().apply {
-            fingerprints = setOf(GOOGLE_FINGERPRINT)
+            downloadedBytes = "pinned key plus unrelated key".toByteArray()
+            pinnedKeyring = "pinned key and subkeys only".toByteArray()
         }
         val installer = ExternalPackageSource(rootfs, inspector)
 
@@ -116,6 +117,8 @@ class ExternalPackageSourceTest {
         assertTrue(source.isFile)
         assertTrue(keyring.isFile)
         assertTrue(source.readText().contains("Architectures: arm64"))
+        assertEquals("pinned key and subkeys only", keyring.readText())
+        assertEquals(GOOGLE_FINGERPRINT, inspector.requestedFingerprint)
         assertTrue(
             source.readText().contains(
                 "Signed-By: /usr/share/keyrings/droiddesk-google-chrome.gpg",
@@ -134,7 +137,7 @@ class ExternalPackageSourceTest {
         val installer = ExternalPackageSource(
             rootfs,
             FakeExternalSourceInspector().apply {
-                fingerprints = setOf(GOOGLE_FINGERPRINT)
+                pinnedKeyring = "pinned key and subkeys only".toByteArray()
             },
         )
 
@@ -144,6 +147,29 @@ class ExternalPackageSourceTest {
             "Types: deb\nURIs: https://deb.debian.org/debian\n",
             unrelated.readText(),
         )
+    }
+
+    @Test
+    fun failedAtomicActivationPreservesExistingKeyring() {
+        val rootfs = Files.createTempDirectory("external-source").toFile()
+        val keyring = File(
+            rootfs,
+            "usr/share/keyrings/droiddesk-google-chrome.gpg",
+        ).apply {
+            parentFile!!.mkdirs()
+            writeText("existing trusted keyring")
+        }
+        val installer = ExternalPackageSource(
+            rootfs,
+            FakeExternalSourceInspector(),
+            activate = { _, _ -> throw IOException("simulated interruption") },
+        )
+
+        assertThrows(ExternalPackageSourceException::class.java) {
+            installer.configureSignedRepository(googleSource())
+        }
+
+        assertEquals("existing trusted keyring", keyring.readText())
     }
 
     private fun googleSource() = PackageRecipeSource.SignedAptRepository(
@@ -180,7 +206,8 @@ class ExternalPackageSourceTest {
 
 private class FakeExternalSourceInspector : ExternalSourceInspector {
     var downloadedBytes = "official package".toByteArray()
-    var fingerprints: Set<String> = emptySet()
+    var pinnedKeyring: ByteArray? = "pinned key and subkeys only".toByteArray()
+    var requestedFingerprint: String? = null
     var debVerification = SourceVerification(
         architecture = "arm64",
         version = "1.145.2-1793945203",
@@ -190,9 +217,13 @@ private class FakeExternalSourceInspector : ExternalSourceInspector {
 
     override fun download(uri: String): ByteArray = downloadedBytes
 
-    override fun keyFingerprints(keyData: ByteArray): Set<String> = fingerprints
-
-    override fun dearmor(keyData: ByteArray): ByteArray = "dearmored".toByteArray()
+    override fun exportPinnedKeyring(
+        keyData: ByteArray,
+        primaryFingerprint: String,
+    ): ByteArray? {
+        requestedFingerprint = primaryFingerprint
+        return pinnedKeyring
+    }
 
     override fun inspectDeb(packageData: ByteArray): SourceVerification =
         debVerification.copy(sha256 = sha256(packageData))
