@@ -468,6 +468,17 @@ class RuntimeCapabilityProbeTest {
     }
 
     @Test
+    fun positionalRequiredBytesConstructorKeepsStorageArgument() {
+        val capabilities = RuntimeCapabilityProbe(
+            FakeCapabilitySource(availableBytes = 3L * GIB),
+            6L * GIB,
+        ).probe()
+
+        assertEquals(6L * GIB, capabilities.requiredBytes)
+        assertEquals(EvidenceState.BLOCKED_BY_POLICY, capabilities.storage.state)
+    }
+
+    @Test
     fun nonExceptionProbeFailureRetainsItsReason() {
         val capabilities = RuntimeCapabilityProbe(
             source = FakeCapabilitySource(

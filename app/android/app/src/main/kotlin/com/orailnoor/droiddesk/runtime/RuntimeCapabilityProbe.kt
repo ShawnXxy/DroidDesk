@@ -51,7 +51,7 @@ class RuntimeCapabilityProbe private constructor(
 
     constructor(
         source: RuntimeCapabilitySource,
-        requiredBytes: Long,
+        requiredBytes: Long = DEFAULT_REQUIRED_BYTES,
         timeoutMillis: Long,
     ) : this(
         source = source,
@@ -66,15 +66,6 @@ class RuntimeCapabilityProbe private constructor(
             rendererMs = timeoutMillis,
         ),
         hooks = ProbeExecutionHooks(),
-    )
-
-    constructor(
-        source: RuntimeCapabilitySource,
-        timeoutMillis: Long,
-    ) : this(
-        source = source,
-        requiredBytes = DEFAULT_REQUIRED_BYTES,
-        timeoutMillis = timeoutMillis,
     )
 
     internal constructor(
