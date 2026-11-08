@@ -50,10 +50,10 @@ import com.orailnoor.droiddesk.x11.X11InputController
 import com.orailnoor.droiddesk.x11.ExternalDesktopInputBridge
 import com.orailnoor.droiddesk.display.DesktopDisplayCoordinator
 import com.orailnoor.droiddesk.display.DisplayEnvironmentPolicy
-import com.orailnoor.droiddesk.display.ExternalInputRoute
-import com.orailnoor.droiddesk.display.externalInputRoute
-import com.orailnoor.droiddesk.display.shouldFinishInputRelay
-import com.orailnoor.droiddesk.display.usesRendererPointerCapture
+import com.orailnoor.droiddesk.display.input.ExternalInputRoute
+import com.orailnoor.droiddesk.display.input.externalInputRoute
+import com.orailnoor.droiddesk.display.input.shouldFinishInputRelay
+import com.orailnoor.droiddesk.display.input.usesRendererPointerCapture
 import com.orailnoor.droiddesk.display.RendererLease
 import com.orailnoor.droiddesk.display.DisplayProfile
 import com.orailnoor.droiddesk.display.DisplayProfilePolicy

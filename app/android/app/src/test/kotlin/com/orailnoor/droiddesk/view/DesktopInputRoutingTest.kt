@@ -1,6 +1,7 @@
-package com.orailnoor.droiddesk.view
+package com.orailnoor.droiddesk.display.input
 
 import android.view.Display
+import com.orailnoor.droiddesk.view.shouldObserveInputDeviceChanges
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test

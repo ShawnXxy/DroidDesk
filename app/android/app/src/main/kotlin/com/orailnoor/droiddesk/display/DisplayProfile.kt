@@ -1,5 +1,6 @@
 package com.orailnoor.droiddesk.display
 
+import com.orailnoor.droiddesk.display.input.ExternalInputRoutePreference
 import kotlin.math.roundToInt
 
 enum class ProfileKind(val wireName: String) {
