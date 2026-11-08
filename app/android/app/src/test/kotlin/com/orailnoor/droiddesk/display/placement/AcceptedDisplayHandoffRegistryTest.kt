@@ -2,6 +2,7 @@ package com.orailnoor.droiddesk.display.placement
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotEquals
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -664,6 +665,400 @@ class AcceptedDisplayHandoffRegistryTest {
     }
 
     @Test
+    fun evidenceBackedAcceptanceRebindsSameOwnerWithoutEvidence() {
+        val registry = AcceptedDisplayHandoffRegistry()
+        val owner = Any()
+        val accepted = registry.acceptWithCurrentEvidence(
+            owner,
+            evidence(30, "external:4:HDMI"),
+        )
+
+        val rebound = registry.admit(
+            owner = owner,
+            displayId = accepted.connection.displayId,
+            connectionKey = accepted.connection.connectionKey,
+            evidence = missingEvidence,
+        )
+
+        assertEquals(accepted, rebound)
+        assertSame(
+            accepted.connection,
+            (rebound as AcceptedDisplayHandoffAdmission.Accepted).connection,
+        )
+    }
+
+    @Test
+    fun sameOwnerAcceptedHandoffRejectsDifferentKeyWithoutEvidence() {
+        val registry = AcceptedDisplayHandoffRegistry()
+        val owner = Any()
+        val accepted = registry.acceptWithCurrentEvidence(
+            owner,
+            evidence(30, "external:4:HDMI"),
+        )
+
+        assertEquals(
+            AcceptedDisplayHandoffAdmission.Rejected,
+            registry.admit(
+                owner = owner,
+                displayId = 30,
+                connectionKey = "bound:30:different",
+                evidence = missingEvidence,
+            ),
+        )
+        assertEquals(
+            accepted,
+            registry.admit(
+                owner = owner,
+                displayId = 30,
+                connectionKey = accepted.connection.connectionKey,
+                evidence = missingEvidence,
+            ),
+        )
+    }
+
+    @Test
+    fun sameOwnerAcceptedHandoffRejectsDifferentDisplayWithoutEvidence() {
+        val registry = AcceptedDisplayHandoffRegistry()
+        val owner = Any()
+        val accepted = registry.acceptWithCurrentEvidence(
+            owner,
+            evidence(30, "external:4:HDMI"),
+        )
+
+        assertEquals(
+            AcceptedDisplayHandoffAdmission.Rejected,
+            registry.admit(
+                owner = owner,
+                displayId = 31,
+                connectionKey = accepted.connection.connectionKey,
+                evidence = missingEvidence,
+            ),
+        )
+        assertEquals(
+            accepted,
+            registry.admit(
+                owner = owner,
+                displayId = 30,
+                connectionKey = accepted.connection.connectionKey,
+                evidence = missingEvidence,
+            ),
+        )
+    }
+
+    @Test
+    fun differentOwnerAwaitsOwnEvidenceWithoutReusingAcceptedHandoff() {
+        val registry = AcceptedDisplayHandoffRegistry()
+        val acceptedOwner = Any()
+        val nextOwner = Any()
+        val accepted = registry.acceptWithCurrentEvidence(
+            acceptedOwner,
+            evidence(30, "external:4:HDMI"),
+        )
+
+        assertEquals(
+            AcceptedDisplayHandoffAdmission.AwaitingEvidence,
+            registry.admit(
+                owner = nextOwner,
+                displayId = 30,
+                connectionKey = accepted.connection.connectionKey,
+                evidence = missingEvidence,
+            ),
+        )
+        assertEquals(
+            accepted,
+            registry.admit(
+                owner = acceptedOwner,
+                displayId = 30,
+                connectionKey = accepted.connection.connectionKey,
+                evidence = missingEvidence,
+            ),
+        )
+    }
+
+    @Test
+    fun equalButDistinctOwnerAwaitsOwnEvidenceWithoutReusingAcceptedHandoff() {
+        val registry = AcceptedDisplayHandoffRegistry()
+        val acceptedOwner = EqualOwner()
+        val accepted = registry.acceptWithCurrentEvidence(
+            acceptedOwner,
+            evidence(30, "external:4:HDMI"),
+        )
+
+        assertEquals(
+            AcceptedDisplayHandoffAdmission.AwaitingEvidence,
+            registry.admit(
+                owner = EqualOwner(),
+                displayId = 30,
+                connectionKey = accepted.connection.connectionKey,
+                evidence = missingEvidence,
+            ),
+        )
+        assertEquals(
+            accepted,
+            registry.admit(
+                owner = acceptedOwner,
+                displayId = 30,
+                connectionKey = accepted.connection.connectionKey,
+                evidence = missingEvidence,
+            ),
+        )
+    }
+
+    @Test
+    fun delayedEvidenceAcceptanceCanBeConfirmedIdempotently() {
+        val registry = AcceptedDisplayHandoffRegistry()
+        val owner = Any()
+        val evidence = evidence(30, "external:4:HDMI")
+        val expected = registry.resolve(evidence)
+        registry.admit(
+            owner = owner,
+            displayId = 30,
+            connectionKey = expected.connectionKey,
+            evidence = missingEvidence,
+        )
+        val firstConfirmation = registry.confirm(owner, evidence)
+            as AcceptedDisplayHandoffAdmission.Accepted
+
+        val repeatedConfirmation = registry.confirm(owner, evidence)
+
+        assertEquals(
+            AcceptedDisplayHandoffAdmission.Accepted(expected),
+            repeatedConfirmation,
+        )
+        assertSame(
+            firstConfirmation.connection,
+            (
+                repeatedConfirmation
+                    as AcceptedDisplayHandoffAdmission.Accepted
+                ).connection,
+        )
+        assertEquals(
+            expected.connectionKey,
+            repeatedConfirmation.connection.connectionKey,
+        )
+    }
+
+    @Test
+    fun mismatchedDelayedEvidenceInvalidatesOnlyMatchingOwnersAcceptedRecord() {
+        val registry = AcceptedDisplayHandoffRegistry()
+        val rejectedOwner = Any()
+        val preservedOwner = Any()
+        val rejectedEvidence = evidence(30, "external:4:HDMI")
+        val mismatchedEvidence = evidence(30, "external:5:HDMI")
+        val preservedEvidence = evidence(31, "external:6:HDMI")
+        registry.acceptWithCurrentEvidence(
+            rejectedOwner,
+            rejectedEvidence,
+        )
+        val preserved = registry.acceptWithCurrentEvidence(
+            preservedOwner,
+            preservedEvidence,
+        )
+
+        assertEquals(
+            AcceptedDisplayHandoffAdmission.Rejected,
+            registry.confirm(rejectedOwner, mismatchedEvidence),
+        )
+        assertEquals(
+            AcceptedDisplayHandoffAdmission.Rejected,
+            registry.confirm(rejectedOwner, rejectedEvidence),
+        )
+        assertEquals(
+            preserved,
+            registry.admit(
+                owner = preservedOwner,
+                displayId = 31,
+                connectionKey = preserved.connection.connectionKey,
+                evidence = missingEvidence,
+            ),
+        )
+    }
+
+    @Test
+    fun mismatchedCurrentEvidenceInvalidatesOnlyMatchingOwnersAcceptedRecord() {
+        val registry = AcceptedDisplayHandoffRegistry()
+        val rejectedOwner = Any()
+        val preservedOwner = Any()
+        val rejectedEvidence = evidence(30, "external:4:HDMI")
+        val mismatchedEvidence = evidence(30, "external:5:HDMI")
+        val preservedEvidence = evidence(31, "external:6:HDMI")
+        val rejected = registry.acceptWithCurrentEvidence(
+            rejectedOwner,
+            rejectedEvidence,
+        )
+        val preserved = registry.acceptWithCurrentEvidence(
+            preservedOwner,
+            preservedEvidence,
+        )
+
+        assertEquals(
+            AcceptedDisplayHandoffAdmission.Rejected,
+            registry.admit(
+                owner = rejectedOwner,
+                displayId = 30,
+                connectionKey = rejected.connection.connectionKey,
+                evidence = AcceptedDisplayHandoffEvidenceSnapshot(
+                    current = mismatchedEvidence,
+                    previous = null,
+                ),
+            ),
+        )
+        assertEquals(
+            AcceptedDisplayHandoffAdmission.Rejected,
+            registry.confirm(rejectedOwner, rejectedEvidence),
+        )
+        assertEquals(
+            preserved,
+            registry.admit(
+                owner = preservedOwner,
+                displayId = 31,
+                connectionKey = preserved.connection.connectionKey,
+                evidence = missingEvidence,
+            ),
+        )
+    }
+
+    @Test
+    fun unbindInvalidatesAcceptedHandoffForOnlyThatOwner() {
+        val registry = AcceptedDisplayHandoffRegistry()
+        val unboundOwner = Any()
+        val preservedOwner = Any()
+        val unboundEvidence = evidence(30, "external:4:HDMI")
+        registry.acceptWithCurrentEvidence(
+            unboundOwner,
+            unboundEvidence,
+        )
+        val preserved = registry.acceptWithCurrentEvidence(
+            preservedOwner,
+            evidence(31, "external:5:HDMI"),
+        )
+
+        registry.unbind(unboundOwner)
+
+        assertEquals(
+            AcceptedDisplayHandoffAdmission.Rejected,
+            registry.confirm(unboundOwner, unboundEvidence),
+        )
+        assertEquals(
+            preserved,
+            registry.admit(
+                owner = preservedOwner,
+                displayId = 31,
+                connectionKey = preserved.connection.connectionKey,
+                evidence = missingEvidence,
+            ),
+        )
+    }
+
+    @Test
+    fun displayRemovalInvalidatesAcceptedHandoffsOnlyForRemovedDisplay() {
+        val registry = AcceptedDisplayHandoffRegistry()
+        val removedOwner = Any()
+        val preservedOwner = Any()
+        val removedEvidence = evidence(30, "external:4:HDMI")
+        val preservedEvidence = evidence(31, "external:5:HDMI")
+        val removed = registry.acceptWithCurrentEvidence(
+            removedOwner,
+            removedEvidence,
+        )
+        val preserved = registry.acceptWithCurrentEvidence(
+            preservedOwner,
+            preservedEvidence,
+        )
+
+        registry.displayRemoved(30)
+
+        assertEquals(
+            AcceptedDisplayHandoffAdmission.Rejected,
+            registry.confirm(removedOwner, removedEvidence),
+        )
+        val replacement = registry.resolve(removedEvidence)
+        assertEquals(1L, replacement.generation)
+        assertNotEquals(removed.connection.connectionKey, replacement.connectionKey)
+        assertEquals(preserved.connection, registry.resolve(preservedEvidence))
+        assertEquals(
+            preserved,
+            registry.admit(
+                owner = preservedOwner,
+                displayId = 31,
+                connectionKey = preserved.connection.connectionKey,
+                evidence = missingEvidence,
+            ),
+        )
+    }
+
+    @Test
+    fun displayAddAndChangePreserveAcceptedHandoffAndGeneration() {
+        val registry = AcceptedDisplayHandoffRegistry()
+        val owner = Any()
+        val evidence = evidence(30, "external:4:HDMI")
+        val accepted = registry.acceptWithCurrentEvidence(
+            owner,
+            evidence,
+        )
+
+        registry.displayAdded(30)
+        registry.displayChanged(30)
+
+        assertEquals(accepted.connection, registry.resolve(evidence))
+        val rebound = registry.admit(
+            owner = owner,
+            displayId = 30,
+            connectionKey = accepted.connection.connectionKey,
+            evidence = missingEvidence,
+        )
+        assertEquals(accepted, rebound)
+        assertSame(
+            accepted.connection,
+            (rebound as AcceptedDisplayHandoffAdmission.Accepted).connection,
+        )
+    }
+
+    @Test
+    fun matchingEvidenceReplacesSameOwnersAcceptedConnection() {
+        val registry = AcceptedDisplayHandoffRegistry()
+        val owner = Any()
+        val original = registry.acceptWithCurrentEvidence(
+            owner,
+            evidence(30, "external:4:HDMI"),
+        )
+        val replacementEvidence = evidence(30, "external:5:HDMI")
+        val replacementConnection = registry.resolve(replacementEvidence)
+        val replacement = registry.admit(
+            owner = owner,
+            displayId = 30,
+            connectionKey = replacementConnection.connectionKey,
+            evidence = AcceptedDisplayHandoffEvidenceSnapshot(
+                current = replacementEvidence,
+                previous = null,
+            ),
+        )
+
+        assertEquals(
+            AcceptedDisplayHandoffAdmission.Accepted(replacementConnection),
+            replacement,
+        )
+        assertEquals(
+            AcceptedDisplayHandoffAdmission.Rejected,
+            registry.admit(
+                owner = owner,
+                displayId = 30,
+                connectionKey = original.connection.connectionKey,
+                evidence = missingEvidence,
+            ),
+        )
+        assertEquals(
+            replacement,
+            registry.admit(
+                owner = owner,
+                displayId = 30,
+                connectionKey = replacementConnection.connectionKey,
+                evidence = missingEvidence,
+            ),
+        )
+    }
+
+    @Test
     fun sequentialOwnersReuseSameLiveConnection() {
         val registry = AcceptedDisplayHandoffRegistry()
         val evidence = AcceptedDisplayHandoffEvidence(
@@ -697,6 +1092,30 @@ class AcceptedDisplayHandoffRegistryTest {
                 evidence = currentEvidence,
             ),
         )
+    }
+
+    private val missingEvidence =
+        AcceptedDisplayHandoffEvidenceSnapshot(current = null, previous = null)
+
+    private fun evidence(
+        displayId: Int,
+        fallbackIdentity: String,
+    ) = AcceptedDisplayHandoffEvidence(displayId, fallbackIdentity)
+
+    private fun AcceptedDisplayHandoffRegistry.acceptWithCurrentEvidence(
+        owner: Any,
+        evidence: AcceptedDisplayHandoffEvidence,
+    ): AcceptedDisplayHandoffAdmission.Accepted {
+        val connection = resolve(evidence)
+        return admit(
+            owner = owner,
+            displayId = connection.displayId,
+            connectionKey = connection.connectionKey,
+            evidence = AcceptedDisplayHandoffEvidenceSnapshot(
+                current = evidence,
+                previous = null,
+            ),
+        ) as AcceptedDisplayHandoffAdmission.Accepted
     }
 
     private class EqualOwner {
