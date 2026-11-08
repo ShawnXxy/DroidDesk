@@ -151,8 +151,11 @@ fun classify(context: PresentationContext): PresentationClass
 fun resolve(
     context: PresentationContext,
     presentationClass: PresentationClass,
+    environment: DisplayEnvironment,
     settings: DisplaySettings?,
     runtime: RuntimeCapabilities,
+    horizontalScrollFactor: Float,
+    verticalScrollFactor: Float,
 ): PresentationPlan
 ```
 

@@ -1,6 +1,6 @@
 # Multi-Device Compatibility Micro-PR Execution Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development to coordinate one isolated nested worktree session per PR unit. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** Use one isolated nested worktree session per PR unit, with independent implementation and review contexts. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Deliver the capability-driven multi-device compatibility refactor through small, independently reviewed pull requests merged only into `ref/v1`, while keeping `xixia` unchanged until later physical-device validation.
 
