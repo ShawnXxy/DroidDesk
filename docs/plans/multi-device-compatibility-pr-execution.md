@@ -12,6 +12,8 @@
 
 **Re-evaluated baseline:** `origin/xixia` at `e8884c2` on 2026-11-08.
 
+`GitHub Copilot Balance code review` is the repository's automatic review authored by `copilot-pull-request-reviewer`, triggered after each pushed head update, and is complete only when a review exists for the latest head SHA and every actionable thread is resolved or explicitly adjudicated.
+
 ## Global Constraints
 
 - Create `ref/v1` from the latest `origin/xixia`; never commit implementation work directly to `xixia`.
