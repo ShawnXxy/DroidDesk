@@ -107,6 +107,7 @@ class DesktopDisplayCoordinator(
     private var settingsStore: DisplaySettingsStore? = null,
     environmentPolicy: DisplayEnvironmentPolicy = DisplayEnvironmentPolicy.forDevice(""),
     placementStrategy: DesktopPlacementStrategy? = null,
+    private var stopForEnvironmentChange: (((Result<Unit>) -> Unit) -> Unit)? = null,
 ) {
     private var strategyWasProvided = placementStrategy != null
     private val placementStrategy = ReplaceableDesktopPlacementStrategy(
@@ -131,6 +132,11 @@ class DesktopDisplayCoordinator(
         val displayId: Int?,
         val display: DesktopDisplay?,
     )
+    private data class RestartRequest(
+        val target: DesktopStartupTarget,
+        val mode: String,
+        val desktopEnv: String,
+    )
     private var owner: Owner? = null
     private var generation = 0L
     private var repository: DisplayRepository? = null
@@ -145,8 +151,47 @@ class DesktopDisplayCoordinator(
     private var requestSequence = 0L
     private var lastTarget: DesktopDisplay? = null
     private var sessionTarget: DesktopStartupTarget? = null
-    private var restartController: DisplayLocalSessionController? = null
     private var sessionRestarting = false
+    private var restartStartService: () -> Unit = {}
+    private val restartController = DisplayLocalSessionController(object : DisplayLocalSessionHost<RestartRequest> {
+        override fun sessionEpoch() = sessionGeneration
+        override fun isSessionCurrent(epoch: Long) = this@DesktopDisplayCoordinator.isSessionCurrent(epoch)
+        override fun validateTarget(target: RestartRequest) {
+            validateRestartTarget(target.target)
+        }
+        override fun restartingChanged(restarting: Boolean) {
+            sessionRestarting = restarting
+            publish()
+        }
+        override fun stopForEnvironmentChange(completion: (Result<Unit>) -> Unit) {
+            val stop = this@DesktopDisplayCoordinator.stopForEnvironmentChange
+            if (stop == null) {
+                completion(Result.failure(DesktopDisplayException(
+                    "SESSION_RESTART_FAILED",
+                    "Linux restart coordination is unavailable",
+                )))
+            } else {
+                stop(completion)
+            }
+        }
+        override fun startOnTarget(target: RestartRequest, completion: (Result<Unit>) -> Unit) {
+            try {
+                val epoch = prepareSession(target.mode, target.desktopEnv, true)
+                restartStartService()
+                openActive(target.target) { result ->
+                    if (result.isFailure) completion(result) else awaitSessionReady(epoch, completion)
+                }
+            } catch (failure: DesktopDisplayException) {
+                completion(Result.failure(failure))
+            } catch (failure: SecurityException) {
+                android.util.Log.e("DesktopDisplay", "Android denied the restarted Linux service", failure)
+                completion(Result.failure(DesktopDisplayException(
+                    "DISPLAY_NOT_ALLOWED",
+                    "Android denied restarting the Linux service",
+                )))
+            }
+        }
+    }, assertMainThread)
     private var acceptedRequest: Long? = null
     private var phase = "hidden"
     private var error: DesktopDisplayException? = null
@@ -395,39 +440,12 @@ class DesktopDisplayCoordinator(
         repository = discovery
         host = AndroidDesktopDisplayHost(context.applicationContext, discovery, placementStrategy)
         val app = context.applicationContext
-        restartController = DisplayLocalSessionController(object : DisplayLocalSessionHost {
-            override fun sessionEpoch() = sessionGeneration
-            override fun isSessionCurrent(epoch: Long) = this@DesktopDisplayCoordinator.isSessionCurrent(epoch)
-            override fun validateTarget(target: DesktopStartupTarget) {
-                val actual = host?.currentDisplayId()
-                if (actual != target.displayId || startupTarget(actual) != target) {
-                    throw DesktopDisplayException("DISPLAY_UNAVAILABLE", "The app moved before Linux could restart")
-                }
-            }
-            override fun restartingChanged(restarting: Boolean) {
-                sessionRestarting = restarting
-                publish()
-            }
-            override fun stopForEnvironmentChange(completion: (Result<Unit>) -> Unit) {
-                DroidDeskService.stopDesktop(app, DesktopStopReason.ENVIRONMENT_CHANGE, completion)
-            }
-            override fun startOnTarget(target: DesktopStartupTarget, completion: (Result<Unit>) -> Unit) {
-                try {
-                    val epoch = prepareSession(sessionMode, desktopEnv, true)
-                    app.startForegroundService(Intent(app, DroidDeskService::class.java))
-                    openActive(target) { result ->
-                        if (result.isFailure) completion(result) else awaitSessionReady(epoch, completion)
-                    }
-                } catch (failure: DesktopDisplayException) {
-                    completion(Result.failure(failure))
-                } catch (failure: SecurityException) {
-                    android.util.Log.e("DesktopDisplay", "Android denied the restarted Linux service", failure)
-                    completion(Result.failure(DesktopDisplayException(
-                        "DISPLAY_NOT_ALLOWED", "Android denied restarting the Linux service",
-                    )))
-                }
-            }
-        }, assertMainThread)
+        stopForEnvironmentChange = { completion ->
+            DroidDeskService.stopDesktop(app, DesktopStopReason.ENVIRONMENT_CHANGE, completion)
+        }
+        restartStartService = {
+            app.startForegroundService(Intent(app, DroidDeskService::class.java))
+        }
         discovery.start { onDisplaysChanged() }
         refreshAutomaticOpening()
     }
@@ -468,7 +486,7 @@ class DesktopDisplayCoordinator(
 
     fun cancelPendingRestart() {
         assertMainThread()
-        restartController?.cancelPendingRestart()
+        restartController.cancelPendingRestart()
     }
 
     fun restartForEnvironmentIfNeeded(
@@ -477,9 +495,12 @@ class DesktopDisplayCoordinator(
         completion: (Result<Unit>) -> Unit,
     ): Boolean {
         assertMainThread()
-        if (!isDisplayLocal || (!sessionRestarting && (sessionTarget == null || sessionTarget == target))) return false
+        if (!sessionRestarting && !placementStrategy.requiresSessionRestart(sessionTarget, target)) return false
         val epoch = if (stopFailed && expectedEpoch == sessionGeneration) beginSession() else expectedEpoch
-        checkNotNull(restartController).requestEnvironmentRestart(target, epoch) { result ->
+        restartController.requestRestart(
+            RestartRequest(target, sessionMode, desktopEnv),
+            epoch,
+        ) { result ->
             result.exceptionOrNull()?.let {
                 if ((it as? DesktopDisplayException)?.code != "SESSION_STOPPED") {
                     reportError(it as? DesktopDisplayException ?: DesktopDisplayException(
@@ -490,6 +511,16 @@ class DesktopDisplayCoordinator(
             completion(result)
         }
         return true
+    }
+
+    private fun validateRestartTarget(target: DesktopStartupTarget) {
+        val actual = host?.currentDisplayId()
+        if (actual != target.displayId || startupTarget(actual) != target) {
+            throw DesktopDisplayException(
+                "DISPLAY_UNAVAILABLE",
+                "The app moved before Linux could restart",
+            )
+        }
     }
 
     fun replacePlacementStrategy(strategy: DesktopPlacementStrategy) {
@@ -518,7 +549,8 @@ class DesktopDisplayCoordinator(
             pendingStops == 0 &&
             owner == null &&
             move == null &&
-            !sessionRestarting
+            !sessionRestarting &&
+            !restartController.hasPendingRestart
     }
 
     private fun reapplyActivityOrientations() =

@@ -1,20 +1,21 @@
 package com.orailnoor.droiddesk.display
 
-interface DisplayLocalSessionHost {
+interface DisplayLocalSessionHost<T> {
     fun sessionEpoch(): Long
     fun isSessionCurrent(epoch: Long): Boolean
-    fun validateTarget(target: DesktopStartupTarget)
+    fun sameRequest(first: T, second: T): Boolean = first == second
+    fun validateTarget(target: T)
     fun restartingChanged(restarting: Boolean)
     fun stopForEnvironmentChange(completion: (Result<Unit>) -> Unit)
-    fun startOnTarget(target: DesktopStartupTarget, completion: (Result<Unit>) -> Unit)
+    fun startOnTarget(target: T, completion: (Result<Unit>) -> Unit)
 }
 
-class DisplayLocalSessionController(
-    private val host: DisplayLocalSessionHost,
+class DisplayLocalSessionController<T>(
+    private val host: DisplayLocalSessionHost<T>,
     private val assertMainThread: () -> Unit = {},
 ) {
-    private class Request(
-        val target: DesktopStartupTarget,
+    private class Request<T>(
+        val target: T,
         val epoch: Long,
         completion: (Result<Unit>) -> Unit,
     ) {
@@ -26,15 +27,16 @@ class DisplayLocalSessionController(
         }
     }
 
-    private class Operation(var request: Request) {
+    private class Operation<T>(var request: Request<T>) {
         var starting = false
-        var next: Request? = null
+        var next: Request<T>? = null
     }
 
-    private var operation: Operation? = null
+    private var operation: Operation<T>? = null
+    val hasPendingRestart: Boolean get() = operation != null
 
-    fun requestEnvironmentRestart(
-        target: DesktopStartupTarget,
+    fun requestRestart(
+        target: T,
         expectedEpoch: Long,
         completion: (Result<Unit>) -> Unit,
     ) {
@@ -52,8 +54,17 @@ class DisplayLocalSessionController(
             completion(Result.failure(error))
             return
         }
+        if (active?.starting == true && host.sameRequest(active.request.target, target)) {
+            val superseded = active.next
+            active.next = null
+            active.request.completions += completion
+            superseded?.complete(Result.failure(cancelled(
+                "A newer display environment superseded this restart",
+            )))
+            return
+        }
         val latest = active?.next ?: active?.request
-        if (latest?.target == target) {
+        if (latest != null && host.sameRequest(latest.target, target)) {
             latest.completions += completion
             return
         }
@@ -79,7 +90,7 @@ class DisplayLocalSessionController(
         active.next?.complete(result)
     }
 
-    private fun stop(active: Operation) {
+    private fun stop(active: Operation<T>) {
         var completed = false
         host.stopForEnvironmentChange { result ->
             assertMainThread()
@@ -114,7 +125,7 @@ class DisplayLocalSessionController(
         }
     }
 
-    private fun finish(active: Operation, result: Result<Unit>) {
+    private fun finish(active: Operation<T>, result: Result<Unit>) {
         if (operation !== active) return
         operation = null
         host.restartingChanged(false)
