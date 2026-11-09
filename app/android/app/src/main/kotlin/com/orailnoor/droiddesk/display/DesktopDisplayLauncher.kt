@@ -78,12 +78,12 @@ internal fun translateAndroidDesktopLaunchFailure(error: Throwable): DesktopDisp
         else -> throw error
     }
 
-internal fun acceptedSyntheticDisplayHandoff(
+internal fun acceptsSyntheticDisplayHandoff(
     registry: AcceptedDisplayHandoffRegistry, owner: Any,
     displayId: Int, connectionKey: String,
     currentEvidence: AcceptedDisplayHandoffEvidence?,
     previousEvidence: AcceptedDisplayHandoffEvidence?,
-): AcceptedDisplayHandoffAdmission.Accepted? =
+): Boolean =
     registry.admit(
         owner = owner,
         displayId = displayId,
@@ -92,7 +92,7 @@ internal fun acceptedSyntheticDisplayHandoff(
             current = currentEvidence?.takeIf { it.displayId == displayId },
             previous = previousEvidence?.takeIf { it.displayId == displayId },
         ),
-    ) as? AcceptedDisplayHandoffAdmission.Accepted
+    ) is AcceptedDisplayHandoffAdmission.Accepted
 
 internal fun resolveObservedDisplayConnection(
     registry: AcceptedDisplayHandoffRegistry, owner: Any,
@@ -182,7 +182,7 @@ internal class AndroidDesktopDisplayHost(
             ?.connectionEvidence
         if (activity is DesktopActivity) {
             syntheticHandoffRequest(activity)?.let { request ->
-                val accepted = acceptedSyntheticDisplayHandoff(
+                val accepted = acceptsSyntheticDisplayHandoff(
                     registry = handoffs,
                     owner = activity,
                     displayId = request.displayId,
@@ -190,7 +190,7 @@ internal class AndroidDesktopDisplayHost(
                     currentEvidence = boundDisplayEvidence(activity)?.connectionEvidence,
                     previousEvidence = previousEvidence,
                 )
-                if (accepted == null) {
+                if (!accepted) {
                     handoffs.unbind(activity)
                     if (boundActivity?.get() === activity) boundActivity = null
                     if (localDesktop?.get() === activity) localDesktop = null
