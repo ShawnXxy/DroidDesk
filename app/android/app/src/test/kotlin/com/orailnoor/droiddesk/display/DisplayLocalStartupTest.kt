@@ -269,6 +269,19 @@ class DisplayLocalStartupTest {
     }
 
     @Test
+    fun noStartRetryAdvancesPastASettledStartupFailure() {
+        val failedEpoch = coordinator.prepareSession("proot", "xfce4", start = true)
+        coordinator.sessionStarted(failedEpoch, Result.failure(IllegalStateException("runtime exited")))
+
+        val reusedEpoch = coordinator.prepareSession("proot", "xfce4", start = false)
+        val readiness = mutableListOf<Result<Unit>>()
+        coordinator.awaitSessionReady(reusedEpoch, readiness::add)
+
+        assertTrue(reusedEpoch > failedEpoch)
+        assertTrue(readiness.single().isSuccess)
+    }
+
+    @Test
     fun startupTargetUsesTheSelectedPlacementEnvironment() {
         val local = DesktopDisplayCoordinator(
             host = LocalStartupHost(listOf(phone, tnt)),
