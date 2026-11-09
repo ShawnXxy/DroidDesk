@@ -244,16 +244,37 @@ class DisplaySourceMergeTest {
     }
 
     @Test
-    fun android11DoesNotReadApi31MonitorProductInfo() {
+    fun android11DoesNotReadApi31MonitorProductIdentity() {
         var productInfoRead = false
 
-        val productInfo = displayProductInfoForSdk(30) {
+        val productIdentity = selectDisplayProductIdentityForSdk(30) {
             productInfoRead = true
-            "product"
+            displayProductIdentity(
+                manufacturerPnpId = "RTK",
+                productId = "447",
+            )
         }
 
-        assertNull(productInfo)
+        assertNull(productIdentity)
         assertFalse(productInfoRead)
+    }
+
+    @Test
+    fun android12MapsMonitorProductInfoToStableIdentity() {
+        val productIdentity = selectDisplayProductIdentityForSdk(31) {
+            displayProductIdentity(
+                manufacturerPnpId = "RTK",
+                productId = "447",
+            )
+        }
+
+        assertEquals(
+            DisplayProductIdentity(
+                manufacturerPnpId = "RTK",
+                productId = "447",
+            ),
+            productIdentity,
+        )
     }
 
     private data class FakeDisplay(val id: Int)
