@@ -264,7 +264,8 @@ class DesktopDisplayCoordinator(
         }
         if (pendingStops > 0) throw DesktopDisplayException("SESSION_STOPPED", "Desktop teardown is still finishing")
         if (!start) {
-            val epoch = if (isStopped) beginSession() else if (startupAttempt?.failure != null) ++sessionGeneration else sessionGeneration
+            val failedAttempt = startupAttempt?.takeIf { it.failure != null }; val epoch = if (isStopped) beginSession() else if (reservedStartupEpoch == expectedEpoch && expectedEpoch != null) expectedEpoch else if (failedAttempt != null) ++sessionGeneration else sessionGeneration
+            failedAttempt?.let { if (error === it.failure) { error = null; phase = if (owner == null) "hidden" else "attached" }; startupAttempt = null }
             reservedStartupEpoch = null
             sessionMode = mode
             desktopEnv = desktop

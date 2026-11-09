@@ -274,11 +274,29 @@ class DisplayLocalStartupTest {
         coordinator.sessionStarted(failedEpoch, Result.failure(IllegalStateException("runtime exited")))
 
         val reusedEpoch = coordinator.prepareSession("proot", "xfce4", start = false)
+        val repeatedEpoch = coordinator.prepareSession("proot", "xfce4", start = false)
         val readiness = mutableListOf<Result<Unit>>()
         coordinator.awaitSessionReady(reusedEpoch, readiness::add)
 
         assertTrue(reusedEpoch > failedEpoch)
+        assertEquals(reusedEpoch, repeatedEpoch)
         assertTrue(readiness.single().isSuccess)
+    }
+
+    @Test
+    fun noStartRetryConsumesAnExplicitReservationAfterFailure() {
+        val failedEpoch = coordinator.prepareSession("proot", "xfce4", start = true)
+        coordinator.sessionStarted(failedEpoch, Result.failure(IllegalStateException("runtime exited")))
+        val reservedEpoch = coordinator.beginSession()
+
+        val reusedEpoch = coordinator.prepareSession(
+            "proot",
+            "xfce4",
+            start = false,
+            expectedEpoch = reservedEpoch,
+        )
+
+        assertEquals(reservedEpoch, reusedEpoch)
     }
 
     @Test
