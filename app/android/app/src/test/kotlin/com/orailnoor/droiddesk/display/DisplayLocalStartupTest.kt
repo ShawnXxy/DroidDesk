@@ -342,6 +342,31 @@ class DisplayLocalStartupTest {
     }
 
     @Test
+    fun displayLocalPendingDisconnectDoesNotAttemptPhoneRecovery() {
+        coordinator.openActive(target(tnt)) {}
+        host.connected = listOf(phone)
+
+        coordinator.onDisplayRemoved(tnt.id)
+
+        assertEquals(listOf(tnt.id), host.launches.map { it.display.id })
+    }
+
+    @Test
+    fun movablePendingDisconnectRecoversToPhone() {
+        val genericHost = LocalStartupHost(listOf(phone, tnt))
+        val generic = DesktopDisplayCoordinator(
+            host = genericHost,
+            placementStrategy = movableStrategy(),
+        )
+        generic.open(tnt.id, tnt.key) {}
+        genericHost.connected = listOf(phone)
+
+        generic.onDisplayRemoved(tnt.id)
+
+        assertEquals(listOf(tnt.id, phone.id), genericHost.launches.map { it.display.id })
+    }
+
+    @Test
     fun genericPlacementTimeoutStillRecoversToPhone() {
         val genericHost = LocalStartupHost(listOf(phone, tnt))
         val generic = DesktopDisplayCoordinator(host = genericHost)
@@ -592,7 +617,7 @@ private class RecordingPlacementStrategy(
 }
 
 private class OrientationActivity(
-    initialOrientation: Int = 37,
+    initialOrientation: Int = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED,
 ) : Activity() {
     private var orientation = initialOrientation
 

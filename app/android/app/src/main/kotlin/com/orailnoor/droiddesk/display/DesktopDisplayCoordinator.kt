@@ -489,9 +489,7 @@ class DesktopDisplayCoordinator(
 
     fun replacePlacementStrategy(strategy: DesktopPlacementStrategy) {
         assertMainThread()
-        val runtimeStopped = isStopped || (!sessionStarting && host?.sessionRunning() != true)
-        if (!runtimeStopped || stopFailed || pendingStops != 0 || owner != null || move != null ||
-            sessionRestarting || host?.sessionRunning() == true) {
+        if (!isFullyStoppedForStrategyChange()) {
             throw DesktopDisplayException(
                 "INVALID_ARGUMENT",
                 "Desktop placement can change only while Linux is fully stopped",
@@ -505,6 +503,17 @@ class DesktopDisplayCoordinator(
         automaticEpoch = sessionGeneration
         reapplyActivityOrientations()
         publish()
+    }
+
+    private fun isFullyStoppedForStrategyChange(): Boolean {
+        val hostRunning = host?.sessionRunning() == true
+        return !hostRunning &&
+            !sessionStarting &&
+            !stopFailed &&
+            pendingStops == 0 &&
+            owner == null &&
+            move == null &&
+            !sessionRestarting
     }
 
     private fun reapplyActivityOrientations() =
@@ -899,10 +908,13 @@ class DesktopDisplayCoordinator(
             } else {
                 "The startup display disconnected"
             }
-            failMove(DesktopDisplayException("DISPLAY_UNAVAILABLE", message), true)
+            failMove(
+                DesktopDisplayException("DISPLAY_UNAVAILABLE", message),
+                placementStrategy.allowsManualMoves,
+            )
         } else if (!isStopped && move == null && lastTarget?.id == displayId) {
             val failed = lastTarget ?: return
-            val fallback = placementStrategy.fallbackTarget(displays(), failed, failed)
+            val fallback = placementStrategy.fallbackTarget(displays(), null, failed)
             if (fallback != null) {
                 openTarget(fallback, {}, recovery = true)
             } else {
