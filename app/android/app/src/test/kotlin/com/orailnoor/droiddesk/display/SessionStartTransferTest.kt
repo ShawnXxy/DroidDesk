@@ -51,6 +51,76 @@ class SessionStartTransferTest {
     }
 
     @Test
+    fun failedAttemptCannotCompleteAReentrantRetry() {
+        val coordinator = DesktopDisplayCoordinator()
+        val failedEpoch = coordinator.prepareSession("proot", "xfce4", true)
+        val first = mutableListOf<Result<Unit>>()
+        val second = mutableListOf<Result<Unit>>()
+        val retry = mutableListOf<Result<Unit>>()
+        var retryEpoch: Long? = null
+        coordinator.awaitSessionReady(failedEpoch) { result ->
+            first += result
+            retryEpoch = coordinator.prepareSession("chroot", "plasma", true)
+            coordinator.awaitSessionReady(checkNotNull(retryEpoch), retry::add)
+        }
+        coordinator.awaitSessionReady(failedEpoch, second::add)
+        val failure = IllegalStateException("runtime exited")
+
+        coordinator.sessionStarted(failedEpoch, Result.failure(failure))
+
+        assertSame(failure, first.single().exceptionOrNull())
+        assertSame(failure, second.single().exceptionOrNull())
+        assertTrue(checkNotNull(retryEpoch) > failedEpoch)
+        coordinator.sessionStarted(
+            failedEpoch,
+            Result.failure(IllegalStateException("duplicate old result")),
+        )
+        assertEquals(1, first.size)
+        assertEquals(1, second.size)
+        assertTrue(retry.isEmpty())
+
+        coordinator.sessionStarted(checkNotNull(retryEpoch), Result.success(Unit))
+        assertEquals(1, retry.size)
+        assertTrue(retry.single().isSuccess)
+    }
+
+    @Test
+    fun oldWaitersKeepTheirResultWhenLaterWaiterStopsTheRetry() {
+        val coordinator = DesktopDisplayCoordinator()
+        val failedEpoch = coordinator.prepareSession("proot", "xfce4", true)
+        val first = mutableListOf<Result<Unit>>()
+        val second = mutableListOf<Result<Unit>>()
+        val third = mutableListOf<Result<Unit>>()
+        val retry = mutableListOf<Result<Unit>>()
+        coordinator.awaitSessionReady(failedEpoch) { result ->
+            first += result
+            val retryEpoch = coordinator.prepareSession("chroot", "plasma", true)
+            coordinator.awaitSessionReady(retryEpoch, retry::add)
+        }
+        coordinator.awaitSessionReady(failedEpoch) { result ->
+            second += result
+            coordinator.stop()
+        }
+        coordinator.awaitSessionReady(failedEpoch, third::add)
+        val failure = IllegalStateException("runtime exited")
+
+        coordinator.sessionStarted(failedEpoch, Result.failure(failure))
+
+        assertSame(failure, first.single().exceptionOrNull())
+        assertSame(failure, second.single().exceptionOrNull())
+        assertSame(failure, third.single().exceptionOrNull())
+        assertEquals(
+            "SESSION_STOPPED",
+            (retry.single().exceptionOrNull() as DesktopDisplayException).code,
+        )
+        coordinator.sessionStarted(failedEpoch, Result.success(Unit))
+        assertEquals(1, first.size)
+        assertEquals(1, second.size)
+        assertEquals(1, third.size)
+        assertEquals(1, retry.size)
+    }
+
+    @Test
     fun restartRequestsForTheSameKeyCoalesceAndCompleteTogether() {
         val host = RestartHost()
         val controller = DisplayLocalSessionController(host)
