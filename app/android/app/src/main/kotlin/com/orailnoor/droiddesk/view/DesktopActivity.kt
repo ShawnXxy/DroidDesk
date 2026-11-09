@@ -68,6 +68,20 @@ internal fun shouldObserveInputDeviceChanges(
     displayId: Int,
 ): Boolean = sdkInt >= 37 && displayId != android.view.Display.DEFAULT_DISPLAY
 
+internal fun continueAfterActivityBinding(
+    bindActivity: () -> Boolean,
+    rejectAttachment: () -> Unit,
+    finishActivity: () -> Unit,
+    continueLifecycle: () -> Unit,
+) {
+    if (bindActivity()) {
+        continueLifecycle()
+        return
+    }
+    rejectAttachment()
+    finishActivity()
+}
+
 class DesktopActivity : Activity() {
     private var lorieView: LorieView? = null
     private var connectionRequested = false
@@ -205,31 +219,39 @@ class DesktopActivity : Activity() {
             finish()
             return
         }
-        current = java.lang.ref.WeakReference(this)
-        displayCoordinator.bindActivity(this)
-        window.decorView.post {
-            if (!isDestroyed && !isFinishing) displayCoordinator.observeActivityEnvironment(this, sessionEpoch)
-        }
-        sessionMode = intent.getStringExtra("mode") ?: displayCoordinator.sessionMode
-        desktopEnv = intent.getStringExtra("de") ?: displayCoordinator.desktopEnv
-        if (sessionMode == "proot") {
-            applyProotRefreshPolicy()
-        }
-        estimatedLoadingSeconds = if (shouldStartSession) 30 else 10
+        continueAfterActivityBinding(
+            bindActivity = { displayCoordinator.bindActivity(this) },
+            rejectAttachment = { displayCoordinator.rejectAttachment(displayRequestId) },
+            finishActivity = { finish() },
+            continueLifecycle = {
+                current = java.lang.ref.WeakReference(this)
+                window.decorView.post {
+                    if (!isDestroyed && !isFinishing) {
+                        displayCoordinator.observeActivityEnvironment(this, sessionEpoch)
+                    }
+                }
+                sessionMode = intent.getStringExtra("mode") ?: displayCoordinator.sessionMode
+                desktopEnv = intent.getStringExtra("de") ?: displayCoordinator.desktopEnv
+                if (sessionMode == "proot") {
+                    applyProotRefreshPolicy()
+                }
+                estimatedLoadingSeconds = if (shouldStartSession) 30 else 10
 
-        requestWindowFeature(Window.FEATURE_NO_TITLE)
-        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                requestWindowFeature(Window.FEATURE_NO_TITLE)
+                window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
 
-        placeholder = FrameLayout(this)
-        placeholder.setBackgroundColor(Color.BLACK)
-        setContentView(placeholder)
-        showLoadingOverlay()
-        // Some Android/LineageOS builds throw from PhoneWindow.getInsetsController
-        // until a decor view has been created by setContentView().
-        enableImmersiveMode()
+                placeholder = FrameLayout(this)
+                placeholder.setBackgroundColor(Color.BLACK)
+                setContentView(placeholder)
+                showLoadingOverlay()
+                // Some Android/LineageOS builds throw from PhoneWindow.getInsetsController
+                // until a decor view has been created by setContentView().
+                enableImmersiveMode()
 
-        Log.i(TAG, "DesktopActivity created mode=$sessionMode startSession=$shouldStartSession")
-        setupLorieView()
+                Log.i(TAG, "DesktopActivity created mode=$sessionMode startSession=$shouldStartSession")
+                setupLorieView()
+            },
+        )
     }
 
     private fun applyProotRefreshPolicy() {
@@ -267,14 +289,22 @@ class DesktopActivity : Activity() {
             finish()
             return
         }
-        displayCoordinator.bindActivity(this)
-        window.decorView.post {
-            if (!isDestroyed && !isFinishing) displayCoordinator.observeActivityEnvironment(this, sessionEpoch)
-        }
-        enableImmersiveMode()
-        scheduleGeometry()
-        // Restored windows can retain focus without another focus callback.
-        if (hasWindowFocus() && isCurrentRenderer()) inputController?.reacquireFocus()
+        continueAfterActivityBinding(
+            bindActivity = { displayCoordinator.bindActivity(this) },
+            rejectAttachment = { displayCoordinator.rejectAttachment(displayRequestId) },
+            finishActivity = { finish() },
+            continueLifecycle = {
+                window.decorView.post {
+                    if (!isDestroyed && !isFinishing) {
+                        displayCoordinator.observeActivityEnvironment(this, sessionEpoch)
+                    }
+                }
+                enableImmersiveMode()
+                scheduleGeometry()
+                // Restored windows can retain focus without another focus callback.
+                if (hasWindowFocus() && isCurrentRenderer()) inputController?.reacquireFocus()
+            },
+        )
     }
 
     override fun onConfigurationChanged(newConfig: Configuration) {

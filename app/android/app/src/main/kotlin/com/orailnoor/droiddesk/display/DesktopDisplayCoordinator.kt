@@ -23,7 +23,7 @@ data class DesktopLaunchRequest(
 interface DesktopDisplayHost {
     fun currentDisplay(): DesktopDisplay? = null
     fun currentDisplayId(): Int? = currentDisplay()?.id
-    fun bindActivity(activity: Activity) {}
+    fun bindActivity(activity: Activity): Boolean = true
     fun unbindActivity(activity: Activity) {}
     fun displays(): List<DesktopDisplay>
     fun defaultProfileKind(): ProfileKind
@@ -353,10 +353,11 @@ class DesktopDisplayCoordinator(
         refreshAutomaticOpening()
     }
 
-    fun bindActivity(activity: Activity) {
+    fun bindActivity(activity: Activity): Boolean {
         assertMainThread()
-        host?.bindActivity(activity)
+        if (host?.bindActivity(activity) == false) return false
         if (isDisplayLocal) applyActivityOrientation(activity, activity.windowManager.defaultDisplay.displayId)
+        return true
     }
 
     fun unbindActivity(activity: Activity) {
