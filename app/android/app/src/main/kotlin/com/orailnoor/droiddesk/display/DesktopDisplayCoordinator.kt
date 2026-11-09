@@ -6,6 +6,7 @@ import android.os.Build
 import android.app.Activity
 import android.content.Intent
 import com.orailnoor.droiddesk.display.capability.PlacementMode
+import com.orailnoor.droiddesk.display.placement.DesktopOpenRequest
 import com.orailnoor.droiddesk.display.placement.DesktopPlacementPort
 import com.orailnoor.droiddesk.display.placement.DesktopPlacementStrategy
 import com.orailnoor.droiddesk.display.placement.DisplayLocalRestartAdapter
@@ -119,6 +120,8 @@ class DesktopDisplayCoordinator(
         var requestId: Long? = null,
         var finish: (() -> Unit)? = null,
         var actualDisplay: () -> Int = { lease.displayId },
+        var mode: String? = null,
+        var desktopEnv: String? = null,
     )
     private data class Move(
         val request: DesktopLaunchRequest,
@@ -132,10 +135,22 @@ class DesktopDisplayCoordinator(
         val displayId: Int?,
         val display: DesktopDisplay?,
     )
-    private data class RestartRequest(
+    private data class PreparedStart(
+        val epoch: Long,
+        val previousTarget: DesktopStartupTarget?,
+        val request: DesktopOpenRequest,
+        val target: DesktopStartupTarget?,
+        val joiners: MutableList<(Result<Unit>) -> Unit> = mutableListOf(),
+        var openingStarted: Boolean = false,
+    )
+    private class SessionReadyWaiter(val completion: (Result<Unit>) -> Unit) {
+        var settling = false
+    }
+    private data class RestartKey(
         val target: DesktopStartupTarget,
-        val mode: String,
-        val desktopEnv: String,
+        val request: DesktopOpenRequest,
+        val startService: () -> Unit,
+        var resultEpoch: Long? = null,
     )
     private var owner: Owner? = null
     private var generation = 0L
@@ -144,6 +159,7 @@ class DesktopDisplayCoordinator(
     private val originalActivityOrientations = WeakHashMap<Activity, Int>()
     private val listeners = mutableSetOf<(Map<String, Any?>) -> Unit>()
     private val sessionStartListeners = mutableSetOf<(Result<Unit>) -> Unit>()
+    private val sessionReadyWaiters = mutableSetOf<SessionReadyWaiter>()
     private var appliedKind: ProfileKind? = null
     private var renderSize: PixelSize? = null
     private var profileRefresher: (((Result<Unit>) -> Unit) -> Unit)? = null
@@ -151,12 +167,16 @@ class DesktopDisplayCoordinator(
     private var requestSequence = 0L
     private var lastTarget: DesktopDisplay? = null
     private var sessionTarget: DesktopStartupTarget? = null
+    private var preparedStart: PreparedStart? = null
+    private var preparedStartFailure: DesktopDisplayException? = null
     private var sessionRestarting = false
     private var restartStartService: () -> Unit = {}
-    private val restartController = DisplayLocalSessionController(object : DisplayLocalSessionHost<RestartRequest> {
+    private val restartController = DisplayLocalSessionController(object : DisplayLocalSessionHost<RestartKey> {
         override fun sessionEpoch() = sessionGeneration
         override fun isSessionCurrent(epoch: Long) = this@DesktopDisplayCoordinator.isSessionCurrent(epoch)
-        override fun validateTarget(target: RestartRequest) {
+        override fun sameRequest(first: RestartKey, second: RestartKey) =
+            first.target == second.target && first.request == second.request
+        override fun validateTarget(target: RestartKey) {
             validateRestartTarget(target.target)
         }
         override fun restartingChanged(restarting: Boolean) {
@@ -174,22 +194,16 @@ class DesktopDisplayCoordinator(
                 stop(completion)
             }
         }
-        override fun startOnTarget(target: RestartRequest, completion: (Result<Unit>) -> Unit) {
-            try {
-                val epoch = prepareSession(target.mode, target.desktopEnv, true)
-                restartStartService()
-                openActive(target.target) { result ->
-                    if (result.isFailure) completion(result) else awaitSessionReady(epoch, completion)
-                }
-            } catch (failure: DesktopDisplayException) {
-                completion(Result.failure(failure))
-            } catch (failure: SecurityException) {
-                android.util.Log.e("DesktopDisplay", "Android denied the restarted Linux service", failure)
-                completion(Result.failure(DesktopDisplayException(
-                    "DISPLAY_NOT_ALLOWED",
-                    "Android denied restarting the Linux service",
-                )))
-            }
+        override fun startOnTarget(target: RestartKey, completion: (Result<Unit>) -> Unit) {
+            prepareAndOpen(
+                request = target.request,
+                target = target.target,
+                startService = target.startService,
+                completion = { result ->
+                    target.resultEpoch = sessionGeneration
+                    completion(result)
+                },
+            )
         }
     }, assertMainThread)
     private var acceptedRequest: Long? = null
@@ -228,6 +242,7 @@ class DesktopDisplayCoordinator(
         if (isStopped) {
             isStopped = false
             sessionGeneration++
+            stopFailed = false
             phase = "hidden"
             error = null
             publish()
@@ -237,13 +252,25 @@ class DesktopDisplayCoordinator(
 
     fun isSessionCurrent(value: Long): Boolean = !isStopped && sessionGeneration == value
 
-    fun prepareSession(mode: String, desktop: String, start: Boolean, expectedEpoch: Long? = null): Long {
+    fun prepareSession(mode: String, desktop: String, start: Boolean, expectedEpoch: Long? = null) =
+        prepareSession(mode, desktop, start, expectedEpoch) {}
+
+    private fun prepareSession(
+        mode: String,
+        desktop: String,
+        start: Boolean,
+        expectedEpoch: Long?,
+        prepared: (Long) -> Unit,
+    ): Long {
         assertMainThread()
         if (expectedEpoch != null && !isSessionCurrent(expectedEpoch)) {
             throw DesktopDisplayException("SESSION_STOPPED", "The deferred desktop action belongs to a stopped session")
         }
         require(mode == "termux" || mode == "proot" || mode == "chroot") {
             "Invalid Linux runtime"
+        }
+        if (start && preparedStartFailure != null && !isStopped) {
+            sessionGeneration++
         }
         val epoch = beginSession()
         sessionMode = mode
@@ -252,6 +279,7 @@ class DesktopDisplayCoordinator(
             needsSessionStart = true
             sessionStartClaim = null
             sessionStarting = true
+            prepared(epoch)
             profileRefresher?.invoke {}
         }
         publish()
@@ -273,6 +301,7 @@ class DesktopDisplayCoordinator(
         var unsubscribeState: () -> Unit = {}
         var unsubscribeStart: () -> Unit = {}
         var completed = false
+        lateinit var waiter: SessionReadyWaiter
         val finish: (Result<Unit>) -> Unit = {
             if (!completed) {
                 completed = true
@@ -282,11 +311,13 @@ class DesktopDisplayCoordinator(
             }
         }
         unsubscribeState = subscribe {
-            if (!isSessionCurrent(epoch)) {
+            if (!isSessionCurrent(epoch) && !waiter.settling) {
                 finish(Result.failure(DesktopDisplayException("SESSION_STOPPED", "The Linux session was stopped")))
             }
         }
-        unsubscribeStart = subscribeSessionStart { finish(it) }
+        waiter = SessionReadyWaiter(finish)
+        unsubscribeStart = { sessionReadyWaiters.remove(waiter) }
+        sessionReadyWaiters.add(waiter)
     }
 
     fun consumeSessionStart(lease: RendererLease): Boolean {
@@ -309,14 +340,36 @@ class DesktopDisplayCoordinator(
     fun sessionStarted(epoch: Long, result: Result<Unit>) {
         assertMainThread()
         if (!isSessionCurrent(epoch)) return
+        val cause = result.exceptionOrNull()
+        if (cause != null && preparedStart?.epoch == epoch) {
+            failPreparedSession(
+                epoch,
+                cause as? DesktopDisplayException ?: DesktopDisplayException(
+                    "SESSION_STOPPED",
+                    cause.message ?: "Linux session failed to start",
+                ),
+                result,
+            )
+            return
+        }
+        val waiters = takeSessionReadyWaiters()
+        val startListeners = sessionStartListeners.toList()
+        if (preparedStart?.epoch == epoch) preparedStart = null
         needsSessionStart = false
         sessionStartClaim = null
         sessionStarting = false
-        result.exceptionOrNull()?.let {
-            reportError(DesktopDisplayException("SESSION_STOPPED", it.message ?: "Linux session failed to start"))
+        if (cause != null) {
+            val failure = cause as? DesktopDisplayException ?: DesktopDisplayException(
+                "SESSION_STOPPED",
+                cause.message ?: "Linux session failed to start",
+            )
+            preparedStartFailure = failure
+            error = failure
+            if (!isStopped) phase = "error"
         }
-        if (result.isSuccess) publish()
-        sessionStartListeners.toList().forEach { if (isSessionCurrent(epoch)) it(result) }
+        completeSessionReadyWaiters(waiters, result)
+        publish()
+        startListeners.forEach { it(result) }
         if (result.isSuccess && isSessionCurrent(epoch)) refreshAutomaticOpening()
     }
 
@@ -405,6 +458,9 @@ class DesktopDisplayCoordinator(
         needsSessionStart = false
         sessionStartClaim = null
         sessionStarting = false
+        val preparedJoiners = preparedStart?.joiners?.toList().orEmpty()
+        preparedStart = null
+        preparedStartFailure = null
         stopFailed = false
         val pending = move
         move = null
@@ -424,7 +480,9 @@ class DesktopDisplayCoordinator(
         phase = "stopped"
         error = null
         publish()
-        pending?.completion?.invoke(Result.failure(DesktopDisplayException("SESSION_STOPPED", "The Linux session was stopped")))
+        val stopped = Result.failure<Unit>(DesktopDisplayException("SESSION_STOPPED", "The Linux session was stopped"))
+        preparedJoiners.forEach { it(stopped) }
+        pending?.completion?.invoke(stopped)
     }
 
     fun initialize(context: Context) {
@@ -497,21 +555,263 @@ class DesktopDisplayCoordinator(
         assertMainThread()
         if (!sessionRestarting && !placementStrategy.requiresSessionRestart(sessionTarget, target)) return false
         val epoch = if (stopFailed && expectedEpoch == sessionGeneration) beginSession() else expectedEpoch
+        requestRestart(
+            target = target,
+            request = DesktopOpenRequest(
+                currentDisplayId = target.displayId,
+                mode = sessionMode,
+                desktopEnv = desktopEnv,
+                startSession = true,
+                expectedEpoch = null,
+            ),
+            expectedEpoch = epoch,
+            startService = restartStartService,
+            completion = completion,
+        )
+        return true
+    }
+
+    fun requestOpen(
+        request: DesktopOpenRequest,
+        startService: () -> Unit,
+        completion: (Result<Unit>) -> Unit,
+    ) {
+        assertMainThread()
+        val expectedEpoch = request.expectedEpoch
+        if (expectedEpoch != null && !isSessionCurrent(expectedEpoch) &&
+            !sessionRestarting &&
+            !(stopFailed && expectedEpoch == sessionGeneration)) {
+            completion(Result.failure(DesktopDisplayException(
+                "SESSION_STOPPED",
+                "The session was stopped before launch",
+            )))
+            return
+        }
+        val target = if (placementStrategy.allowsManualMoves) {
+            null
+        } else {
+            try {
+                startupTarget(request.currentDisplayId)
+            } catch (failure: DesktopDisplayException) {
+                completion(Result.failure(failure))
+                return
+            }
+        }
+        val effectiveRequest = if (stopFailed &&
+            (expectedEpoch == null || expectedEpoch == sessionGeneration)) {
+            request.copy(expectedEpoch = beginSession())
+        } else {
+            request
+        }
+        if (target != null &&
+            (sessionRestarting || placementStrategy.requiresSessionRestart(sessionTarget, target))) {
+            requestRestart(
+                target = target,
+                request = effectiveRequest.copy(startSession = true, expectedEpoch = null),
+                expectedEpoch = effectiveRequest.expectedEpoch ?: sessionGeneration,
+                startService = startService,
+                completion = completion,
+            )
+            return
+        }
+        prepareAndOpen(
+            request = effectiveRequest,
+            target = target,
+            startService = startService,
+            completion = completion,
+        )
+    }
+
+    private fun requestRestart(
+        target: DesktopStartupTarget,
+        request: DesktopOpenRequest,
+        expectedEpoch: Long,
+        startService: () -> Unit,
+        completion: (Result<Unit>) -> Unit,
+    ) {
+        val key = RestartKey(target, request, startService)
         restartController.requestRestart(
-            RestartRequest(target, sessionMode, desktopEnv),
-            epoch,
+            target = key,
+            expectedEpoch = expectedEpoch,
         ) { result ->
             result.exceptionOrNull()?.let {
-                if ((it as? DesktopDisplayException)?.code != "SESSION_STOPPED") {
-                    reportError(it as? DesktopDisplayException ?: DesktopDisplayException(
+                if ((it as? DesktopDisplayException)?.code != "SESSION_STOPPED" &&
+                    (key.resultEpoch == null || key.resultEpoch == sessionGeneration)) {
+                    val owned = preparedStartFailure?.takeIf { failure -> error === failure }
+                    reportError((it as? DesktopDisplayException) ?: owned ?: DesktopDisplayException(
                         "SESSION_RESTART_FAILED", it.message ?: "Linux could not restart on this display",
                     ))
                 }
             }
             completion(result)
         }
-        return true
     }
+
+    private fun prepareAndOpen(
+        request: DesktopOpenRequest,
+        target: DesktopStartupTarget?,
+        startService: () -> Unit,
+        completion: (Result<Unit>) -> Unit,
+    ) {
+        val ownsPreparedStart = request.startSession && !sessionStarting
+        val joinsPreparedStart = sessionStarting
+        val prepared = preparedStart
+        if (joinsPreparedStart && prepared == null) {
+            completion(Result.failure(DesktopDisplayException(
+                "INVALID_ARGUMENT",
+                "Linux startup was prepared outside coordinator open orchestration",
+            )))
+            return
+        }
+        if (joinsPreparedStart && prepared != null &&
+            (prepared.target != target ||
+                prepared.request.currentDisplayId != request.currentDisplayId ||
+                prepared.request.mode != request.mode ||
+                prepared.request.desktopEnv != request.desktopEnv ||
+                prepared.request.startSession != request.startSession)) {
+            completion(Result.failure(DesktopDisplayException(
+                "INVALID_ARGUMENT",
+                "Linux startup is already opening a different desktop request",
+            )))
+            return
+        }
+        val previousTarget = sessionTarget
+        val epoch = if (joinsPreparedStart) {
+            val expectedEpoch = request.expectedEpoch
+            if (expectedEpoch != null && !isSessionCurrent(expectedEpoch)) {
+                completion(Result.failure(DesktopDisplayException(
+                    "SESSION_STOPPED",
+                    "The deferred desktop action belongs to a stopped session",
+                )))
+                return
+            }
+            sessionGeneration
+        } else {
+            try {
+                prepareSession(
+                    request.mode,
+                    request.desktopEnv,
+                    ownsPreparedStart,
+                    request.expectedEpoch,
+                ) { preparedEpoch ->
+                    preparedStart = PreparedStart(
+                        preparedEpoch, previousTarget, request, target,
+                    )
+                    clearPreparedStartFailure()
+                }
+            } catch (failure: DesktopDisplayException) {
+                completion(Result.failure(failure))
+                return
+            }
+        }
+        if (!isSessionCurrent(epoch) ||
+            (ownsPreparedStart && preparedStart?.epoch != epoch)) {
+            completion(Result.failure(DesktopDisplayException(
+                "SESSION_STOPPED",
+                "The Linux session was stopped",
+            )))
+            return
+        }
+        if (joinsPreparedStart && (preparedStart?.openingStarted == false ||
+                move?.takeIf { !it.recovery }?.request?.sessionGeneration == epoch)) {
+            preparedStart?.joiners?.add(completion)
+            return
+        }
+        val startFailure = try {
+            startService()
+            null
+        } catch (failure: DesktopDisplayException) {
+            failure
+        } catch (failure: SecurityException) {
+            DesktopDisplayException(
+                "DISPLAY_NOT_ALLOWED",
+                "Android denied starting the Linux service",
+            )
+        } catch (failure: IllegalStateException) {
+            DesktopDisplayException(
+                "DISPLAY_NOT_ALLOWED",
+                failure.message ?: "Android could not start the Linux service",
+            )
+        }
+        if (startFailure != null) {
+            if (ownsPreparedStart) failPreparedSession(epoch, startFailure)
+            completion(Result.failure(startFailure))
+            return
+        }
+        if (!isSessionCurrent(epoch)) {
+            completion(Result.failure(DesktopDisplayException(
+                "SESSION_STOPPED",
+                "The Linux session was stopped",
+            )))
+            return
+        }
+        if (ownsPreparedStart) {
+            preparedStart?.takeIf { it.epoch == epoch }?.openingStarted = true
+        }
+        openActive(target) { placed ->
+            val joiners = takePreparedJoiners(epoch)
+            if (placed.isFailure) {
+                if (ownsPreparedStart && move == null && owner == null) {
+                    val failure = placed.exceptionOrNull() as? DesktopDisplayException
+                        ?: DesktopDisplayException("PLACEMENT_FAILED", "Desktop placement failed")
+                    failPreparedSession(epoch, failure)
+                }
+                completion(placed)
+                joiners.forEach { it(placed) }
+            } else {
+                awaitSessionReady(epoch, completion)
+                joiners.forEach { awaitSessionReady(epoch, it) }
+            }
+        }
+    }
+
+    private fun failPreparedSession(
+        epoch: Long,
+        failure: DesktopDisplayException,
+        listenerResult: Result<Unit> = Result.failure(failure),
+    ) {
+        val prepared = preparedStart?.takeIf { it.epoch == epoch } ?: return
+        val joiners = prepared.joiners.toList()
+        preparedStart = null
+        if (!isSessionCurrent(epoch)) return
+        val waiters = takeSessionReadyWaiters()
+        val startListeners = sessionStartListeners.toList()
+        needsSessionStart = false
+        sessionStartClaim = null
+        sessionStarting = false
+        sessionTarget = prepared.previousTarget
+        preparedStartFailure = failure
+        error = failure
+        if (!isStopped) phase = "error"
+        completeSessionReadyWaiters(waiters, listenerResult)
+        joiners.forEach { it(listenerResult) }
+        publish()
+        startListeners.forEach { it(listenerResult) }
+    }
+
+    private fun clearPreparedStartFailure() {
+        val failure = preparedStartFailure
+        if (failure != null && error === failure) {
+            error = null
+            phase = if (owner == null) "hidden" else "attached"
+        }
+        preparedStartFailure = null
+    }
+
+    private fun takeSessionReadyWaiters() = sessionReadyWaiters.toList().also {
+        sessionReadyWaiters.removeAll(it.toSet())
+        it.forEach { waiter -> waiter.settling = true }
+    }
+
+    private fun completeSessionReadyWaiters(
+        waiters: List<SessionReadyWaiter>,
+        result: Result<Unit>,
+    ) = waiters.forEach { it.completion(result) }
+
+    private fun takePreparedJoiners(epoch: Long) =
+        preparedStart?.takeIf { it.epoch == epoch }?.joiners?.toList().orEmpty().also {
+            preparedStart?.takeIf { prepared -> prepared.epoch == epoch }?.joiners?.clear()
+        }
 
     private fun validateRestartTarget(target: DesktopStartupTarget) {
         val actual = host?.currentDisplayId()
@@ -856,8 +1156,17 @@ class DesktopDisplayCoordinator(
         }
         val currentOwner = owner
         val requestId = currentOwner?.requestId
+        val payloadMatches = !sessionStarting ||
+            (currentOwner?.mode == sessionMode && currentOwner.desktopEnv == desktopEnv)
         if (currentOwner?.lease?.displayId == target.id && currentOwner.actualDisplay() == target.id &&
-            requestId != null && platform.focus(requestId)) {
+            requestId != null && payloadMatches && platform.focus(requestId)) {
+            if (!placementStrategy.allowsManualMoves) {
+                sessionTarget = DesktopStartupTarget(
+                    target.id,
+                    target.key,
+                    placementStrategy.environmentFor(target),
+                )
+            }
             completion(Result.success(Unit))
             return
         }
@@ -931,6 +1240,10 @@ class DesktopDisplayCoordinator(
             placementStrategy.environmentFor(target),
         )
         acceptedRequest = requestId
+        owner?.takeIf { it.lease == lease }?.let {
+            it.mode = pending.request.mode
+            it.desktopEnv = pending.request.desktopEnv
+        }
         phase = "attached"
         if (!pending.recovery) error = null
         if (pending.previous?.lease != lease) pending.previous?.finish?.invoke()
@@ -1069,13 +1382,19 @@ class DesktopDisplayCoordinator(
         error = failure
         phase = "error"
         publish()
-        pending.completion(Result.failure(failure))
-        if (isStopped || move != null) return
+        val result = Result.failure<Unit>(failure)
+        if (isStopped || move != null) {
+            pending.completion(result)
+            return
+        }
         val available = displays()
         val remainingOwner = owner
         if (remainingOwner != null) {
             val actual = remainingOwner.actualDisplay()
-            if (actual == remainingOwner.lease.displayId && available.any { it.id == actual && it.eligible }) return
+            if (actual == remainingOwner.lease.displayId && available.any { it.id == actual && it.eligible }) {
+                pending.completion(result)
+                return
+            }
             release(remainingOwner.lease)
             remainingOwner.finish?.invoke()
             phase = "error"
@@ -1090,8 +1409,10 @@ class DesktopDisplayCoordinator(
             fallback != null && fallback.key != pending.request.display.key) {
             openTarget(fallback, {}, recovery = true)
         } else {
+            failPreparedSession(pending.request.sessionGeneration, failure)
             checkNotNull(host).notifyReturnRequired(failure)
         }
+        pending.completion(result)
     }
 
     fun reportError(failure: DesktopDisplayException) {

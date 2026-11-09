@@ -1,5 +1,10 @@
 package com.orailnoor.droiddesk.display
 
+import com.orailnoor.droiddesk.display.capability.PlacementMode
+import com.orailnoor.droiddesk.display.placement.DesktopOpenRequest
+import com.orailnoor.droiddesk.display.placement.DisplayLocalRestartAdapter
+import com.orailnoor.droiddesk.display.placement.PlacementSelection
+import com.orailnoor.droiddesk.display.placement.PlacementSelectionSource
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -37,6 +42,83 @@ class SessionStartTransferTest {
 
         assertEquals(1, outcomes.size)
         assertTrue(outcomes.single().isSuccess)
+    }
+
+    @Test
+    fun requestOpenPreservesTargetGenerationAndSingleCompletionAcrossRendererTransfer() {
+        val display = DesktopDisplay(100003, "tnt", "TNT", false, true, null)
+        val host = TransferDisplayHost(display)
+        val coordinator = DesktopDisplayCoordinator(
+            host = host,
+            placementStrategy = displayLocalStrategy(display.id),
+        )
+        val outcomes = mutableListOf<Result<Unit>>()
+
+        coordinator.requestOpen(
+            request = DesktopOpenRequest(
+                currentDisplayId = display.id,
+                mode = "proot",
+                desktopEnv = "xfce4",
+                startSession = true,
+                expectedEpoch = null,
+            ),
+            startService = {},
+            completion = outcomes::add,
+        )
+
+        val request = host.launches.single()
+        assertEquals(display, request.display)
+        assertEquals("proot", request.mode)
+        assertEquals("xfce4", request.desktopEnv)
+        assertEquals(coordinator.sessionGeneration, request.sessionGeneration)
+        val first = coordinator.claim(display.id) {}
+        assertTrue(coordinator.consumeSessionStart(first))
+        val replacement = coordinator.claim(display.id) {}
+        coordinator.registerActivity(replacement, request.requestId) {}
+        coordinator.onAttached(replacement, request.requestId, PixelSize(1920, 1080))
+
+        assertTrue(coordinator.consumeSessionStart(replacement))
+        assertNull(coordinator.beginSessionStart(first))
+        assertEquals(request.sessionGeneration, coordinator.beginSessionStart(replacement))
+        assertTrue(outcomes.isEmpty())
+
+        coordinator.sessionStarted(request.sessionGeneration, Result.success(Unit))
+        coordinator.sessionStarted(request.sessionGeneration, Result.success(Unit))
+
+        assertEquals(1, outcomes.size)
+        assertTrue(outcomes.single().isSuccess)
+    }
+
+    @Test
+    fun duplicateOpenPreservesTheConsumedSessionStartClaim() {
+        val display = DesktopDisplay(100003, "tnt", "TNT", false, true, null)
+        val host = TransferDisplayHost(display)
+        val coordinator = DesktopDisplayCoordinator(
+            host = host,
+            placementStrategy = displayLocalStrategy(display.id),
+        )
+        val first = mutableListOf<Result<Unit>>()
+        val open = DesktopOpenRequest(
+            currentDisplayId = display.id,
+            mode = "proot",
+            desktopEnv = "xfce4",
+            startSession = true,
+            expectedEpoch = null,
+        )
+        coordinator.requestOpen(open, {}, first::add)
+        val request = host.launches.single()
+        val lease = coordinator.claim(display.id) {}
+        coordinator.registerActivity(lease, request.requestId) {}
+        coordinator.onAttached(lease, request.requestId, PixelSize(1920, 1080))
+        assertTrue(coordinator.consumeSessionStart(lease))
+        val second = mutableListOf<Result<Unit>>()
+
+        coordinator.requestOpen(open, {}, second::add)
+
+        assertEquals(request.sessionGeneration, coordinator.beginSessionStart(lease))
+        coordinator.sessionStarted(request.sessionGeneration, Result.success(Unit))
+        assertTrue(first.single().isSuccess)
+        assertTrue(second.single().isSuccess)
     }
 
     @Test
@@ -313,6 +395,33 @@ class SessionStartTransferTest {
         assertTrue(outcomes.single().isSuccess)
         assertFalse(controller.hasPendingRestart)
     }
+
+    private fun displayLocalStrategy(tntDisplayId: Int) = DisplayLocalRestartAdapter(
+        PlacementSelection(
+            mode = PlacementMode.DISPLAY_LOCAL,
+            source = PlacementSelectionSource.DEVICE_QUIRK,
+            allowAutomaticMoves = false,
+            reason = "test display-local placement",
+            tntDisplayIds = setOf(tntDisplayId),
+        ),
+    )
+}
+
+private class TransferDisplayHost(
+    private val display: DesktopDisplay,
+) : DesktopDisplayHost {
+    val launches = mutableListOf<DesktopLaunchRequest>()
+    override fun currentDisplay() = display
+    override fun displays() = listOf(display)
+    override fun defaultProfileKind() = ProfileKind.MONITOR
+    override fun sessionRunning() = true
+    override fun launch(request: DesktopLaunchRequest) {
+        launches += request
+    }
+    override fun focus(requestId: Long) = true
+    override fun cancelLaunch(requestId: Long) = Unit
+    override fun scheduleTimeout(delayMillis: Long, action: () -> Unit): () -> Unit = {}
+    override fun notifyReturnRequired(error: DesktopDisplayException) = Unit
 }
 
 private class RestartHost(
