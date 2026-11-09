@@ -127,10 +127,14 @@ class DesktopDisplayCoordinator(
         val recovery: Boolean,
         var cancelTimeout: () -> Unit = {},
     )
+    private data class BoundActivityDisplay(
+        val displayId: Int?,
+        val display: DesktopDisplay?,
+    )
     private var owner: Owner? = null
     private var generation = 0L
     private var repository: DisplayRepository? = null
-    private val boundActivities = WeakHashMap<Activity, Int?>()
+    private val boundActivities = WeakHashMap<Activity, BoundActivityDisplay>()
     private val originalActivityOrientations = WeakHashMap<Activity, Int>()
     private val listeners = mutableSetOf<(Map<String, Any?>) -> Unit>()
     private val sessionStartListeners = mutableSetOf<(Result<Unit>) -> Unit>()
@@ -431,8 +435,9 @@ class DesktopDisplayCoordinator(
     fun bindActivity(activity: Activity): Boolean {
         assertMainThread()
         if (host?.bindActivity(activity) == false) return false
-        val displayId = host?.currentDisplayId()
-        boundActivities[activity] = displayId
+        val display = host?.currentDisplay()
+        val displayId = display?.id ?: host?.currentDisplayId()
+        boundActivities[activity] = BoundActivityDisplay(displayId, display)
         if (!placementStrategy.allowsManualMoves) {
             applyActivityOrientation(
                 activity,
@@ -451,7 +456,9 @@ class DesktopDisplayCoordinator(
 
     private fun applyActivityOrientation(activity: Activity, displayId: Int) {
         val original = originalActivityOrientations.getOrPut(activity) { activity.requestedOrientation }
-        val display = displays().firstOrNull { it.id == displayId } ?: return
+        val display = boundActivities[activity]?.display?.takeIf { it.id == displayId }
+            ?: displays().firstOrNull { it.id == displayId }
+            ?: return
         val requested = placementStrategy.requestedOrientation(display, original)
         if (activity.requestedOrientation != requested) {
             android.util.Log.i("DesktopDisplay", "Window orientation=$requested display=$displayId")
@@ -516,8 +523,8 @@ class DesktopDisplayCoordinator(
 
     private fun reapplyActivityOrientations() =
         host?.let { platform ->
-            boundActivities.entries.toList().forEach { (activity, boundDisplayId) ->
-                val displayId = boundDisplayId
+            boundActivities.entries.toList().forEach { (activity, boundDisplay) ->
+                val displayId = boundDisplay.displayId
                     ?: activity.window.decorView.display?.displayId
                     ?: platform.currentDisplayId()
                     ?: activity.windowManager.defaultDisplay.displayId
@@ -528,7 +535,9 @@ class DesktopDisplayCoordinator(
     fun observeActivityEnvironment(activity: Activity, expectedEpoch: Long) {
         assertMainThread()
         val displayId = activity.window.decorView.display?.displayId ?: return
-        boundActivities[activity] = displayId
+        val display = displays().firstOrNull { it.id == displayId }
+            ?: boundActivities[activity]?.display?.takeIf { it.id == displayId }
+        boundActivities[activity] = BoundActivityDisplay(displayId, display)
         if (!isDisplayLocal) return
         applyActivityOrientation(activity, displayId)
         observePassiveActivityEnvironment(displayId, expectedEpoch)

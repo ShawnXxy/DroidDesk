@@ -305,6 +305,26 @@ class DisplayLocalStartupTest {
     }
 
     @Test
+    fun strategyReplacementUsesRetainedMetadataWhenBoundDisplayLeavesDiscovery() {
+        val genericHost = LocalStartupHost(listOf(phone, tnt)).apply {
+            currentDisplay = tnt.id
+        }
+        val generic = DesktopDisplayCoordinator(
+            host = genericHost,
+            placementStrategy = movableStrategy(),
+        )
+        assertTrue(generic.bindActivity(OrientationActivity()))
+        genericHost.connected = listOf(phone)
+        genericHost.currentDisplay = phone.id
+        genericHost.running = false
+        val replacement = RecordingPlacementStrategy(movableStrategy())
+
+        generic.replacePlacementStrategy(replacement)
+
+        assertEquals(listOf(tnt.id), replacement.orientationDisplays)
+    }
+
+    @Test
     fun tntStartupUsesTheLaunchingDisplayRatherThanThePhoneFallback() {
         coordinator.openActive(target(tnt)) {}
         assertEquals(listOf(100003), host.launches.map { it.display.id })
