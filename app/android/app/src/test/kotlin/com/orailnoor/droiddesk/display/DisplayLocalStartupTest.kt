@@ -210,6 +210,47 @@ class DisplayLocalStartupTest {
     }
 
     @Test
+    fun startFalseRelaunchesARetainedRendererFromThePreviousEpoch() {
+        coordinator.openActive(target(tnt)) {}
+        val retainedRequest = host.launches.single()
+        attach()
+
+        val reservedEpoch = coordinator.beginSession()
+        coordinator.prepareSession(
+            "termux",
+            "xfce4",
+            start = false,
+            expectedEpoch = reservedEpoch,
+        )
+        coordinator.openActive(target(tnt)) {}
+
+        assertTrue(reservedEpoch > retainedRequest.sessionGeneration)
+        assertEquals(2, host.launches.size)
+        assertEquals(reservedEpoch, host.launches.last().sessionGeneration)
+    }
+
+    @Test
+    fun beginSessionReturnsItsOwnReservationAcrossNestedPublication() {
+        coordinator.openActive(target(tnt)) {}
+        attach()
+        var nested = false
+        var nestedEpoch: Long? = null
+        coordinator.subscribe {
+            if (!nested) {
+                nested = true
+                nestedEpoch = coordinator.beginSession()
+                coordinator.prepareSession("chroot", "plasma", true, expectedEpoch = nestedEpoch)
+            }
+        }
+
+        val outerEpoch = coordinator.beginSession()
+
+        assertTrue(checkNotNull(nestedEpoch) > outerEpoch)
+        assertFalse(coordinator.isSessionCurrent(outerEpoch))
+        assertEquals(nestedEpoch, coordinator.sessionGeneration)
+    }
+
+    @Test
     fun failedAttemptMakesTheNextReservedEpochConsumable() {
         val failedEpoch = coordinator.prepareSession("proot", "xfce4", start = true)
         coordinator.sessionStarted(failedEpoch, Result.failure(IllegalStateException("runtime exited")))

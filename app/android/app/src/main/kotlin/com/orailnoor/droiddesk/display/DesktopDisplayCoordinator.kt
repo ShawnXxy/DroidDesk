@@ -243,9 +243,10 @@ class DesktopDisplayCoordinator(
             acceptedLaunchIdentity != null || move != null || owner != null
         if (isStopped) { isStopped = false; phase = "hidden"; error = null }
         if (advance) sessionGeneration++
-        reservedStartupEpoch = sessionGeneration
+        val epoch = sessionGeneration
+        reservedStartupEpoch = epoch
         if (advance) publish()
-        return sessionGeneration
+        return epoch
     }
 
     fun isSessionCurrent(value: Long): Boolean = !isStopped && sessionGeneration == value
@@ -447,7 +448,7 @@ class DesktopDisplayCoordinator(
         val stopped = Result.failure<Unit>(DesktopDisplayException(
             "SESSION_STOPPED", "The Linux session was stopped",
         ))
-        val startupWaiters = activeStartupAttempt()
+        val startupWaiters = startupAttempt?.takeIf { it.result == null }
             ?.let { settleStartupAttempt(it, stopped) }
             .orEmpty()
         startupAttempt = null
@@ -909,12 +910,12 @@ class DesktopDisplayCoordinator(
         val currentOwner = owner
         val requestId = currentOwner?.requestId
         val attempt = activeStartupAttempt()
-        val attemptLaunch = attempt?.identity?.copy(target = DesktopStartupTarget(
+        val attemptLaunch = (attempt?.identity ?: StartupIdentity(sessionGeneration, sessionMode, desktopEnv))
+            .copy(target = DesktopStartupTarget(
             target.id, target.key, placementStrategy.environmentFor(target),
         ))
         if (currentOwner?.lease?.displayId == target.id && currentOwner.actualDisplay() == target.id &&
-            requestId != null && (attempt == null || ownerLaunchIdentity(currentOwner) == attemptLaunch) &&
-            platform.focus(requestId)) {
+            requestId != null && ownerLaunchIdentity(currentOwner) == attemptLaunch && platform.focus(requestId)) {
             completion(Result.success(Unit))
             return
         }
