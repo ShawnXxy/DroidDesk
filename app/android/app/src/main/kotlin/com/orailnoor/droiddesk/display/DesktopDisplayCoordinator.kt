@@ -5,6 +5,13 @@ import android.content.Context
 import android.os.Build
 import android.app.Activity
 import android.content.Intent
+import com.orailnoor.droiddesk.display.capability.PlacementMode
+import com.orailnoor.droiddesk.display.placement.DesktopPlacementPort
+import com.orailnoor.droiddesk.display.placement.DesktopPlacementStrategy
+import com.orailnoor.droiddesk.display.placement.DisplayLocalRestartAdapter
+import com.orailnoor.droiddesk.display.placement.MovableSecondaryDisplayAdapter
+import com.orailnoor.droiddesk.display.placement.PlacementSelection
+import com.orailnoor.droiddesk.display.placement.PlacementSelectionSource
 import com.orailnoor.droiddesk.service.DesktopStopReason
 import com.orailnoor.droiddesk.service.DroidDeskService
 import java.util.WeakHashMap
@@ -35,12 +42,76 @@ interface DesktopDisplayHost {
     fun notifyReturnRequired(error: DesktopDisplayException)
 }
 
+private class ReplaceableDesktopPlacementStrategy(
+    initial: DesktopPlacementStrategy,
+) : DesktopPlacementStrategy {
+    private var delegate = initial
+
+    fun replace(strategy: DesktopPlacementStrategy) {
+        delegate = strategy
+    }
+
+    override val selection get() = delegate.selection
+    override val allowsManualMoves get() = delegate.allowsManualMoves
+    override val allowsAutomaticMoves get() = delegate.allowsAutomaticMoves
+    override val environmentRestartWarning get() = delegate.environmentRestartWarning
+    override fun environmentFor(display: DesktopDisplay) = delegate.environmentFor(display)
+    override fun requestedOrientation(display: DesktopDisplay, originalOrientation: Int) =
+        delegate.requestedOrientation(display, originalOrientation)
+    override fun shouldAutoLaunchCurrentDisplay(display: DesktopDisplay, installed: Boolean) =
+        delegate.shouldAutoLaunchCurrentDisplay(display, installed)
+    override fun launch(port: DesktopPlacementPort, request: DesktopLaunchRequest) =
+        delegate.launch(port, request)
+    override fun focus(port: DesktopPlacementPort, requestId: Long) =
+        delegate.focus(port, requestId)
+    override fun cancel(port: DesktopPlacementPort, requestId: Long) =
+        delegate.cancel(port, requestId)
+    override fun requiresSessionRestart(active: DesktopStartupTarget?, next: DesktopStartupTarget) =
+        delegate.requiresSessionRestart(active, next)
+    override fun fallbackTarget(
+        displays: List<DesktopDisplay>,
+        previous: DesktopDisplay?,
+        failed: DesktopDisplay,
+    ) = delegate.fallbackTarget(displays, previous, failed)
+}
+
+private fun DisplayEnvironmentPolicy.legacyPlacementStrategy(): DesktopPlacementStrategy {
+    val mode = if (displayLocalMode) PlacementMode.DISPLAY_LOCAL else PlacementMode.MOVABLE
+    val selection = PlacementSelection(
+        mode = mode,
+        source = if (displayLocalMode) {
+            PlacementSelectionSource.DEVICE_QUIRK
+        } else {
+            PlacementSelectionSource.SAFE_DEFAULT
+        },
+        allowAutomaticMoves = allowCrossDisplayMoves,
+        reason = "Legacy display environment policy selected ${mode.wireName} placement",
+    )
+    val adapter = if (displayLocalMode) {
+        DisplayLocalRestartAdapter(selection)
+    } else {
+        MovableSecondaryDisplayAdapter(selection)
+    }
+    return object : DesktopPlacementStrategy by adapter {
+        override fun environmentFor(display: DesktopDisplay) =
+            this@legacyPlacementStrategy.environmentFor(display.id)
+
+        override fun requestedOrientation(display: DesktopDisplay, originalOrientation: Int) =
+            requestedOrientationFor(display.id, originalOrientation)
+    }
+}
+
 class DesktopDisplayCoordinator(
     private val assertMainThread: () -> Unit = {},
     private var host: DesktopDisplayHost? = null,
     private var settingsStore: DisplaySettingsStore? = null,
-    private var environmentPolicy: DisplayEnvironmentPolicy = DisplayEnvironmentPolicy.forDevice(""),
+    environmentPolicy: DisplayEnvironmentPolicy = DisplayEnvironmentPolicy.forDevice(""),
+    placementStrategy: DesktopPlacementStrategy? = null,
 ) {
+    private var strategyWasProvided = placementStrategy != null
+    private val placementStrategy = ReplaceableDesktopPlacementStrategy(
+        placementStrategy ?: environmentPolicy.legacyPlacementStrategy(),
+    )
     private data class Owner(
         val lease: RendererLease,
         val detach: () -> Unit,
@@ -59,6 +130,7 @@ class DesktopDisplayCoordinator(
     private var owner: Owner? = null
     private var generation = 0L
     private var repository: DisplayRepository? = null
+    private val boundActivities = WeakHashMap<Activity, Int?>()
     private val originalActivityOrientations = WeakHashMap<Activity, Int>()
     private val listeners = mutableSetOf<(Map<String, Any?>) -> Unit>()
     private val sessionStartListeners = mutableSetOf<(Result<Unit>) -> Unit>()
@@ -90,7 +162,8 @@ class DesktopDisplayCoordinator(
     val isRestarting: Boolean get() = sessionRestarting
     val sessionFailure: DesktopDisplayException? get() = error
     val hasRunningSession: Boolean get() = (!isStopped || stopFailed) && host?.sessionRunning() == true
-    val isDisplayLocal: Boolean get() = environmentPolicy.displayLocalMode
+    val placementSelection: PlacementSelection get() = placementStrategy.selection
+    val isDisplayLocal: Boolean get() = placementSelection.mode == PlacementMode.DISPLAY_LOCAL
     var sessionMode = "termux"
         private set
     var desktopEnv = "xfce4"
@@ -308,11 +381,15 @@ class DesktopDisplayCoordinator(
     fun initialize(context: Context) {
         assertMainThread()
         if (host != null) return
-        environmentPolicy = DisplayEnvironmentPolicy.forDevice(Build.DEVICE)
+        if (!strategyWasProvided) {
+            placementStrategy.replace(
+                DisplayEnvironmentPolicy.forDevice(Build.DEVICE).legacyPlacementStrategy(),
+            )
+        }
         settingsStore = DisplaySettingsStore(context)
         val discovery = DisplayRepository(context)
         repository = discovery
-        host = AndroidDesktopDisplayHost(context.applicationContext, discovery, environmentPolicy)
+        host = AndroidDesktopDisplayHost(context.applicationContext, discovery, placementStrategy)
         if (isDisplayLocal) {
             val app = context.applicationContext
             restartController = DisplayLocalSessionController(object : DisplayLocalSessionHost {
@@ -356,19 +433,28 @@ class DesktopDisplayCoordinator(
     fun bindActivity(activity: Activity): Boolean {
         assertMainThread()
         if (host?.bindActivity(activity) == false) return false
-        if (isDisplayLocal) applyActivityOrientation(activity, activity.windowManager.defaultDisplay.displayId)
+        val displayId = host?.currentDisplayId()
+        boundActivities[activity] = displayId
+        if (!placementStrategy.allowsManualMoves) {
+            applyActivityOrientation(
+                activity,
+                displayId ?: activity.windowManager.defaultDisplay.displayId,
+            )
+        }
         return true
     }
 
     fun unbindActivity(activity: Activity) {
         assertMainThread()
         host?.unbindActivity(activity)
+        boundActivities.remove(activity)
         originalActivityOrientations.remove(activity)
     }
 
     private fun applyActivityOrientation(activity: Activity, displayId: Int) {
         val original = originalActivityOrientations.getOrPut(activity) { activity.requestedOrientation }
-        val requested = environmentPolicy.requestedOrientationFor(displayId, original)
+        val display = displays().firstOrNull { it.id == displayId } ?: return
+        val requested = placementStrategy.requestedOrientation(display, original)
         if (activity.requestedOrientation != requested) {
             android.util.Log.i("DesktopDisplay", "Window orientation=$requested display=$displayId")
             activity.requestedOrientation = requested
@@ -401,10 +487,42 @@ class DesktopDisplayCoordinator(
         return true
     }
 
+    fun replacePlacementStrategy(strategy: DesktopPlacementStrategy) {
+        assertMainThread()
+        val runtimeStopped = isStopped || (!sessionStarting && host?.sessionRunning() != true)
+        if (!runtimeStopped || stopFailed || pendingStops != 0 || owner != null || move != null ||
+            sessionRestarting || host?.sessionRunning() == true) {
+            throw DesktopDisplayException(
+                "INVALID_ARGUMENT",
+                "Desktop placement can change only while Linux is fully stopped",
+            )
+        }
+        placementStrategy.replace(strategy)
+        strategyWasProvided = true
+        cancelAutomaticOpening()
+        automaticAttempts.clear()
+        automaticSuppressed.clear()
+        automaticEpoch = sessionGeneration
+        reapplyActivityOrientations()
+        publish()
+    }
+
+    private fun reapplyActivityOrientations() =
+        host?.let { platform ->
+            boundActivities.entries.toList().forEach { (activity, boundDisplayId) ->
+                val displayId = boundDisplayId
+                    ?: activity.window.decorView.display?.displayId
+                    ?: platform.currentDisplayId()
+                    ?: activity.windowManager.defaultDisplay.displayId
+                applyActivityOrientation(activity, displayId)
+            }
+        }
+
     fun observeActivityEnvironment(activity: Activity, expectedEpoch: Long) {
         assertMainThread()
         if (!isDisplayLocal) return
         val displayId = activity.window.decorView.display?.displayId ?: return
+        boundActivities[activity] = displayId
         applyActivityOrientation(activity, displayId)
         observePassiveActivityEnvironment(displayId, expectedEpoch)
     }
@@ -457,7 +575,7 @@ class DesktopDisplayCoordinator(
                 else -> phase
             },
             "displayLocalMode" to isDisplayLocal,
-            "crossDisplayMovesAllowed" to environmentPolicy.allowCrossDisplayMoves,
+            "crossDisplayMovesAllowed" to placementStrategy.allowsManualMoves,
             "sessionRunning" to running,
             "sessionRestarting" to sessionRestarting,
             "sessionEnvironment" to sessionTarget?.environment?.wireName,
@@ -493,7 +611,7 @@ class DesktopDisplayCoordinator(
 
     fun setAutoOpenOnMonitor(enabled: Boolean) {
         assertMainThread()
-        if (isDisplayLocal) {
+        if (!placementStrategy.allowsManualMoves) {
             val failure = DesktopDisplayException("DISPLAY_NOT_ALLOWED", "The phone or TNT launcher selects the display environment")
             reportError(failure)
             throw failure
@@ -597,7 +715,7 @@ class DesktopDisplayCoordinator(
 
     fun open(displayId: Int, displayKey: String, completion: (Result<Unit>) -> Unit) {
         assertMainThread()
-        if (!environmentPolicy.allowCrossDisplayMoves) {
+        if (!placementStrategy.allowsManualMoves) {
             rejectCrossDisplayMove(completion)
             return
         }
@@ -619,13 +737,13 @@ class DesktopDisplayCoordinator(
         assertMainThread()
         val display = displays().firstOrNull { it.id == displayId && canLaunch(it) }
             ?: throw DesktopDisplayException("DISPLAY_UNAVAILABLE", "The app's current display is not available")
-        return DesktopStartupTarget(display.id, display.key, environmentPolicy.environmentFor(display.id))
+        return DesktopStartupTarget(display.id, display.key, placementStrategy.environmentFor(display))
     }
 
     fun openActive(preferredTarget: DesktopStartupTarget?, completion: (Result<Unit>) -> Unit) {
         assertMainThread()
         val current = displays()
-        if (isDisplayLocal) {
+        if (!placementStrategy.allowsManualMoves) {
             val target = preferredTarget?.let { preferred ->
                 current.firstOrNull {
                     it.id == preferred.displayId && it.key == preferred.displayKey && it.eligible
@@ -653,7 +771,7 @@ class DesktopDisplayCoordinator(
 
     fun moveToPhone(completion: (Result<Unit>) -> Unit) {
         assertMainThread()
-        if (!environmentPolicy.allowCrossDisplayMoves) {
+        if (!placementStrategy.allowsManualMoves) {
             rejectCrossDisplayMove(completion)
             return
         }
@@ -696,8 +814,12 @@ class DesktopDisplayCoordinator(
             return
         }
         val request = DesktopLaunchRequest(target, ++requestSequence, sessionGeneration, sessionMode, desktopEnv)
-        if (isDisplayLocal && sessionTarget == null) {
-            sessionTarget = DesktopStartupTarget(target.id, target.key, environmentPolicy.environmentFor(target.id))
+        if (!placementStrategy.allowsManualMoves && sessionTarget == null) {
+            sessionTarget = DesktopStartupTarget(
+                target.id,
+                target.key,
+                placementStrategy.environmentFor(target),
+            )
         }
         val pending = Move(request, completion, currentOwner, lastTarget, recovery)
         move = pending
@@ -755,7 +877,11 @@ class DesktopDisplayCoordinator(
         move = null
         pending.cancelTimeout()
         lastTarget = target
-        sessionTarget = DesktopStartupTarget(target.id, target.key, environmentPolicy.environmentFor(target.id))
+        sessionTarget = DesktopStartupTarget(
+            target.id,
+            target.key,
+            placementStrategy.environmentFor(target),
+        )
         acceptedRequest = requestId
         phase = "attached"
         if (!pending.recovery) error = null
@@ -767,18 +893,23 @@ class DesktopDisplayCoordinator(
 
     fun onDisplayRemoved(displayId: Int) {
         assertMainThread()
-        if (isDisplayLocal) {
-            if (move?.request?.display?.id == displayId) {
-                failMove(DesktopDisplayException("DISPLAY_UNAVAILABLE", "The startup display disconnected"), false)
-            }
-            publish()
-            return
-        }
         if (move?.request?.display?.id == displayId) {
-            failMove(DesktopDisplayException("DISPLAY_UNAVAILABLE", "The selected monitor disconnected"), true)
+            val message = if (placementStrategy.allowsManualMoves) {
+                "The selected monitor disconnected"
+            } else {
+                "The startup display disconnected"
+            }
+            failMove(DesktopDisplayException("DISPLAY_UNAVAILABLE", message), true)
         } else if (!isStopped && move == null && lastTarget?.id == displayId) {
-            val phone = displays().firstOrNull { it.isDefault }
-            if (phone != null) openTarget(phone, {}, recovery = true)
+            val failed = lastTarget ?: return
+            val fallback = placementStrategy.fallbackTarget(displays(), failed, failed)
+            if (fallback != null) {
+                openTarget(fallback, {}, recovery = true)
+            } else {
+                publish()
+            }
+        } else if (!placementStrategy.allowsManualMoves) {
+            publish()
         }
     }
 
@@ -786,18 +917,12 @@ class DesktopDisplayCoordinator(
         assertMainThread()
         val current = displays()
         val pending = move
-        if (isDisplayLocal) {
-            if (pending != null && current.none {
-                    it.id == pending.request.display.id && it.key == pending.request.display.key && it.eligible
-                }) {
-                failMove(DesktopDisplayException("DISPLAY_UNAVAILABLE", "The startup display changed or is unavailable"), false)
-            }
-            publish()
-            return
+        val pendingDisplay = pending?.request?.display?.let { target ->
+            current.firstOrNull { it.id == target.id && it.key == target.key }
         }
-        if (pending != null && current.none { it.key == pending.request.display.key }) {
+        if (pending != null && pendingDisplay == null) {
             onDisplayRemoved(pending.request.display.id)
-        } else if (pending != null && current.any { it.key == pending.request.display.key && !canLaunch(it) }) {
+        } else if (pendingDisplay != null && !canLaunch(pendingDisplay)) {
             failMove(DesktopDisplayException("DISPLAY_NOT_ALLOWED", "Display placement permission changed"), true)
         } else if (pending == null) {
             lastTarget?.takeIf { target -> current.none { it.key == target.key } }?.let { onDisplayRemoved(it.id) }
@@ -811,7 +936,7 @@ class DesktopDisplayCoordinator(
         display.eligible || host?.currentDisplayId() == display.id
 
     private fun automaticOpeningEnabled(): Boolean =
-        environmentPolicy.allowCrossDisplayMoves && (settingsStore?.loadAutoOpenOnMonitor() ?: true)
+        placementStrategy.allowsAutomaticMoves && (settingsStore?.loadAutoOpenOnMonitor() ?: true)
 
     private fun cancelAutomaticOpening() {
         automaticSequence++
@@ -873,7 +998,7 @@ class DesktopDisplayCoordinator(
 
     fun onActivityMoved(lease: RendererLease, displayId: Int) {
         assertMainThread()
-        if (!environmentPolicy.allowCrossDisplayMoves) return
+        if (!placementStrategy.allowsManualMoves) return
         if (!isCurrent(lease) || lease.displayId == displayId || move != null) return
         val target = displays().firstOrNull { it.id == displayId && it.eligible } ?: return
         openTarget(target, {}, recovery = true)
@@ -905,9 +1030,12 @@ class DesktopDisplayCoordinator(
             phase = "error"
             publish()
         }
-        val fallback = available.firstOrNull { it.key == pending.previousTarget?.key && it.eligible }
-            ?: available.firstOrNull { it.isDefault && it.eligible }
-        if (environmentPolicy.allowCrossDisplayMoves && recover && !pending.recovery &&
+        val fallback = placementStrategy.fallbackTarget(
+            available,
+            pending.previousTarget,
+            pending.request.display,
+        )
+        if (recover && !pending.recovery &&
             fallback != null && fallback.key != pending.request.display.key) {
             openTarget(fallback, {}, recovery = true)
         } else {
