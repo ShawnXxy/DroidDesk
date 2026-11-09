@@ -9,6 +9,8 @@ import android.os.Handler
 import android.os.Looper
 import android.util.Log
 import android.view.Display
+import androidx.annotation.DoNotInline
+import androidx.annotation.RequiresApi
 import java.util.UUID
 
 class DesktopDisplayException(val code: String, message: String) : RuntimeException(message)
@@ -55,11 +57,44 @@ internal fun <T> mergeDisplaysById(
     return (primary + presentations).filter { seen.add(idOf(it)) }
 }
 
-internal fun <T> displayProductInfoForSdk(
+internal data class DisplayProductIdentity(
+    val manufacturerPnpId: String?,
+    val productId: String?,
+)
+
+internal fun displayProductIdentity(
+    manufacturerPnpId: String?,
+    productId: String?,
+): DisplayProductIdentity = DisplayProductIdentity(
+    manufacturerPnpId = manufacturerPnpId,
+    productId = productId,
+)
+
+internal fun selectDisplayProductIdentityForSdk(
     sdkInt: Int,
-    api31ProductInfo: () -> T?,
-): T? =
-    if (sdkInt >= Build.VERSION_CODES.S) api31ProductInfo() else null
+    api31Identity: () -> DisplayProductIdentity?,
+): DisplayProductIdentity? =
+    if (sdkInt >= Build.VERSION_CODES.S) api31Identity() else null
+
+internal fun displayProductIdentityForSdk(
+    sdkInt: Int,
+    display: Display,
+): DisplayProductIdentity? =
+    selectDisplayProductIdentityForSdk(sdkInt) {
+        Api31DisplayProductIdentity.read(display)
+    }
+
+@RequiresApi(Build.VERSION_CODES.S)
+private object Api31DisplayProductIdentity {
+    @DoNotInline
+    fun read(display: Display): DisplayProductIdentity? {
+        val productInfo = display.deviceProductInfo ?: return null
+        return displayProductIdentity(
+            manufacturerPnpId = productInfo.manufacturerPnpId,
+            productId = productInfo.productId,
+        )
+    }
+}
 
 internal fun stableDisplaySettingsKey(
     isDefault: Boolean,
@@ -215,9 +250,7 @@ private class AndroidDisplaySource(private val context: Context) : DesktopDispla
             val isDefault = display.displayId == Display.DEFAULT_DISPLAY
             val allowed = isDefault ||
                 supported && isActivityStartAllowedOnDisplay(context, display.displayId)
-            val product = displayProductInfoForSdk(Build.VERSION.SDK_INT) {
-                display.deviceProductInfo
-            }
+            val productIdentity = displayProductIdentityForSdk(Build.VERSION.SDK_INT, display)
             val mode = display.mode
             DisplayCandidate(
                 display.displayId, display.name, isDefault, display.isValid,
@@ -230,8 +263,8 @@ private class AndroidDisplaySource(private val context: Context) : DesktopDispla
                 stableDisplaySettingsKey(
                     isDefault = isDefault,
                     name = display.name,
-                    manufacturerPnpId = product?.manufacturerPnpId,
-                    productId = product?.productId,
+                    manufacturerPnpId = productIdentity?.manufacturerPnpId,
+                    productId = productIdentity?.productId,
                     width = mode.physicalWidth,
                     height = mode.physicalHeight,
                 ),
