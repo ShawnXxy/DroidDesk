@@ -231,6 +231,66 @@ class DisplayLocalStartupTest {
     }
 
     @Test
+    fun pendingRestartBlocksStrategyReplacementWithoutMutationUntilTargetValidationSettlesIt() {
+        val localHost = LocalStartupHost(listOf(phone, tnt)).apply {
+            currentDisplay = phone.id
+        }
+        var stopCompletion: ((Result<Unit>) -> Unit)? = null
+        lateinit var local: DesktopDisplayCoordinator
+        local = DesktopDisplayCoordinator(
+            host = localHost,
+            placementStrategy = displayLocalStrategy,
+            stopForEnvironmentChange = { completion ->
+                local.stop(preserveRestart = true)
+                localHost.running = false
+                stopCompletion = completion
+            },
+        )
+        val activity = OrientationActivity()
+        assertTrue(local.bindActivity(activity))
+        local.openActive(target(phone)) {}
+        attach(local, localHost)
+        val before = local.snapshot()
+        val restart = mutableListOf<Result<Unit>>()
+
+        localHost.currentDisplay = tnt.id
+        assertTrue(local.restartForEnvironmentIfNeeded(
+            target(tnt),
+            local.sessionGeneration,
+            restart::add,
+        ))
+
+        assertTrue(local.isStopped)
+        assertTrue(local.isRestarting)
+        val replacement = RecordingPlacementStrategy(movableStrategy())
+        val failure = assertThrows(DesktopDisplayException::class.java) {
+            local.replacePlacementStrategy(replacement)
+        }
+        assertEquals("INVALID_ARGUMENT", failure.code)
+        assertEquals(displayLocalStrategy.selection, local.placementSelection)
+        assertEquals(before["crossDisplayMovesAllowed"], local.snapshot()["crossDisplayMovesAllowed"])
+        assertEquals(before["autoOpenOnMonitor"], local.snapshot()["autoOpenOnMonitor"])
+        assertEquals(0, replacement.orientationRequests)
+
+        localHost.currentDisplay = phone.id
+        stopCompletion!!.invoke(Result.success(Unit))
+
+        assertEquals(
+            "DISPLAY_UNAVAILABLE",
+            (restart.single().exceptionOrNull() as DesktopDisplayException).code,
+        )
+        assertFalse(local.isRestarting)
+        assertEquals(listOf(phone.id), localHost.launches.map { it.display.id })
+
+        local.replacePlacementStrategy(replacement)
+
+        assertEquals(replacement.selection, local.placementSelection)
+        assertEquals(1, replacement.orientationRequests)
+        assertEquals(true, local.snapshot()["crossDisplayMovesAllowed"])
+        assertEquals(true, local.snapshot()["autoOpenOnMonitor"])
+    }
+
+    @Test
     fun successfulStrategyReplacementReappliesBoundActivityOrientation() {
         val genericHost = LocalStartupHost(listOf(phone)).apply {
             currentDisplay = phone.id
