@@ -77,9 +77,10 @@ internal class AndroidDesktopDisplayHost(
     private var boundActivity: WeakReference<Activity>? = null
     private var localDesktop: WeakReference<DesktopActivity>? = null
 
-    override fun bindActivity(activity: Activity) {
+    override fun bindActivity(activity: Activity): Boolean {
         boundActivity = WeakReference(activity)
         if (activity is DesktopActivity) localDesktop = WeakReference(activity)
+        return true
     }
 
     override fun unbindActivity(activity: Activity) {
