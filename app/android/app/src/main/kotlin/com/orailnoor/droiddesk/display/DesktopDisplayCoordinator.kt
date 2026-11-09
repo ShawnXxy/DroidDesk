@@ -390,42 +390,40 @@ class DesktopDisplayCoordinator(
         val discovery = DisplayRepository(context)
         repository = discovery
         host = AndroidDesktopDisplayHost(context.applicationContext, discovery, placementStrategy)
-        if (isDisplayLocal) {
-            val app = context.applicationContext
-            restartController = DisplayLocalSessionController(object : DisplayLocalSessionHost {
-                override fun sessionEpoch() = sessionGeneration
-                override fun isSessionCurrent(epoch: Long) = this@DesktopDisplayCoordinator.isSessionCurrent(epoch)
-                override fun validateTarget(target: DesktopStartupTarget) {
-                    val actual = host?.currentDisplayId()
-                    if (actual != target.displayId || startupTarget(actual) != target) {
-                        throw DesktopDisplayException("DISPLAY_UNAVAILABLE", "The app moved before Linux could restart")
+        val app = context.applicationContext
+        restartController = DisplayLocalSessionController(object : DisplayLocalSessionHost {
+            override fun sessionEpoch() = sessionGeneration
+            override fun isSessionCurrent(epoch: Long) = this@DesktopDisplayCoordinator.isSessionCurrent(epoch)
+            override fun validateTarget(target: DesktopStartupTarget) {
+                val actual = host?.currentDisplayId()
+                if (actual != target.displayId || startupTarget(actual) != target) {
+                    throw DesktopDisplayException("DISPLAY_UNAVAILABLE", "The app moved before Linux could restart")
+                }
+            }
+            override fun restartingChanged(restarting: Boolean) {
+                sessionRestarting = restarting
+                publish()
+            }
+            override fun stopForEnvironmentChange(completion: (Result<Unit>) -> Unit) {
+                DroidDeskService.stopDesktop(app, DesktopStopReason.ENVIRONMENT_CHANGE, completion)
+            }
+            override fun startOnTarget(target: DesktopStartupTarget, completion: (Result<Unit>) -> Unit) {
+                try {
+                    val epoch = prepareSession(sessionMode, desktopEnv, true)
+                    app.startForegroundService(Intent(app, DroidDeskService::class.java))
+                    openActive(target) { result ->
+                        if (result.isFailure) completion(result) else awaitSessionReady(epoch, completion)
                     }
+                } catch (failure: DesktopDisplayException) {
+                    completion(Result.failure(failure))
+                } catch (failure: SecurityException) {
+                    android.util.Log.e("DesktopDisplay", "Android denied the restarted Linux service", failure)
+                    completion(Result.failure(DesktopDisplayException(
+                        "DISPLAY_NOT_ALLOWED", "Android denied restarting the Linux service",
+                    )))
                 }
-                override fun restartingChanged(restarting: Boolean) {
-                    sessionRestarting = restarting
-                    publish()
-                }
-                override fun stopForEnvironmentChange(completion: (Result<Unit>) -> Unit) {
-                    DroidDeskService.stopDesktop(app, DesktopStopReason.ENVIRONMENT_CHANGE, completion)
-                }
-                override fun startOnTarget(target: DesktopStartupTarget, completion: (Result<Unit>) -> Unit) {
-                    try {
-                        val epoch = prepareSession(sessionMode, desktopEnv, true)
-                        app.startForegroundService(Intent(app, DroidDeskService::class.java))
-                        openActive(target) { result ->
-                            if (result.isFailure) completion(result) else awaitSessionReady(epoch, completion)
-                        }
-                    } catch (failure: DesktopDisplayException) {
-                        completion(Result.failure(failure))
-                    } catch (failure: SecurityException) {
-                        android.util.Log.e("DesktopDisplay", "Android denied the restarted Linux service", failure)
-                        completion(Result.failure(DesktopDisplayException(
-                            "DISPLAY_NOT_ALLOWED", "Android denied restarting the Linux service",
-                        )))
-                    }
-                }
-            }, assertMainThread)
-        }
+            }
+        }, assertMainThread)
         discovery.start { onDisplaysChanged() }
         refreshAutomaticOpening()
     }
@@ -529,9 +527,9 @@ class DesktopDisplayCoordinator(
 
     fun observeActivityEnvironment(activity: Activity, expectedEpoch: Long) {
         assertMainThread()
-        if (!isDisplayLocal) return
         val displayId = activity.window.decorView.display?.displayId ?: return
         boundActivities[activity] = displayId
+        if (!isDisplayLocal) return
         applyActivityOrientation(activity, displayId)
         observePassiveActivityEnvironment(displayId, expectedEpoch)
     }
