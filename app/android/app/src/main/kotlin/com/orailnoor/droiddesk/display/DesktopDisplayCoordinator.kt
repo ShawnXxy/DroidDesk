@@ -241,11 +241,14 @@ class DesktopDisplayCoordinator(
         if (pendingStops > 0) throw DesktopDisplayException("SESSION_STOPPED", "Desktop teardown is still finishing")
         val advance = isStopped || reservedStartupEpoch != null || startupAttempt != null ||
             acceptedLaunchIdentity != null || move != null || owner != null
+        val invalidated = Result.failure<Unit>(DesktopDisplayException("SESSION_STOPPED", "The Linux startup was replaced"))
+        val invalidatedWaiters = startupAttempt?.takeIf { advance && it.result == null }?.let { settleStartupAttempt(it, invalidated) }.orEmpty()
         if (isStopped) { isStopped = false; phase = "hidden"; error = null }
         if (advance) sessionGeneration++
         val epoch = sessionGeneration
         reservedStartupEpoch = epoch
         if (advance) publish()
+        completeStartupWaiters(invalidatedWaiters, invalidated)
         return epoch
     }
 
@@ -306,12 +309,12 @@ class DesktopDisplayCoordinator(
         assertMainThread()
         startupAttempt?.takeIf { it.identity.epoch == epoch }?.let { attempt ->
             val result = attempt.result
-            if (result != null) {
-                completion(result)
-            } else if (isSessionCurrent(epoch)) {
-                attempt.waiters += completion
-            } else {
+            if (!isSessionCurrent(epoch)) {
                 completion(Result.failure(DesktopDisplayException("SESSION_STOPPED", "The Linux session was stopped")))
+            } else if (result != null) {
+                completion(result)
+            } else {
+                attempt.waiters += completion
             }
             return
         }

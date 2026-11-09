@@ -138,6 +138,38 @@ class SessionStartTransferTest {
     }
 
     @Test
+    fun newReservationDrainsTheInvalidatedAttempt() {
+        val coordinator = DesktopDisplayCoordinator()
+        val epoch = coordinator.prepareSession("proot", "xfce4", true)
+        val outcomes = mutableListOf<Result<Unit>>()
+        coordinator.awaitSessionReady(epoch, outcomes::add)
+
+        coordinator.beginSession()
+
+        assertEquals(1, outcomes.size)
+        assertEquals(
+            "SESSION_STOPPED",
+            (outcomes.single().exceptionOrNull() as DesktopDisplayException).code,
+        )
+    }
+
+    @Test
+    fun invalidatedSettledAttemptCannotReturnCachedSuccess() {
+        val coordinator = DesktopDisplayCoordinator()
+        val epoch = coordinator.prepareSession("proot", "xfce4", true)
+        coordinator.sessionStarted(epoch, Result.success(Unit))
+        coordinator.beginSession()
+        val outcomes = mutableListOf<Result<Unit>>()
+
+        coordinator.awaitSessionReady(epoch, outcomes::add)
+
+        assertEquals(
+            "SESSION_STOPPED",
+            (outcomes.single().exceptionOrNull() as DesktopDisplayException).code,
+        )
+    }
+
+    @Test
     fun restartRequestsForTheSameKeyCoalesceAndCompleteTogether() {
         val host = RestartHost()
         val controller = DisplayLocalSessionController(host)
