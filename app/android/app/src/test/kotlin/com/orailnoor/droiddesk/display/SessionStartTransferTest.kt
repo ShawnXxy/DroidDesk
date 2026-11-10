@@ -11,7 +11,9 @@ import org.junit.Test
 class SessionStartTransferTest {
     @Test
     fun sessionGenerationKeepsVolatilePublicationForWorkerReads() {
-        val field = DesktopDisplayCoordinator::class.java.getDeclaredField("sessionGeneration")
+        val field = DesktopDisplayCoordinator::class.java.getDeclaredField(
+            "publishedSessionGeneration",
+        )
 
         assertTrue(Modifier.isVolatile(field.modifiers))
     }
@@ -169,6 +171,40 @@ class SessionStartTransferTest {
 
         assertEquals(listOf(failedEpoch), observedEpochs)
         assertTrue(checkNotNull(recoveredEpoch) > failedEpoch)
+    }
+
+    @Test
+    fun nestedObserversKeepTheirSettlementEpochAfterAnotherWaiterRecovers() {
+        val coordinator = DesktopDisplayCoordinator()
+        val observed = mutableListOf<Pair<String, Long>>()
+        coordinator.subscribeSessionStart {
+            observed += (it.exceptionOrNull()?.message ?: "success") to
+                coordinator.sessionGeneration
+        }
+        val originalEpoch = coordinator.prepareSession("proot", "xfce4", true)
+        var failedEpoch: Long? = null
+        var recoveredEpoch: Long? = null
+        coordinator.awaitSessionReady(originalEpoch) {
+            failedEpoch = coordinator.prepareSession("chroot", "plasma", true)
+            coordinator.sessionStarted(
+                checkNotNull(failedEpoch),
+                Result.failure(IllegalStateException("replacement failed")),
+            )
+        }
+        coordinator.awaitSessionReady(originalEpoch) {
+            recoveredEpoch = coordinator.prepareSession("chroot", "plasma", false)
+        }
+
+        coordinator.sessionStarted(originalEpoch, Result.success(Unit))
+
+        assertEquals(
+            listOf(
+                "success" to originalEpoch,
+                "replacement failed" to checkNotNull(failedEpoch),
+            ),
+            observed,
+        )
+        assertTrue(checkNotNull(recoveredEpoch) > checkNotNull(failedEpoch))
     }
 
     @Test

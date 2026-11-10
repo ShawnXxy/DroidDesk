@@ -297,6 +297,22 @@ class DisplayLocalStartupTest {
     }
 
     @Test
+    fun preparingANewStartRetiresThePendingAutomaticOpeningTimer() {
+        val genericHost = LocalStartupHost(listOf(phone, tnt))
+        val generic = DesktopDisplayCoordinator(
+            host = genericHost,
+            placementStrategy = movableStrategy(),
+        )
+        generic.onDisplaysChanged()
+
+        val epoch = generic.prepareSession("proot", "xfce4", start = true)
+        generic.sessionStarted(epoch, Result.success(Unit))
+        genericHost.fireTimers()
+
+        assertEquals(listOf(tnt.id), genericHost.launches.map { it.display.id })
+    }
+
+    @Test
     fun observersSeeTheFailedEpochBeforeStateSubscribersRecoverTheSession() {
         val failedEpoch = coordinator.prepareSession("proot", "xfce4", true)
         val observedEpochs = mutableListOf<Long>()

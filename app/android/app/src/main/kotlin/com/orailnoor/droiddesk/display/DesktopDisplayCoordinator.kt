@@ -229,8 +229,11 @@ class DesktopDisplayCoordinator(
         private set
     @Volatile var isStopped = false
         private set
-    @Volatile var sessionGeneration = 1L
-        private set
+    private val observerSessionGeneration = ThreadLocal<Long?>()
+    @Volatile private var publishedSessionGeneration = 1L
+    var sessionGeneration: Long
+        get() = observerSessionGeneration.get() ?: publishedSessionGeneration
+        private set(value) { publishedSessionGeneration = value }
 
     fun beginSession(): Long {
         assertMainThread()
@@ -274,6 +277,7 @@ class DesktopDisplayCoordinator(
             throw DesktopDisplayException("INVALID_ARGUMENT",
                 failure.message ?: "The Linux startup configuration is incompatible")
         }
+        if (transition.snapshot.epoch != before.epoch) cancelAutomaticOpening()
         sessionGeneration = transition.snapshot.epoch
         val deliverResults = queueStartupResult(transition.settlement)
         val previousFailure = before.terminalFailure
@@ -338,7 +342,7 @@ class DesktopDisplayCoordinator(
             notifyObservers = true,
         ) ?: return
         val deliverResults = queueStartupResult(settlement) {
-            if (isCurrentRevision(settlement.revision)) publish()
+            publish()
             if (result.isSuccess && isSessionCurrent(epoch)) refreshAutomaticOpening()
         }
         if (failure != null) {
@@ -1176,7 +1180,14 @@ class DesktopDisplayCoordinator(
         settlement ?: return false
         val observers = if (settlement.notifyObservers) sessionStartListeners.toList() else emptyList()
         startupResultDeliveries.addLast {
-            observers.forEach { it(settlement.result) }
+            val previousEpoch = observerSessionGeneration.get()
+            observerSessionGeneration.set(settlement.identity.epoch)
+            try {
+                observers.forEach { it(settlement.result) }
+            } finally {
+                if (previousEpoch == null) observerSessionGeneration.remove()
+                else observerSessionGeneration.set(previousEpoch)
+            }
             settlement.waiters.forEach { it(settlement.result) }
             afterDelivery()
         }
