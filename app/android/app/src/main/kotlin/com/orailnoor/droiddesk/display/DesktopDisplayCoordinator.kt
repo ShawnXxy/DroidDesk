@@ -319,14 +319,27 @@ class DesktopDisplayCoordinator(
     fun consumeSessionStart(lease: RendererLease): Boolean {
         assertMainThread()
         val current = owner?.takeIf { it.lease == lease } ?: return false
-        return rendererStartup(current)?.let(startupMachine::reserveClaim) == true
+        val renderer = rendererStartup(current) ?: return false
+        if (startupMachine.reserveClaim(renderer)) return true
+        val snapshot = startupMachine.snapshot()
+        if (snapshot.claimState == "reserved" &&
+            snapshot.claimGeneration == lease.generation) return true
+        val pendingPrevious = move?.previous?.lease?.generation
+        return pendingPrevious == lease.generation && snapshot.selectedIdentity?.let {
+            startupMachine.reserveClaim(RendererStartup(lease.generation, it))
+        } == true
     }
 
     fun beginSessionStart(lease: RendererLease): Long? {
         assertMainThread()
         val current = owner?.takeIf { it.lease == lease } ?: return null
         val renderer = rendererStartup(current) ?: return null
-        return startupMachine.beginClaim(renderer, move?.previous?.lease?.generation)
+        val pendingPrevious = move?.previous?.lease?.generation
+        startupMachine.beginClaim(renderer, pendingPrevious)?.let { return it }
+        val selected = startupMachine.snapshot().selectedIdentity
+        return selected?.takeIf { pendingPrevious == lease.generation }?.let {
+            startupMachine.beginClaim(RendererStartup(lease.generation, it), pendingPrevious)
+        }
     }
 
     fun sessionStarted(epoch: Long, result: Result<Unit>) {
@@ -379,16 +392,18 @@ class DesktopDisplayCoordinator(
     // The cleanup belongs to this lease and runs before the next owner attaches.
     fun claim(displayId: Int, detachPrevious: () -> Unit): RendererClaim {
         assertMainThread()
-        check(!isStopped) { "SESSION_STOPPED" }
+        if (isStopped) return RendererClaim.Rejected
         val previous = owner
-        owner = null
-        profileRefresher = null
-        releaseSessionStartClaim(previous?.lease)
+        val pending = move
+        val captured = startupMachine.snapshot()
+        val capturedRequestSequence = requestSequence
+        previous?.let(::clearOwner)
         previous?.detach?.invoke()
         if (move == null) previous?.finish?.invoke()
-        check(!isStopped) { "SESSION_STOPPED" }
-        appliedKind = null
-        renderSize = null
+        if (isStopped ||
+            !sameContinuation(captured, null, pending, capturedRequestSequence)) {
+            return RendererClaim.Rejected
+        }
         val lease = RendererLease(++generation, displayId)
         val request = move?.request?.takeIf { it.display.id == displayId }
         var launchIdentity = request?.let(::startupIdentity)
@@ -426,14 +441,13 @@ class DesktopDisplayCoordinator(
         assertMainThread()
         val current = owner ?: return
         if (current.lease != lease) return
-        owner = null
-        profileRefresher = null
-        releaseSessionStartClaim(current.lease)
+        val pending = move
+        val capturedRequestSequence = requestSequence
+        clearOwner(current)
+        val captured = startupMachine.snapshot()
+        if (pending == null && !isStopped) phase = "hidden"
         current.detach()
-        appliedKind = null
-        renderSize = null
-        if (move == null && !isStopped) phase = "hidden"
-        publish()
+        if (sameContinuation(captured, null, pending, capturedRequestSequence)) publish()
     }
 
     fun stop(preserveRestart: Boolean = false) {
@@ -903,15 +917,36 @@ class DesktopDisplayCoordinator(
         val snapshot = startupMachine.snapshot()
         val launchIdentity = startupMachine.selectTarget(selectedTarget)
             ?: StartupIdentity(snapshot.epoch, snapshot.spec, selectedTarget)
+        val selectedSnapshot = startupMachine.snapshot()
         val currentOwner = owner
+        val currentMove = move
+        val currentRequestSequence = requestSequence
         val requestId = currentOwner?.requestId
-        if (currentOwner?.lease?.displayId == target.id && currentOwner.actualDisplay() == target.id &&
-            requestId != null && currentOwner.launchIdentity == launchIdentity &&
-            platform.focus(requestId)) {
-            currentOwner.launchIdentity = launchIdentity
-            acceptedLaunchIdentity = launchIdentity
-            completion(Result.success(Unit))
-            return
+        if (currentOwner?.lease?.displayId == target.id) {
+            val actualDisplay = currentOwner.actualDisplay()
+            if (isStopped ||
+                !sameContinuation(
+                    selectedSnapshot, currentOwner, currentMove, currentRequestSequence)) {
+                completion(startupFailure("The desktop open was replaced"))
+                return
+            }
+            if (actualDisplay == target.id && requestId != null &&
+                currentOwner.launchIdentity == launchIdentity) {
+                val focused = platform.focus(requestId)
+                if (isStopped ||
+                    !sameContinuation(
+                        selectedSnapshot, currentOwner, currentMove, currentRequestSequence)) {
+                    completion(startupFailure("The desktop open was replaced"))
+                    return
+                }
+                if (focused) {
+                    currentOwner.launchIdentity = launchIdentity
+                    acceptedLaunchIdentity = launchIdentity
+                    rearmRendererClaim(currentOwner, launchIdentity)
+                    completion(Result.success(Unit))
+                    return
+                }
+            }
         }
         val request = DesktopLaunchRequest(target, ++requestSequence, launchIdentity.epoch,
             launchIdentity.spec.mode, launchIdentity.spec.desktopEnv)
@@ -1160,6 +1195,27 @@ class DesktopDisplayCoordinator(
     private fun startupFailure(message: String) =
         Result.failure<Unit>(DesktopDisplayException("SESSION_STOPPED", message))
 
+    private fun sameAttemptContext(expected: StartupSnapshot): Boolean {
+        val current = startupMachine.snapshot()
+        return current.epoch == expected.epoch &&
+            current.spec == expected.spec &&
+            current.reservedEpoch == expected.reservedEpoch &&
+            current.baseIdentity == expected.baseIdentity &&
+            current.selectedIdentity == expected.selectedIdentity &&
+            current.terminalResult == expected.terminalResult &&
+            current.terminalFailure === expected.terminalFailure
+    }
+
+    private fun sameContinuation(
+        expected: StartupSnapshot,
+        expectedOwner: Owner?,
+        expectedMove: Move?,
+        expectedRequestSequence: Long,
+    ) = owner === expectedOwner &&
+        move === expectedMove &&
+        requestSequence == expectedRequestSequence &&
+        sameAttemptContext(expected)
+
     private fun isCurrentRevision(revision: Long) =
         !isStopped && startupMachine.snapshot().revision == revision
 
@@ -1171,6 +1227,23 @@ class DesktopDisplayCoordinator(
 
     private fun rendererStartup(value: Owner): RendererStartup? =
         value.launchIdentity?.let { RendererStartup(value.lease.generation, it) }
+
+    private fun rearmRendererClaim(value: Owner, identity: StartupIdentity) {
+        val snapshot = startupMachine.snapshot()
+        if (snapshot.claimState != "reserved" ||
+            snapshot.claimGeneration != value.lease.generation) return
+        check(startupMachine.releaseClaim(value.lease.generation))
+        check(startupMachine.reserveClaim(RendererStartup(value.lease.generation, identity)))
+    }
+
+    private fun clearOwner(value: Owner) {
+        if (owner !== value) return
+        owner = null
+        profileRefresher = null
+        releaseSessionStartClaim(value.lease)
+        appliedKind = null
+        renderSize = null
+    }
 
     private fun queueStartupResult(
         settlement: StartupSettlement<(Result<Unit>) -> Unit>?,

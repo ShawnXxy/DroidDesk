@@ -940,6 +940,158 @@ class DisplayLocalStartupTest {
     }
 
     @Test
+    fun pendingMoveAllowsTheRetainedRendererToConsumeAndBeginStartup() {
+        val genericHost = LocalStartupHost(listOf(phone, tnt))
+        val generic = DesktopDisplayCoordinator(
+            host = genericHost,
+            placementStrategy = movableStrategy(),
+        )
+        val epoch = generic.prepareSession("proot", "xfce4", start = true)
+        generic.openActive {}
+        val retained = attach(generic, genericHost) { phone.id }
+
+        generic.open(tnt.id, tnt.key) {}
+
+        assertTrue(generic.consumeSessionStart(retained))
+        assertEquals(epoch, generic.beginSessionStart(retained))
+    }
+
+    @Test
+    fun focusReuseRearmsTheRetainedRendererAndCompletesReadiness() {
+        val genericHost = LocalStartupHost(listOf(phone, tnt))
+        val generic = DesktopDisplayCoordinator(
+            host = genericHost,
+            placementStrategy = movableStrategy(),
+        )
+        val epoch = generic.prepareSession("proot", "xfce4", start = true)
+        val readiness = mutableListOf<Result<Unit>>()
+        generic.awaitSessionReady(epoch, readiness::add)
+        generic.openActive {}
+        val phoneRequest = genericHost.launches.single()
+        val retained = attach(generic, genericHost) { phone.id }
+        generic.open(tnt.id, tnt.key) {}
+        assertTrue(generic.consumeSessionStart(retained))
+
+        genericHost.fireTimers()
+        generic.openActive {}
+
+        assertEquals(listOf(phoneRequest.requestId), genericHost.focusRequests)
+        assertEquals(epoch, generic.beginSessionStart(retained))
+        generic.sessionStarted(epoch, Result.success(Unit))
+        assertTrue(readiness.single().isSuccess)
+    }
+
+    @Test
+    fun waiterOnlyRevisionDuringFocusDoesNotInvalidateReuse() {
+        val genericHost = LocalStartupHost(listOf(phone, tnt))
+        val generic = DesktopDisplayCoordinator(
+            host = genericHost,
+            placementStrategy = movableStrategy(),
+        )
+        val epoch = generic.prepareSession("proot", "xfce4", start = true)
+        generic.openActive {}
+        attach(generic, genericHost) { phone.id }
+        val readiness = mutableListOf<Result<Unit>>()
+        val placement = mutableListOf<Result<Unit>>()
+        genericHost.focusAction = {
+            generic.awaitSessionReady(epoch, readiness::add)
+        }
+
+        generic.openActive(placement::add)
+
+        assertTrue(placement.single().isSuccess)
+        assertEquals(1, genericHost.launches.size)
+        generic.sessionStarted(epoch, Result.success(Unit))
+        assertTrue(readiness.single().isSuccess)
+    }
+
+    @Test
+    fun focusReplacementCannotCompleteTheStaleReuseAsSuccess() {
+        val genericHost = LocalStartupHost(listOf(phone, tnt))
+        val generic = DesktopDisplayCoordinator(
+            host = genericHost,
+            placementStrategy = movableStrategy(),
+        )
+        generic.prepareSession("proot", "xfce4", start = true)
+        generic.openActive {}
+        attach(generic, genericHost) { phone.id }
+        var replacementEpoch: Long? = null
+        val placement = mutableListOf<Result<Unit>>()
+        genericHost.focusAction = {
+            replacementEpoch = generic.prepareSession("chroot", "plasma", start = true)
+        }
+
+        generic.openActive(placement::add)
+
+        assertEquals(
+            "SESSION_STOPPED",
+            (placement.single().exceptionOrNull() as DesktopDisplayException).code,
+        )
+        assertEquals(replacementEpoch, generic.sessionGeneration)
+        assertEquals(1, genericHost.launches.size)
+    }
+
+    @Test
+    fun moveAbaDuringClaimCleanupRejectsTheOuterClaim() {
+        val genericHost = LocalStartupHost(listOf(phone))
+        val generic = DesktopDisplayCoordinator(
+            host = genericHost,
+            placementStrategy = movableStrategy(),
+        )
+        generic.prepareSession("proot", "xfce4", start = true)
+        generic.openActive {}
+        attach(
+            coordinator = generic,
+            host = genericHost,
+            detach = {
+                genericHost.launchFailure =
+                    DesktopDisplayException("DISPLAY_NOT_ALLOWED", "nested launch failed")
+                generic.openActive {}
+                genericHost.launchFailure = null
+            },
+        )
+
+        val outer = generic.claim(tnt.id) {}
+
+        assertSame(RendererClaim.Rejected, outer)
+    }
+
+    @Test
+    fun focusMoveAbaCannotCompleteStaleReuseAsSuccess() {
+        val genericHost = LocalStartupHost(listOf(phone))
+        val generic = DesktopDisplayCoordinator(
+            host = genericHost,
+            placementStrategy = movableStrategy(),
+        )
+        generic.prepareSession("proot", "xfce4", start = true)
+        generic.openActive {}
+        attach(generic, genericHost) { phone.id }
+        val nested = mutableListOf<Result<Unit>>()
+        val placement = mutableListOf<Result<Unit>>()
+        genericHost.focusAction = {
+            genericHost.focusAction = null
+            genericHost.focusResult = false
+            genericHost.launchFailure =
+                DesktopDisplayException("DISPLAY_NOT_ALLOWED", "nested launch failed")
+            generic.openActive(nested::add)
+            genericHost.launchFailure = null
+            genericHost.focusResult = true
+        }
+
+        generic.openActive(placement::add)
+
+        assertEquals(
+            "SESSION_STOPPED",
+            (placement.single().exceptionOrNull() as DesktopDisplayException).code,
+        )
+        assertEquals(
+            "DISPLAY_NOT_ALLOWED",
+            (nested.single().exceptionOrNull() as DesktopDisplayException).code,
+        )
+        assertEquals(2, genericHost.launches.size)
+    }
+
+    @Test
     fun changedLaunchIdentityCannotTransferAnUnbegunRendererClaim() {
         val originalEpoch = coordinator.prepareSession("proot", "xfce4", start = true)
         coordinator.openActive(target(tnt)) {}
@@ -966,13 +1118,15 @@ class DisplayLocalStartupTest {
     private fun attach(
         coordinator: DesktopDisplayCoordinator = this.coordinator,
         host: LocalStartupHost = this.host,
+        detach: () -> Unit = {},
         actualDisplay: () -> Int = { host.launches.last().display.id },
-    ) {
+    ): RendererLease {
         val request = host.launches.last()
-        val lease = (coordinator.claim(request.display.id) {} as RendererClaim.Accepted).lease
+        val lease = (coordinator.claim(request.display.id, detach) as RendererClaim.Accepted).lease
         coordinator.registerActivity(lease, request.requestId, actualDisplay) {}
         coordinator.reportGeometry(lease, ProfileKind.MONITOR, PixelSize(1920, 1080))
         coordinator.onAttached(lease, request.requestId, PixelSize(1920, 1080))
+        return lease
     }
 
     private fun movableStrategy(
@@ -999,7 +1153,10 @@ class DisplayLocalStartupTest {
 
 private class LocalStartupHost(var connected: List<DesktopDisplay>) : DesktopDisplayHost {
     val launches = mutableListOf<DesktopLaunchRequest>()
+    val focusRequests = mutableListOf<Long>()
     var launchFailure: DesktopDisplayException? = null
+    var focusAction: (() -> Unit)? = null
+    var focusResult = true
     var currentDisplay: Int? = null
     var running = true
     private val timers = mutableListOf<() -> Unit>()
@@ -1013,7 +1170,11 @@ private class LocalStartupHost(var connected: List<DesktopDisplay>) : DesktopDis
         launches += request
         launchFailure?.let { throw it }
     }
-    override fun focus(requestId: Long) = true
+    override fun focus(requestId: Long): Boolean {
+        focusRequests += requestId
+        focusAction?.invoke()
+        return focusResult
+    }
     override fun cancelLaunch(requestId: Long) {}
     override fun scheduleTimeout(delayMillis: Long, action: () -> Unit): () -> Unit {
         timers += action

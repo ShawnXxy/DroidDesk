@@ -61,6 +61,34 @@ class SessionStartTransferTest {
     }
 
     @Test
+    fun nestedClaimDuringCleanupRejectsTheOuterClaimWithoutErasingGeometry() {
+        val coordinator = DesktopDisplayCoordinator(host = TransferDisplayHost())
+        lateinit var nested: RendererLease
+        coordinator.claim(0) {
+            nested = (coordinator.claim(0) {} as RendererClaim.Accepted).lease
+            coordinator.reportGeometry(nested, ProfileKind.PHONE, PixelSize(1280, 720))
+        }
+
+        val outer = coordinator.claim(7) {}
+
+        assertSame(RendererClaim.Rejected, outer)
+        assertTrue(coordinator.isCurrent(nested))
+        assertEquals(1280, coordinator.snapshot()["renderWidth"])
+        assertEquals(720, coordinator.snapshot()["renderHeight"])
+    }
+
+    @Test
+    fun stopDuringClaimCleanupReturnsRejectedInsteadOfThrowing() {
+        val coordinator = DesktopDisplayCoordinator()
+        coordinator.claim(0) { coordinator.stop() }
+
+        val replacement = coordinator.claim(7) {}
+
+        assertSame(RendererClaim.Rejected, replacement)
+        assertTrue(coordinator.isStopped)
+    }
+
+    @Test
     fun supersededAttemptCannotCompleteAReentrantReplacement() {
         val coordinator = DesktopDisplayCoordinator()
         val originalEpoch = coordinator.prepareSession("proot", "xfce4", true)
@@ -499,6 +527,20 @@ class SessionStartTransferTest {
         assertTrue(outcomes.single().isSuccess)
         assertFalse(controller.hasPendingRestart)
     }
+}
+
+private class TransferDisplayHost : DesktopDisplayHost {
+    private val phone = DesktopDisplay(0, "phone", "Phone", true, true, null)
+
+    override fun currentDisplay() = phone
+    override fun displays() = listOf(phone)
+    override fun defaultProfileKind() = ProfileKind.PHONE
+    override fun sessionRunning() = true
+    override fun launch(request: DesktopLaunchRequest) {}
+    override fun focus(requestId: Long) = true
+    override fun cancelLaunch(requestId: Long) {}
+    override fun scheduleTimeout(delayMillis: Long, action: () -> Unit): () -> Unit = {}
+    override fun notifyReturnRequired(error: DesktopDisplayException) {}
 }
 
 private class RestartHost(
