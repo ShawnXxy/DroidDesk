@@ -119,6 +119,299 @@ class DisplayLocalStartupTest {
     }
 
     @Test
+    fun beginAndPrepareUseTheReservedEpochAndRequestedLaunchSpec() {
+        val initialEpoch = coordinator.sessionGeneration
+
+        val reservedEpoch = coordinator.beginSession()
+        val preparedEpoch = coordinator.prepareSession(
+            "chroot",
+            "plasma",
+            start = true,
+            expectedEpoch = reservedEpoch,
+        )
+        coordinator.openActive(target(tnt)) {}
+
+        val request = host.launches.single()
+        assertTrue(reservedEpoch > initialEpoch)
+        assertEquals(reservedEpoch, preparedEpoch)
+        assertEquals(reservedEpoch, request.sessionGeneration)
+        assertEquals("chroot", request.mode)
+        assertEquals("plasma", request.desktopEnv)
+    }
+
+    @Test
+    fun beginSessionReturnsItsOwnReservationAcrossNestedPublication() {
+        coordinator.openActive(target(tnt)) {}
+        attach()
+        var nested = false
+        var nestedEpoch: Long? = null
+        coordinator.subscribe {
+            if (!nested) {
+                nested = true
+                nestedEpoch = coordinator.beginSession()
+                coordinator.prepareSession(
+                    "chroot",
+                    "plasma",
+                    start = true,
+                    expectedEpoch = nestedEpoch,
+                )
+            }
+        }
+
+        val outerEpoch = coordinator.beginSession()
+
+        assertTrue(checkNotNull(nestedEpoch) > outerEpoch)
+        assertFalse(coordinator.isSessionCurrent(outerEpoch))
+        assertEquals(nestedEpoch, coordinator.sessionGeneration)
+    }
+
+    @Test
+    fun noStartRetryAdvancesPastASettledStartupFailure() {
+        val failedEpoch = coordinator.prepareSession("proot", "xfce4", start = true)
+        coordinator.sessionStarted(
+            failedEpoch,
+            Result.failure(IllegalStateException("runtime exited")),
+        )
+
+        val recoveredEpoch = coordinator.prepareSession("proot", "xfce4", start = false)
+        val repeatedEpoch = coordinator.prepareSession("proot", "xfce4", start = false)
+        val readiness = mutableListOf<Result<Unit>>()
+        coordinator.awaitSessionReady(recoveredEpoch, readiness::add)
+
+        assertTrue(recoveredEpoch > failedEpoch)
+        assertEquals(recoveredEpoch, repeatedEpoch)
+        assertNull(coordinator.sessionFailure)
+        assertTrue(readiness.single().isSuccess)
+    }
+
+    @Test
+    fun noStartRetryConsumesAnExplicitReservationAfterFailure() {
+        val failedEpoch = coordinator.prepareSession("proot", "xfce4", start = true)
+        coordinator.sessionStarted(
+            failedEpoch,
+            Result.failure(IllegalStateException("runtime exited")),
+        )
+        val reservedEpoch = coordinator.beginSession()
+
+        val recoveredEpoch = coordinator.prepareSession(
+            "proot",
+            "xfce4",
+            start = false,
+            expectedEpoch = reservedEpoch,
+        )
+
+        assertTrue(reservedEpoch > failedEpoch)
+        assertEquals(reservedEpoch, recoveredEpoch)
+        assertNull(coordinator.sessionFailure)
+        assertNotEquals("error", coordinator.snapshot()["phase"])
+    }
+
+    @Test
+    fun incompatibleNoStartSpecUsesATypedCoordinatorFailure() {
+        val epoch = coordinator.prepareSession("proot", "xfce4", start = true)
+        coordinator.sessionStarted(epoch, Result.success(Unit))
+
+        val failure = assertThrows(DesktopDisplayException::class.java) {
+            coordinator.prepareSession("chroot", "plasma", start = false)
+        }
+
+        assertEquals("INVALID_ARGUMENT", failure.code)
+    }
+
+    @Test
+    fun readinessQueuesCompletesImmediatelyAndRejectsAStaleEpoch() {
+        val epoch = coordinator.prepareSession("proot", "xfce4", start = true)
+        val queued = mutableListOf<Result<Unit>>()
+        coordinator.awaitSessionReady(epoch, queued::add)
+        assertTrue(queued.isEmpty())
+
+        coordinator.sessionStarted(epoch, Result.success(Unit))
+        val immediate = mutableListOf<Result<Unit>>()
+        coordinator.awaitSessionReady(epoch, immediate::add)
+        val nextEpoch = coordinator.beginSession()
+        val stale = mutableListOf<Result<Unit>>()
+        coordinator.awaitSessionReady(epoch, stale::add)
+
+        assertTrue(queued.single().isSuccess)
+        assertTrue(immediate.single().isSuccess)
+        assertTrue(nextEpoch > epoch)
+        assertEquals(
+            "SESSION_STOPPED",
+            (stale.single().exceptionOrNull() as DesktopDisplayException).code,
+        )
+    }
+
+    @Test
+    fun sessionStartObserversIgnoreStaleAndDuplicateResults() {
+        val observed = mutableListOf<Result<Unit>>()
+        coordinator.subscribeSessionStart(observed::add)
+        val epoch = coordinator.prepareSession("proot", "xfce4", start = true)
+
+        coordinator.sessionStarted(epoch - 1, Result.failure(IllegalStateException("stale")))
+        coordinator.sessionStarted(epoch, Result.success(Unit))
+        coordinator.sessionStarted(epoch, Result.failure(IllegalStateException("duplicate")))
+
+        assertEquals(1, observed.size)
+        assertTrue(observed.single().isSuccess)
+        assertNull(coordinator.sessionFailure)
+    }
+
+    @Test
+    fun sameSpecNoStartRecoveryStillRefreshesAutomaticOpening() {
+        val genericHost = LocalStartupHost(listOf(phone, tnt))
+        val generic = DesktopDisplayCoordinator(
+            host = genericHost,
+            placementStrategy = movableStrategy(),
+        )
+        val epoch = generic.prepareSession("proot", "xfce4", start = true)
+        generic.awaitSessionReady(epoch) {
+            generic.prepareSession("proot", "xfce4", start = false)
+        }
+
+        generic.sessionStarted(epoch, Result.success(Unit))
+        genericHost.fireTimers()
+
+        assertEquals(listOf(tnt.id), genericHost.launches.map { it.display.id })
+    }
+
+    @Test
+    fun reservingANewEpochRetiresThePendingAutomaticOpeningTimer() {
+        val genericHost = LocalStartupHost(listOf(phone, tnt))
+        val generic = DesktopDisplayCoordinator(
+            host = genericHost,
+            placementStrategy = movableStrategy(),
+        )
+        generic.onDisplaysChanged()
+        val reservedEpoch = generic.beginSession()
+        generic.prepareSession(
+            "termux",
+            "xfce4",
+            start = false,
+            expectedEpoch = reservedEpoch,
+        )
+
+        generic.onDisplaysChanged()
+        genericHost.fireTimers()
+
+        assertEquals(listOf(tnt.id), genericHost.launches.map { it.display.id })
+    }
+
+    @Test
+    fun preparingANewStartRetiresThePendingAutomaticOpeningTimer() {
+        val genericHost = LocalStartupHost(listOf(phone, tnt))
+        val generic = DesktopDisplayCoordinator(
+            host = genericHost,
+            placementStrategy = movableStrategy(),
+        )
+        generic.onDisplaysChanged()
+
+        val epoch = generic.prepareSession("proot", "xfce4", start = true)
+        generic.sessionStarted(epoch, Result.success(Unit))
+        genericHost.fireTimers()
+
+        assertEquals(listOf(tnt.id), genericHost.launches.map { it.display.id })
+    }
+
+    @Test
+    fun observersSeeTheFailedEpochBeforeStateSubscribersRecoverTheSession() {
+        val failedEpoch = coordinator.prepareSession("proot", "xfce4", true)
+        val observedEpochs = mutableListOf<Long>()
+        coordinator.subscribeSessionStart { observedEpochs += coordinator.sessionGeneration }
+        var recoveredEpoch: Long? = null
+        var recovered = false
+        coordinator.subscribe {
+            if (!recovered && coordinator.sessionFailure != null) {
+                recovered = true
+                recoveredEpoch = coordinator.prepareSession("proot", "xfce4", false)
+            }
+        }
+
+        coordinator.sessionStarted(
+            failedEpoch,
+            Result.failure(IllegalStateException("runtime exited")),
+        )
+
+        assertEquals(listOf(failedEpoch), observedEpochs)
+        assertTrue(checkNotNull(recoveredEpoch) > failedEpoch)
+    }
+
+    @Test
+    fun sessionStartObserverCanReservePrepareAwaitAndLaunchAReplacement() {
+        val originalEpoch = coordinator.prepareSession("proot", "xfce4", true)
+        val readiness = mutableListOf<Result<Unit>>()
+        var replacementEpoch: Long? = null
+        coordinator.subscribeSessionStart {
+            val reservedEpoch = coordinator.beginSession()
+            replacementEpoch = coordinator.prepareSession(
+                "chroot",
+                "plasma",
+                start = true,
+                expectedEpoch = reservedEpoch,
+            )
+            coordinator.awaitSessionReady(checkNotNull(replacementEpoch), readiness::add)
+            coordinator.openActive(target(tnt)) {}
+        }
+
+        coordinator.sessionStarted(originalEpoch, Result.success(Unit))
+
+        assertTrue(readiness.isEmpty())
+        assertEquals(
+            replacementEpoch,
+            host.launches.single().sessionGeneration,
+        )
+    }
+
+    @Test
+    fun waiterRegistrationDoesNotSuppressReplacementStartupUpdates() {
+        val originalEpoch = coordinator.prepareSession("proot", "xfce4", true)
+        val lease = (coordinator.claim(phone.id) {} as RendererClaim.Accepted).lease
+        var refreshes = 0
+        coordinator.setProfileRefresher(lease) { completion ->
+            refreshes++
+            completion(Result.success(Unit))
+        }
+        val readiness = mutableListOf<Result<Unit>>()
+        coordinator.awaitSessionReady(originalEpoch) {
+            coordinator.awaitSessionReady(coordinator.sessionGeneration, readiness::add)
+        }
+        var publications = 0
+        val unsubscribe = coordinator.subscribe { publications++ }
+
+        val replacementEpoch = coordinator.prepareSession("chroot", "plasma", true)
+        unsubscribe()
+
+        assertTrue(readiness.isEmpty())
+        assertTrue(coordinator.isSessionCurrent(replacementEpoch))
+        assertEquals(1, refreshes)
+        assertEquals(1, publications)
+    }
+
+    @Test
+    fun observerRegisteredByReentrantPublicationDoesNotReceiveTheOldResult() {
+        val epoch = coordinator.prepareSession("proot", "xfce4", start = true)
+        val observed = mutableListOf<Result<Unit>>()
+        var replacementEpoch: Long? = null
+        var replaced = false
+        coordinator.subscribe {
+            if (!replaced && !coordinator.isStarting) {
+                replaced = true
+                replacementEpoch = coordinator.prepareSession("chroot", "plasma", start = true)
+                coordinator.subscribeSessionStart(observed::add)
+            }
+        }
+
+        coordinator.sessionStarted(epoch, Result.success(Unit))
+
+        assertTrue(observed.isEmpty())
+        val failure = IllegalStateException("replacement failed")
+        coordinator.sessionStarted(
+            checkNotNull(replacementEpoch),
+            Result.failure(failure),
+        )
+        assertSame(failure, observed.single().exceptionOrNull())
+    }
+
+    @Test
     fun startupTargetUsesTheSelectedPlacementEnvironment() {
         val local = DesktopDisplayCoordinator(
             host = LocalStartupHost(listOf(phone, tnt)),
@@ -615,6 +908,55 @@ class DisplayLocalStartupTest {
         coordinator.sessionStarted(epoch, Result.failure(failure))
         assertEquals(1, results.size)
         assertSame(failure, results.single().exceptionOrNull())
+    }
+
+    @Test
+    fun cachedReadinessSuccessRequiresTheRuntimeToStillBeRunning() {
+        val epoch = coordinator.prepareSession("termux", "xfce4", true)
+        coordinator.sessionStarted(epoch, Result.success(Unit))
+        host.running = false
+        val results = mutableListOf<Result<Unit>>()
+
+        coordinator.awaitSessionReady(epoch, results::add)
+
+        assertEquals(
+            "SESSION_STOPPED",
+            (results.single().exceptionOrNull() as DesktopDisplayException).code,
+        )
+    }
+
+    @Test
+    fun failedStopCannotReportReadinessForItsCurrentEpoch() {
+        coordinator.startStopping()
+        coordinator.finishStopping(IllegalStateException("runtime refused to stop"))
+        val results = mutableListOf<Result<Unit>>()
+
+        coordinator.awaitSessionReady(coordinator.sessionGeneration, results::add)
+
+        assertEquals(
+            "SESSION_STOPPED",
+            (results.single().exceptionOrNull() as DesktopDisplayException).code,
+        )
+    }
+
+    @Test
+    fun changedLaunchIdentityCannotTransferAnUnbegunRendererClaim() {
+        val originalEpoch = coordinator.prepareSession("proot", "xfce4", start = true)
+        coordinator.openActive(target(tnt)) {}
+        val request = host.launches.single()
+        val first = (coordinator.claim(tnt.id) {} as RendererClaim.Accepted).lease
+        coordinator.registerActivity(first, request.requestId) {}
+        coordinator.onAttached(first, request.requestId, PixelSize(1920, 1080))
+        assertTrue(coordinator.consumeSessionStart(first))
+
+        val replacementEpoch = coordinator.prepareSession("chroot", "plasma", start = true)
+        val replacement = (coordinator.claim(tnt.id) {} as RendererClaim.Accepted).lease
+        coordinator.registerActivity(replacement, request.requestId) {}
+
+        assertTrue(replacementEpoch > originalEpoch)
+        assertFalse(coordinator.consumeSessionStart(replacement))
+        assertNull(coordinator.beginSessionStart(first))
+        assertNull(coordinator.beginSessionStart(replacement))
     }
 
     private fun target(display: DesktopDisplay) = DesktopStartupTarget(
