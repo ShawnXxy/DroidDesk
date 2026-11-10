@@ -85,6 +85,37 @@ class SessionStartTransferTest {
     }
 
     @Test
+    fun startupObserversKeepTheOldResultWhenReadinessReentrantlyRetries() {
+        val coordinator = DesktopDisplayCoordinator()
+        val failedEpoch = coordinator.prepareSession("proot", "xfce4", true)
+        val readiness = mutableListOf<Result<Unit>>()
+        val observed = mutableListOf<Result<Unit>>()
+        val retry = mutableListOf<Result<Unit>>()
+        var retryEpoch: Long? = null
+        coordinator.subscribeSessionStart(observed::add)
+        coordinator.awaitSessionReady(failedEpoch) { result ->
+            readiness += result
+            retryEpoch = coordinator.prepareSession("chroot", "plasma", true)
+            coordinator.awaitSessionReady(checkNotNull(retryEpoch), retry::add)
+            coordinator.sessionStarted(checkNotNull(retryEpoch), Result.success(Unit))
+        }
+        val failure = IllegalStateException("runtime exited")
+
+        coordinator.sessionStarted(failedEpoch, Result.failure(failure))
+        coordinator.sessionStarted(
+            failedEpoch,
+            Result.failure(IllegalStateException("duplicate old result")),
+        )
+
+        assertSame(failure, readiness.single().exceptionOrNull())
+        assertTrue(checkNotNull(retryEpoch) > failedEpoch)
+        assertTrue(retry.single().isSuccess)
+        assertEquals(2, observed.size)
+        assertSame(failure, observed.first().exceptionOrNull())
+        assertTrue(observed.last().isSuccess)
+    }
+
+    @Test
     fun oldWaitersKeepTheirResultWhenLaterWaiterStopsTheRetry() {
         val coordinator = DesktopDisplayCoordinator()
         val failedEpoch = coordinator.prepareSession("proot", "xfce4", true)

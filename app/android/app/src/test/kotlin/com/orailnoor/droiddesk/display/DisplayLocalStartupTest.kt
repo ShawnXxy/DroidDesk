@@ -850,6 +850,342 @@ class DisplayLocalStartupTest {
     }
 
     @Test
+    fun newStartupCancelsADifferentPendingMoveBeforeItsReentrantCompletion() {
+        val genericHost = LocalStartupHost(listOf(phone, tnt))
+        val generic = DesktopDisplayCoordinator(
+            host = genericHost,
+            placementStrategy = movableStrategy(),
+        )
+        val firstEpoch = generic.prepareSession("proot", "xfce4", start = true)
+        generic.openActive {}
+        val retained = attach(generic, genericHost) { phone.id }
+        generic.sessionStarted(firstEpoch, Result.success(Unit))
+        val placement = mutableListOf<Result<Unit>>()
+        var nestedEpoch: Long? = null
+        generic.open(tnt.id, tnt.key) { result ->
+            placement += result
+            nestedEpoch = generic.prepareSession("termux", "xfce4", start = true)
+        }
+        val pendingRequest = genericHost.launches.last()
+
+        val replacementEpoch = generic.prepareSession("chroot", "plasma", start = true)
+        genericHost.fireTimers()
+
+        assertEquals(1, placement.size)
+        assertEquals(
+            "SESSION_STOPPED",
+            (placement.single().exceptionOrNull() as DesktopDisplayException).code,
+        )
+        assertEquals(listOf(pendingRequest.requestId), genericHost.cancelledRequests)
+        assertTrue(checkNotNull(nestedEpoch) > replacementEpoch)
+        assertEquals(nestedEpoch, generic.sessionGeneration)
+        assertTrue(generic.isCurrent(retained))
+    }
+
+    @Test
+    fun reservedEpochCancelsThePendingMoveBeforeNoStartPreparation() {
+        val genericHost = LocalStartupHost(listOf(phone, tnt))
+        val generic = DesktopDisplayCoordinator(
+            host = genericHost,
+            placementStrategy = movableStrategy(),
+        )
+        val placement = mutableListOf<Result<Unit>>()
+        generic.open(tnt.id, tnt.key, placement::add)
+        val pendingRequest = genericHost.launches.single()
+
+        val reservedEpoch = generic.beginSession()
+        val preparedEpoch = generic.prepareSession(
+            "termux",
+            "xfce4",
+            start = false,
+            expectedEpoch = reservedEpoch,
+        )
+        genericHost.fireTimers()
+
+        assertEquals(reservedEpoch, preparedEpoch)
+        assertEquals(
+            "SESSION_STOPPED",
+            (placement.single().exceptionOrNull() as DesktopDisplayException).code,
+        )
+        assertEquals(listOf(pendingRequest.requestId), genericHost.cancelledRequests)
+    }
+
+    @Test
+    fun noStartRetryCancelsTheMoveInvalidatedByItsNewEpoch() {
+        val genericHost = LocalStartupHost(listOf(phone, tnt))
+        val generic = DesktopDisplayCoordinator(
+            host = genericHost,
+            placementStrategy = movableStrategy(),
+        )
+        val failedEpoch = generic.prepareSession("proot", "xfce4", start = true)
+        generic.sessionStarted(failedEpoch, Result.failure(IllegalStateException("runtime exited")))
+        val placement = mutableListOf<Result<Unit>>()
+        generic.open(tnt.id, tnt.key, placement::add)
+        val pendingRequest = genericHost.launches.single()
+
+        val retryEpoch = generic.prepareSession("proot", "xfce4", start = false)
+        genericHost.fireTimers()
+
+        assertTrue(retryEpoch > failedEpoch)
+        assertEquals(
+            "SESSION_STOPPED",
+            (placement.single().exceptionOrNull() as DesktopDisplayException).code,
+        )
+        assertEquals(listOf(pendingRequest.requestId), genericHost.cancelledRequests)
+    }
+
+    @Test
+    fun startupReplacementRetiresAClaimedMoveAndItsPreviousOwnerExactlyOnce() {
+        val genericHost = LocalStartupHost(listOf(phone, tnt))
+        val generic = DesktopDisplayCoordinator(
+            host = genericHost,
+            placementStrategy = movableStrategy(),
+        )
+        var previousFinished = 0
+        var intermediateFinished = 0
+        var incomingFinished = 0
+        generic.openActive {}
+        val phoneRequest = genericHost.launches.single()
+        val previous = generic.claim(phone.id) {}
+        generic.registerActivity(previous, phoneRequest.requestId, { phone.id }) {
+            previousFinished++
+        }
+        generic.onAttached(previous, phoneRequest.requestId, PixelSize(1920, 1080))
+        val placement = mutableListOf<Result<Unit>>()
+        generic.open(tnt.id, tnt.key, placement::add)
+        val pendingRequest = genericHost.launches.last()
+        val intermediate = generic.claim(tnt.id) {}
+        generic.registerActivity(intermediate, pendingRequest.requestId, { tnt.id }) {
+            intermediateFinished++
+        }
+        val incoming = generic.claim(tnt.id) {}
+        generic.registerActivity(incoming, pendingRequest.requestId, { tnt.id }) {
+            incomingFinished++
+        }
+
+        generic.prepareSession("chroot", "plasma", start = true)
+        genericHost.fireTimers()
+
+        assertEquals(
+            "SESSION_STOPPED",
+            (placement.single().exceptionOrNull() as DesktopDisplayException).code,
+        )
+        assertEquals(1, incomingFinished)
+        assertEquals(1, intermediateFinished)
+        assertEquals(1, previousFinished)
+        assertFalse(generic.isCurrent(incoming))
+        assertEquals(listOf(pendingRequest.requestId), genericHost.cancelledRequests)
+    }
+
+    @Test
+    fun reentrantRetirementRecognizesAClaimBeforeActivityRegistration() {
+        val genericHost = LocalStartupHost(listOf(phone, tnt))
+        val generic = DesktopDisplayCoordinator(
+            host = genericHost,
+            placementStrategy = movableStrategy(),
+        )
+        var previousFinished = 0
+        generic.openActive {}
+        val phoneRequest = genericHost.launches.single()
+        val previous = generic.claim(phone.id) {}
+        generic.registerActivity(previous, phoneRequest.requestId, { phone.id }) {
+            previousFinished++
+        }
+        generic.onAttached(previous, phoneRequest.requestId, PixelSize(1920, 1080))
+        val placement = mutableListOf<Result<Unit>>()
+        generic.open(tnt.id, tnt.key, placement::add)
+        val pendingRequest = genericHost.launches.last()
+        var replacementEpoch: Long? = null
+        var reentered = false
+        generic.subscribe {
+            if (!reentered) {
+                reentered = true
+                replacementEpoch = generic.prepareSession("chroot", "plasma", start = true)
+            }
+        }
+
+        var claimReturned = false
+        var registrationReturned = false
+        var incomingDetached = 0
+        val incoming = generic.claim(tnt.id) {
+            assertTrue(claimReturned)
+            assertTrue(registrationReturned)
+            incomingDetached++
+        }
+        claimReturned = true
+        generic.registerActivity(incoming, pendingRequest.requestId, { tnt.id }) {}
+        registrationReturned = true
+        generic.reportGeometry(incoming, ProfileKind.MONITOR, PixelSize(1920, 1080))
+        genericHost.fireTimers()
+
+        assertTrue(checkNotNull(replacementEpoch) > pendingRequest.sessionGeneration)
+        assertEquals(
+            "SESSION_STOPPED",
+            (placement.single().exceptionOrNull() as DesktopDisplayException).code,
+        )
+        assertFalse(generic.isCurrent(incoming))
+        assertEquals(1, incomingDetached)
+        assertEquals(1, previousFinished)
+        assertEquals(listOf(pendingRequest.requestId), genericHost.cancelledRequests)
+    }
+
+    @Test
+    fun moveFailureDoesNotRecoverAfterItsCompletionReservesANewerEpoch() {
+        val genericHost = LocalStartupHost(listOf(phone, tnt))
+        val generic = DesktopDisplayCoordinator(
+            host = genericHost,
+            placementStrategy = movableStrategy(),
+        )
+        val epoch = generic.prepareSession("proot", "xfce4", start = true)
+        generic.openActive {}
+        attach(generic, genericHost) { phone.id }
+        var reservedEpoch: Long? = null
+        generic.open(tnt.id, tnt.key) {
+            reservedEpoch = generic.beginSession()
+        }
+
+        genericHost.fireTimers()
+
+        assertTrue(checkNotNull(reservedEpoch) > epoch)
+        assertEquals(reservedEpoch, generic.sessionGeneration)
+        assertEquals(listOf(phone.id, tnt.id), genericHost.launches.map { it.display.id })
+    }
+
+    @Test
+    fun previousOwnerCleanupCannotReplaceTheSessionBeforeClaimReturns() {
+        val genericHost = LocalStartupHost(listOf(phone, tnt))
+        val generic = DesktopDisplayCoordinator(
+            host = genericHost,
+            placementStrategy = movableStrategy(),
+        )
+        var replacementEpoch: Long? = null
+        generic.openActive {}
+        val phoneRequest = genericHost.launches.single()
+        val previous = generic.claim(phone.id) {
+            replacementEpoch = generic.prepareSession("chroot", "plasma", start = true)
+        }
+        generic.registerActivity(previous, phoneRequest.requestId, { phone.id }) {}
+        generic.onAttached(previous, phoneRequest.requestId, PixelSize(1920, 1080))
+        generic.open(tnt.id, tnt.key) {}
+
+        val incoming = generic.claim(tnt.id) {}
+
+        assertNull(replacementEpoch)
+        assertTrue(generic.isCurrent(incoming))
+        genericHost.fireTimers()
+        assertNotNull(replacementEpoch)
+        assertFalse(generic.isCurrent(incoming))
+    }
+
+    @Test
+    fun fallbackFocusRestoresTheActiveAttemptsRendererIdentity() {
+        val genericHost = LocalStartupHost(listOf(phone, tnt))
+        val generic = DesktopDisplayCoordinator(
+            host = genericHost,
+            placementStrategy = movableStrategy(),
+        )
+        val epoch = generic.prepareSession("proot", "xfce4", start = true)
+        generic.openActive {}
+        val phoneRequest = genericHost.launches.single()
+        val retained = attach(generic, genericHost) { phone.id }
+        generic.open(tnt.id, tnt.key) {}
+
+        genericHost.fireTimers()
+
+        assertEquals(listOf(phoneRequest.requestId), genericHost.focusRequests)
+        assertTrue(generic.consumeSessionStart(retained))
+        assertEquals(epoch, generic.beginSessionStart(retained))
+    }
+
+    @Test
+    fun terminalPlacementFailureSettlesObserversBeforeReentrantRetry() {
+        val epoch = coordinator.prepareSession("proot", "xfce4", start = true)
+        val readiness = mutableListOf<Result<Unit>>()
+        val observed = mutableListOf<Result<Unit>>()
+        val placement = mutableListOf<Result<Unit>>()
+        val retryReadiness = mutableListOf<Result<Unit>>()
+        var retryEpoch: Long? = null
+        coordinator.awaitSessionReady(epoch, readiness::add)
+        coordinator.subscribeSessionStart(observed::add)
+        coordinator.openActive(target(tnt)) { result ->
+            placement += result
+            retryEpoch = coordinator.prepareSession("chroot", "plasma", start = true)
+            coordinator.awaitSessionReady(checkNotNull(retryEpoch), retryReadiness::add)
+            coordinator.sessionStarted(checkNotNull(retryEpoch), Result.success(Unit))
+        }
+
+        host.fireTimers()
+        host.fireTimers()
+
+        val placementFailure = placement.single().exceptionOrNull()
+        assertEquals("PLACEMENT_TIMEOUT", (placementFailure as DesktopDisplayException).code)
+        assertSame(placementFailure, readiness.single().exceptionOrNull())
+        assertTrue(checkNotNull(retryEpoch) > epoch)
+        assertEquals(retryEpoch, coordinator.sessionGeneration)
+        assertTrue(retryReadiness.single().isSuccess)
+        assertEquals(2, observed.size)
+        assertSame(placementFailure, observed.first().exceptionOrNull())
+        assertTrue(observed.last().isSuccess)
+    }
+
+    @Test
+    fun runtimeFailureQueuesItsObserversBeforeReentrantStatePublication() {
+        val epoch = coordinator.prepareSession("proot", "xfce4", start = true)
+        val observed = mutableListOf<Result<Unit>>()
+        var retryEpoch: Long? = null
+        var reentered = false
+        coordinator.subscribeSessionStart(observed::add)
+        coordinator.subscribe {
+            if (!reentered && coordinator.sessionFailure != null) {
+                reentered = true
+                retryEpoch = coordinator.prepareSession("chroot", "plasma", start = true)
+                coordinator.sessionStarted(checkNotNull(retryEpoch), Result.success(Unit))
+            }
+        }
+        val failure = IllegalStateException("runtime exited")
+
+        coordinator.sessionStarted(epoch, Result.failure(failure))
+
+        assertTrue(checkNotNull(retryEpoch) > epoch)
+        assertEquals(2, observed.size)
+        assertSame(failure, observed.first().exceptionOrNull())
+        assertTrue(observed.last().isSuccess)
+    }
+
+    @Test
+    fun claimedTerminalFailureSettlesBeforeReentrantStatePublication() {
+        val epoch = coordinator.prepareSession("proot", "xfce4", start = true)
+        val readiness = mutableListOf<Result<Unit>>()
+        val observed = mutableListOf<Result<Unit>>()
+        val placement = mutableListOf<Result<Unit>>()
+        coordinator.awaitSessionReady(epoch, readiness::add)
+        coordinator.subscribeSessionStart(observed::add)
+        coordinator.openActive(target(tnt), placement::add)
+        val request = host.launches.single()
+        val incoming = coordinator.claim(tnt.id) {}
+        coordinator.registerActivity(incoming, request.requestId, { tnt.id }) {}
+        var retryEpoch: Long? = null
+        var reentered = false
+        coordinator.subscribe {
+            if (!reentered) {
+                reentered = true
+                retryEpoch = coordinator.prepareSession("chroot", "plasma", start = true)
+                coordinator.sessionStarted(checkNotNull(retryEpoch), Result.success(Unit))
+            }
+        }
+
+        host.fireTimers()
+
+        val placementFailure = placement.single().exceptionOrNull()
+        assertEquals("PLACEMENT_TIMEOUT", (placementFailure as DesktopDisplayException).code)
+        assertSame(placementFailure, readiness.single().exceptionOrNull())
+        assertTrue(checkNotNull(retryEpoch) > epoch)
+        assertEquals(2, observed.size)
+        assertSame(placementFailure, observed.first().exceptionOrNull())
+        assertTrue(observed.last().isSuccess)
+    }
+
+    @Test
     fun failedRelaunchSettlesTheAttemptWithoutRemovingTheRetainedRenderer() {
         coordinator.openActive(target(tnt)) {}
         val retained = attach()
@@ -935,6 +1271,8 @@ class DisplayLocalStartupTest {
 
 private class LocalStartupHost(var connected: List<DesktopDisplay>) : DesktopDisplayHost {
     val launches = mutableListOf<DesktopLaunchRequest>()
+    val focusRequests = mutableListOf<Long>()
+    val cancelledRequests = mutableListOf<Long>()
     var launchFailure: DesktopDisplayException? = null
     var currentDisplay: Int? = null
     var running = true
@@ -949,10 +1287,15 @@ private class LocalStartupHost(var connected: List<DesktopDisplay>) : DesktopDis
         launches += request
         launchFailure?.let { throw it }
     }
-    override fun focus(requestId: Long) = true
-    override fun cancelLaunch(requestId: Long) {}
+    override fun focus(requestId: Long): Boolean {
+        focusRequests += requestId
+        return true
+    }
+    override fun cancelLaunch(requestId: Long) {
+        cancelledRequests += requestId
+    }
     override fun scheduleTimeout(delayMillis: Long, action: () -> Unit): () -> Unit {
-        timers += action
+        if (delayMillis == 0L) timers.add(0, action) else timers += action
         return { timers.remove(action); Unit }
     }
     override fun notifyReturnRequired(error: DesktopDisplayException) {}

@@ -14,6 +14,7 @@ import com.orailnoor.droiddesk.display.placement.PlacementSelection
 import com.orailnoor.droiddesk.display.placement.PlacementSelectionSource
 import com.orailnoor.droiddesk.service.DesktopStopReason
 import com.orailnoor.droiddesk.service.DroidDeskService
+import java.util.ArrayDeque
 import java.util.WeakHashMap
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -134,6 +135,11 @@ class DesktopDisplayCoordinator(
         var result: Result<Unit>? = null, var failure: DesktopDisplayException? = null,
         val waiters: MutableList<(Result<Unit>) -> Unit> = mutableListOf(),
     )
+    private data class StartupResultDelivery(
+        val waiters: List<(Result<Unit>) -> Unit>,
+        val listeners: List<(Result<Unit>) -> Unit>,
+        val result: Result<Unit>,
+    )
     private data class Move(
         val request: DesktopLaunchRequest,
         val completion: (Result<Unit>) -> Unit,
@@ -141,6 +147,11 @@ class DesktopDisplayCoordinator(
         val previousTarget: DesktopDisplay?,
         val recovery: Boolean,
         var cancelTimeout: () -> Unit = {},
+    )
+    private data class MoveRetirement(
+        val move: Move,
+        val incoming: Owner?,
+        val previous: Owner?,
     )
     private data class BoundActivityDisplay(
         val displayId: Int?,
@@ -158,6 +169,8 @@ class DesktopDisplayCoordinator(
     private val originalActivityOrientations = WeakHashMap<Activity, Int>()
     private val listeners = mutableSetOf<(Map<String, Any?>) -> Unit>()
     private val sessionStartListeners = mutableSetOf<(Result<Unit>) -> Unit>()
+    private val startupResultDeliveries = ArrayDeque<StartupResultDelivery>()
+    private var deliveringStartupResults = false
     private var appliedKind: ProfileKind? = null
     private var renderSize: PixelSize? = null
     private var profileRefresher: (((Result<Unit>) -> Unit) -> Unit)? = null
@@ -242,6 +255,7 @@ class DesktopDisplayCoordinator(
         val advance = isStopped || reservedStartupEpoch != null || startupAttempt != null ||
             acceptedLaunchIdentity != null || move != null || owner != null
         val invalidated = Result.failure<Unit>(DesktopDisplayException("SESSION_STOPPED", "The Linux startup was replaced"))
+        val invalidatedMove = if (advance) reserveMoveRetirement() else null
         val invalidatedWaiters = startupAttempt?.takeIf { advance && it.result == null }?.let { settleStartupAttempt(it, invalidated) }.orEmpty()
         if (isStopped) { isStopped = false; phase = "hidden"; error = null }
         if (advance) sessionGeneration++
@@ -249,6 +263,7 @@ class DesktopDisplayCoordinator(
         reservedStartupEpoch = epoch
         if (advance) publish()
         completeStartupWaiters(invalidatedWaiters, invalidated)
+        invalidatedMove?.let { completeMoveRetirement(it, invalidated) }
         return epoch
     }
 
@@ -264,20 +279,22 @@ class DesktopDisplayCoordinator(
         }
         if (pendingStops > 0) throw DesktopDisplayException("SESSION_STOPPED", "Desktop teardown is still finishing")
         if (!start) {
-            val failedAttempt = startupAttempt?.takeIf { it.failure != null }; val epoch = if (isStopped) beginSession() else if (reservedStartupEpoch == expectedEpoch && expectedEpoch != null) expectedEpoch else if (failedAttempt != null) ++sessionGeneration else sessionGeneration
+            val failedAttempt = startupAttempt?.takeIf { it.failure != null }
+            val usesReservedEpoch = reservedStartupEpoch == expectedEpoch && expectedEpoch != null
+            val advancesFailedAttempt = !isStopped && !usesReservedEpoch && failedAttempt != null
+            val superseded = Result.failure<Unit>(DesktopDisplayException("SESSION_STOPPED", "The Linux startup was replaced"))
+            val supersededMove = if (advancesFailedAttempt) reserveMoveRetirement() else null
+            val epoch = if (isStopped) beginSession() else if (usesReservedEpoch) expectedEpoch else if (advancesFailedAttempt) ++sessionGeneration else sessionGeneration
             failedAttempt?.let { if (error === it.failure) { error = null; phase = if (owner == null) "hidden" else "attached" }; startupAttempt = null }
             reservedStartupEpoch = null
             sessionMode = mode
             desktopEnv = desktop
             publish()
+            supersededMove?.let { completeMoveRetirement(it, superseded) }
             return epoch
         }
         val previous = startupAttempt
-        val supersededMove = move?.takeIf { previous?.launchIdentity == startupIdentity(it.request) }
-        supersededMove?.let {
-            move = null; it.cancelTimeout(); host?.cancelLaunch(it.request.requestId)
-            phase = if (owner == null) "hidden" else "attached"
-        }
+        val supersededMove = reserveMoveRetirement()
         val superseded = Result.failure<Unit>(DesktopDisplayException("SESSION_STOPPED", "The Linux startup was replaced"))
         val supersededWaiters = previous?.takeIf { it.result == null }?.let {
             settleStartupAttempt(it, superseded)
@@ -299,7 +316,7 @@ class DesktopDisplayCoordinator(
         sessionMode = mode
         desktopEnv = desktop
         completeStartupWaiters(supersededWaiters, superseded)
-        supersededMove?.completion?.invoke(superseded)
+        supersededMove?.let { completeMoveRetirement(it, superseded) }
         if (startupAttempt !== attempt || isStopped) return epoch
         profileRefresher?.invoke {}
         if (startupAttempt === attempt && !isStopped && attempt.result == null) publish()
@@ -357,16 +374,14 @@ class DesktopDisplayCoordinator(
             it as? DesktopDisplayException
                 ?: DesktopDisplayException("SESSION_STOPPED", it.message ?: "Linux session failed to start")
         }
-        val waiters = settleStartupAttempt(attempt, result, failure)
+        val delivery = settleStartupResult(attempt, result, failure) ?: return
+        val deliverResults = beginStartupResultDelivery(delivery)
         if (failure != null) {
             error = failure
             if (!isStopped) phase = "error"
         }
         publish()
-        completeStartupWaiters(waiters, result)
-        sessionStartListeners.toList().forEach {
-            if (startupAttempt === attempt && isSessionCurrent(epoch)) it(result)
-        }
+        finishStartupResultDelivery(deliverResults)
         if (result.isSuccess && startupAttempt === attempt && isSessionCurrent(epoch)) refreshAutomaticOpening()
     }
 
@@ -400,17 +415,18 @@ class DesktopDisplayCoordinator(
         assertMainThread()
         check(!isStopped) { "SESSION_STOPPED" }
         val previous = owner
+        val pending = move
         owner = null
         profileRefresher = null
         releaseSessionStartClaim(previous?.lease)
-        previous?.detach?.invoke()
-        if (move == null) previous?.finish?.invoke()
         check(!isStopped) { "SESSION_STOPPED" }
         appliedKind = null
         renderSize = null
+        val requestId = pending?.takeIf { move === it && it.request.display.id == displayId }?.request?.requestId
         val lease = RendererLease(++generation, displayId)
-        owner = Owner(lease, detachPrevious)
-        publish()
+        owner = Owner(lease, detachPrevious, requestId = requestId)
+        val cleanup = { previous?.detach?.invoke(); if (pending == null || previous?.lease != pending.previous?.lease) previous?.finish?.invoke() }
+        if (previous != null) host?.scheduleTimeout(0, cleanup) ?: cleanup()
         return RendererClaim.Accepted(lease)
     }
 
@@ -920,6 +936,7 @@ class DesktopDisplayCoordinator(
         ))
         if (currentOwner?.lease?.displayId == target.id && currentOwner.actualDisplay() == target.id &&
             requestId != null && ownerLaunchIdentity(currentOwner) == attemptLaunch && platform.focus(requestId)) {
+            if (attempt != null) attempt.launchIdentity = attemptLaunch
             completion(Result.success(Unit))
             return
         }
@@ -1126,49 +1143,62 @@ class DesktopDisplayCoordinator(
     private fun failMove(failure: DesktopDisplayException, recover: Boolean) {
         val pending = move ?: return
         move = null
-        pending.cancelTimeout()
-        checkNotNull(host).cancelLaunch(pending.request.requestId)
         val result = Result.failure<Unit>(failure)
-        val incoming = owner?.takeIf { it.requestId == pending.request.requestId }
-        if (incoming != null) {
-            release(incoming.lease)
-            incoming.finish?.invoke()
-            pending.previous?.finish?.invoke()
-        }
-        val attempt = startupAttempt?.takeIf {
+        val startupAtFailure = startupAttempt
+        val attempt = startupAtFailure?.takeIf {
             it.result == null && it.launchIdentity == startupIdentity(pending.request)
         }
-        error = failure
-        phase = "error"
-        publish()
-        pending.completion(result)
-        if (isStopped || move != null) return
+        val incoming = owner?.takeIf { it.requestId == pending.request.requestId }
+        if (incoming != null) clearOwner(incoming)
         val available = displays()
         val remainingOwner = owner
-        if (remainingOwner != null) {
-            val actual = remainingOwner.actualDisplay()
-            val availableOwner = actual == remainingOwner.lease.displayId &&
-                available.any { it.id == actual && it.eligible }
-            if (availableOwner && (attempt == null || ownerMatchesAttempt(remainingOwner, attempt))) return
-            if (!availableOwner) {
-                release(remainingOwner.lease)
-                remainingOwner.finish?.invoke()
-                phase = "error"
-                publish()
-            }
+        val actual = remainingOwner?.actualDisplay?.invoke()
+        val availableOwner = remainingOwner != null &&
+            actual == remainingOwner.lease.displayId &&
+            available.any { it.id == actual && it.eligible }
+        val ownerRetainsAttempt = availableOwner &&
+            (attempt == null || ownerMatchesAttempt(checkNotNull(remainingOwner), attempt))
+        val unavailableOwner = remainingOwner?.takeIf { !availableOwner }
+        if (unavailableOwner != null) clearOwner(unavailableOwner)
+        val ownerAfterCleanup = owner
+        val previousToFinish = pending.previous?.takeIf {
+            it.lease != unavailableOwner?.lease && it.lease != ownerAfterCleanup?.lease
         }
-        val fallback = placementStrategy.fallbackTarget(
+        val fallback = if (ownerRetainsAttempt) null else placementStrategy.fallbackTarget(
             available,
             pending.previousTarget,
             pending.request.display,
         )
-        if (recover && !pending.recovery &&
-            fallback != null && fallback.key != pending.request.display.key) {
-            openTarget(fallback, {}, recovery = true)
+        val recoverToFallback = recover && !pending.recovery &&
+            fallback != null && fallback.key != pending.request.display.key
+        val startupDelivery = if (!ownerRetainsAttempt && !recoverToFallback) {
+            attempt?.let { settleStartupResult(it, result, failure) }
         } else {
-            attempt?.takeIf { owner == null || !ownerMatchesAttempt(checkNotNull(owner), it) }?.let {
-                completeStartupWaiters(settleStartupAttempt(it, result, failure), result)
-            }
+            null
+        }
+        val deliverResults = startupDelivery?.let(::beginStartupResultDelivery) ?: false
+        error = failure
+        phase = "error"
+        publish()
+        finishStartupResultDelivery(deliverResults)
+        pending.cancelTimeout()
+        checkNotNull(host).cancelLaunch(pending.request.requestId)
+        incoming?.let {
+            it.detach()
+            it.finish?.invoke()
+        }
+        previousToFinish?.finish?.invoke()
+        unavailableOwner?.let {
+            it.detach()
+            it.finish?.invoke()
+        }
+        pending.completion(result)
+        if (isStopped || move != null || !isSessionCurrent(pending.request.sessionGeneration) ||
+            startupAttempt !== startupAtFailure || owner !== ownerAfterCleanup) return
+        if (ownerRetainsAttempt) return
+        if (recoverToFallback) {
+            openTarget(checkNotNull(fallback), {}, recovery = true)
+        } else {
             checkNotNull(host).notifyReturnRequired(failure)
         }
     }
@@ -1207,6 +1237,36 @@ class DesktopDisplayCoordinator(
         return actual == expected && (actual != null || host == null)
     }
 
+    private fun clearOwner(value: Owner) {
+        if (owner !== value) return
+        owner = null
+        profileRefresher = null
+        releaseSessionStartClaim(value.lease)
+        appliedKind = null
+        renderSize = null
+    }
+
+    private fun reserveMoveRetirement(): MoveRetirement? {
+        val pending = move ?: return null
+        move = null
+        val incoming = owner?.takeIf { it.requestId == pending.request.requestId }
+        if (incoming != null) clearOwner(incoming)
+        val previous = pending.previous?.takeIf { owner?.lease != it.lease }
+        phase = if (owner == null) "hidden" else "attached"
+        return MoveRetirement(pending, incoming, previous)
+    }
+
+    private fun completeMoveRetirement(retirement: MoveRetirement, result: Result<Unit>) {
+        retirement.move.cancelTimeout()
+        host?.cancelLaunch(retirement.move.request.requestId)
+        retirement.incoming?.let {
+            it.detach()
+            it.finish?.invoke()
+        }
+        retirement.previous?.finish?.invoke()
+        retirement.move.completion(result)
+    }
+
     private fun settleStartupAttempt(attempt: StartupAttempt, result: Result<Unit>,
         failure: DesktopDisplayException? = null): List<(Result<Unit>) -> Unit> {
         if (attempt.result != null) return emptyList()
@@ -1214,6 +1274,36 @@ class DesktopDisplayCoordinator(
         attempt.failure = failure
         attempt.claimGeneration = null
         return attempt.waiters.toList().also { attempt.waiters.clear() }
+    }
+
+    private fun settleStartupResult(
+        attempt: StartupAttempt,
+        result: Result<Unit>,
+        failure: DesktopDisplayException? = null,
+    ): StartupResultDelivery? {
+        if (attempt.result != null) return null
+        val listeners = sessionStartListeners.toList()
+        return StartupResultDelivery(settleStartupAttempt(attempt, result, failure), listeners, result)
+    }
+
+    private fun beginStartupResultDelivery(delivery: StartupResultDelivery): Boolean {
+        startupResultDeliveries.addLast(delivery)
+        if (deliveringStartupResults) return false
+        deliveringStartupResults = true
+        return true
+    }
+
+    private fun finishStartupResultDelivery(deliverResults: Boolean) {
+        if (!deliverResults) return
+        try {
+            while (startupResultDeliveries.isNotEmpty()) {
+                val next = startupResultDeliveries.removeFirst()
+                completeStartupWaiters(next.waiters, next.result)
+                next.listeners.forEach { it(next.result) }
+            }
+        } finally {
+            deliveringStartupResults = false
+        }
     }
 
     private fun completeStartupWaiters(waiters: List<(Result<Unit>) -> Unit>, result: Result<Unit>) =
