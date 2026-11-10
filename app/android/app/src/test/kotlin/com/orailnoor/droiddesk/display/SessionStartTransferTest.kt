@@ -267,6 +267,29 @@ class SessionStartTransferTest {
     }
 
     @Test
+    fun stopCleanupCannotOverwriteAReplacementStartup() {
+        val coordinator = DesktopDisplayCoordinator(host = TransferDisplayHost())
+        val originalEpoch = coordinator.prepareSession("proot", "xfce4", true)
+        val readiness = mutableListOf<Result<Unit>>()
+        coordinator.awaitSessionReady(originalEpoch, readiness::add)
+        var replacementEpoch: Long? = null
+        coordinator.claim(0) {
+            replacementEpoch = coordinator.prepareSession("chroot", "plasma", true)
+        }
+
+        coordinator.stop()
+
+        assertEquals(
+            "SESSION_STOPPED",
+            (readiness.single().exceptionOrNull() as DesktopDisplayException).code,
+        )
+        assertEquals(replacementEpoch, coordinator.sessionGeneration)
+        assertFalse(coordinator.isStopped)
+        assertTrue(coordinator.isStarting)
+        assertEquals("hidden", coordinator.snapshot()["phase"])
+    }
+
+    @Test
     fun restartRequestsForTheSameKeyCoalesceAndCompleteTogether() {
         val host = RestartHost()
         val controller = DisplayLocalSessionController(host)

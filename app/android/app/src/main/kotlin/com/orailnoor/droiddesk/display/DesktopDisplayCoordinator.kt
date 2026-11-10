@@ -135,6 +135,9 @@ class DesktopDisplayCoordinator(
         val recovery: Boolean,
         var cancelTimeout: () -> Unit = {},
     )
+    private data class MoveRetirement(val move: Move, val incoming: Owner?, val previous: Owner?)
+    private data class Continuation(val startup: StartupSnapshot, val owner: Owner?, val move: Move?,
+        val requestSequence: Long, val generation: Long)
     private data class BoundActivityDisplay(
         val displayId: Int?,
         val display: DesktopDisplay?,
@@ -152,6 +155,7 @@ class DesktopDisplayCoordinator(
     private val listeners = mutableSetOf<(Map<String, Any?>) -> Unit>()
     private val sessionStartListeners = mutableSetOf<(Result<Unit>) -> Unit>()
     private val startupResultDeliveries = ArrayDeque<() -> Unit>()
+    private val startupResultFinalizers = ArrayDeque<() -> Unit>()
     private var deliveringStartupResults = false
     private var appliedKind: ProfileKind? = null
     private var renderSize: PixelSize? = null
@@ -237,9 +241,11 @@ class DesktopDisplayCoordinator(
     fun beginSession(): Long {
         assertMainThread()
         if (pendingStops > 0) throw DesktopDisplayException("SESSION_STOPPED", "Desktop teardown is still finishing")
+        val replaced = startupFailure("The Linux startup was replaced")
+        val retirement = reserveMoveRetirement()
         cancelAutomaticOpening()
         val previousFailure = startupMachine.snapshot().terminalFailure
-        val transition = startupMachine.reserveEpoch(startupFailure("The Linux startup was replaced"))
+        val transition = startupMachine.reserveEpoch(replaced)
         val reservedEpoch = transition.snapshot.epoch
         sessionGeneration = reservedEpoch
         val deliverResults = queueStartupResult(transition.settlement)
@@ -251,8 +257,12 @@ class DesktopDisplayCoordinator(
             error = null
             phase = if (owner == null) "hidden" else "attached"
         }
-        finishStartupResultDelivery(deliverResults)
-        if (isCurrentRevision(transition.revision)) publish()
+        val continuation = captureContinuation()
+        retirement?.let(::detachMoveRetirement)
+        if (!isStopped && isCurrent(continuation)) publish()
+        finishStartupResultDelivery(deliverResults) {
+            retirement?.let { finishMoveRetirement(it, replaced) }
+        }
         return reservedEpoch
     }
 
@@ -268,14 +278,18 @@ class DesktopDisplayCoordinator(
         }
         if (pendingStops > 0) throw DesktopDisplayException("SESSION_STOPPED", "Desktop teardown is still finishing")
         val before = startupMachine.snapshot()
+        val superseded = startupFailure("The Linux startup was replaced")
         val transition = try {
             if (start) startupMachine.prepareStart(
-                StartupSpec(mode, desktop), startupFailure("The Linux startup was replaced"), expectedEpoch,
+                StartupSpec(mode, desktop), superseded, expectedEpoch,
             ) else startupMachine.prepareNoStart(StartupSpec(mode, desktop), expectedEpoch)
         } catch (failure: IllegalStateException) {
             throw DesktopDisplayException("INVALID_ARGUMENT",
                 failure.message ?: "The Linux startup configuration is incompatible")
         }
+        val prepared = checkNotNull(transition.prepare).identity
+        val incompatibleMove = move?.let { !sameStartupAttempt(prepared, startupIdentity(it.request)) } == true
+        val retirement = if (start || incompatibleMove) reserveMoveRetirement() else null
         if (transition.snapshot.epoch != before.epoch) cancelAutomaticOpening()
         sessionGeneration = transition.snapshot.epoch
         val deliverResults = queueStartupResult(transition.settlement)
@@ -291,12 +305,14 @@ class DesktopDisplayCoordinator(
         }
         sessionMode = mode
         desktopEnv = desktop
-        finishStartupResultDelivery(deliverResults)
-        if (isSessionCurrent(transition.snapshot.epoch)) {
-            if (start) profileRefresher?.invoke {}
-            if (isSessionCurrent(transition.snapshot.epoch)) publish()
+        val continuation = captureContinuation()
+        retirement?.let(::detachMoveRetirement)
+        if (!isStopped && isCurrent(continuation)) publish()
+        finishStartupResultDelivery(deliverResults) {
+            retirement?.let { finishMoveRetirement(it, superseded) }
+            if (!isStopped && isCurrent(continuation) && start) profileRefresher?.invoke {}
         }
-        return checkNotNull(transition.prepare).identity.epoch
+        return prepared.epoch
     }
 
     fun awaitSessionReady(epoch: Long, completion: (Result<Unit>) -> Unit) {
@@ -412,7 +428,7 @@ class DesktopDisplayCoordinator(
         val capturedGeneration = generation
         previous?.let(::clearOwner)
         previous?.detach?.invoke()
-        if (move == null) previous?.finish?.invoke()
+        if (pending == null) previous?.finish?.invoke()
         if (isStopped ||
             !sameContinuation(
                 captured, null, pending, capturedRequestSequence, capturedGeneration)) {
@@ -468,9 +484,14 @@ class DesktopDisplayCoordinator(
 
     fun stop(preserveRestart: Boolean = false) {
         assertMainThread()
-        if (!preserveRestart) cancelPendingRestart()
-        if (isStopped) return
+        val wasStopped = isStopped
+        val beforeCancel = captureContinuation()
+        if (!preserveRestart) {
+            cancelPendingRestart()
+            if (wasStopped || isStopped || !isCurrent(beforeCancel)) return
+        } else if (wasStopped) return
         val stopped = startupFailure("The Linux session was stopped")
+        val retirement = reserveMoveRetirement()
         val transition = startupMachine.invalidate(stopped)
         sessionGeneration = transition.snapshot.epoch
         val deliverResults = queueStartupResult(transition.settlement)
@@ -478,27 +499,22 @@ class DesktopDisplayCoordinator(
         isStopped = true
         generation++
         stopFailed = false
-        val pending = move
-        move = null
-        pending?.cancelTimeout?.invoke()
-        pending?.let { host?.cancelLaunch(it.request.requestId) }
         val previous = owner
-        owner = null
-        profileRefresher = null
-        previous?.detach?.invoke()
-        previous?.finish?.invoke()
-        if (pending?.previous?.lease != previous?.lease) pending?.previous?.finish?.invoke()
-        appliedKind = null
-        renderSize = null
+        previous?.let(::clearOwner)
         lastTarget = null
         sessionTarget = null
         acceptedRequest = null
         acceptedLaunchIdentity = null
         phase = "stopped"
         error = null
-        publish()
-        pending?.completion?.invoke(stopped)
-        finishStartupResultDelivery(deliverResults)
+        val continuation = captureContinuation()
+        retirement?.let(::detachMoveRetirement)
+        previous?.detach?.invoke()
+        if (isStopped && isCurrent(continuation)) publish()
+        finishStartupResultDelivery(deliverResults) {
+            previous?.finish?.invoke()
+            retirement?.let { finishMoveRetirement(it, stopped) }
+        }
     }
 
     fun initialize(context: Context) {
@@ -986,7 +1002,9 @@ class DesktopDisplayCoordinator(
         try {
             platform.launch(request)
         } catch (failure: DesktopDisplayException) {
-            failMove(failure, !recovery)
+            if (move === pending && isSessionCurrent(request.sessionGeneration)) {
+                failMove(failure, !recovery)
+            }
         }
     }
 
@@ -1024,10 +1042,13 @@ class DesktopDisplayCoordinator(
             return
         }
         val target = pending.request.display
-        if (pending.request.requestId != requestId || lease.displayId != target.id || owner?.actualDisplay?.invoke() != target.id ||
-            displays().none { it.id == target.id && it.key == target.key && canLaunch(it) }) return
+        val currentOwner = owner?.takeIf { it.lease == lease } ?: return
+        val captured = captureContinuation()
+        val actualDisplay = currentOwner.actualDisplay()
+        val available = displays().any { it.id == target.id && it.key == target.key && canLaunch(it) }
+        if (pending.request.requestId != requestId || lease.displayId != target.id ||
+            actualDisplay != target.id || !available || isStopped || !isCurrent(captured)) return
         move = null
-        pending.cancelTimeout()
         lastTarget = target
         sessionTarget = DesktopStartupTarget(
             target.id,
@@ -1036,13 +1057,16 @@ class DesktopDisplayCoordinator(
         )
         acceptedRequest = requestId
         acceptedLaunchIdentity = startupIdentity(pending.request)
-        owner?.takeIf { it.lease == lease }?.launchIdentity = acceptedLaunchIdentity
+        currentOwner.launchIdentity = acceptedLaunchIdentity
         phase = "attached"
         if (!pending.recovery) error = null
-        if (pending.previous?.lease != lease) pending.previous?.finish?.invoke()
-        publish()
+        val previous = pending.previous?.takeIf { it.lease != lease }
+        val continuation = captureContinuation()
+        pending.cancelTimeout()
+        if (isCurrent(continuation)) publish()
+        previous?.finish?.invoke()
         pending.completion(Result.success(Unit))
-        refreshAutomaticOpening()
+        if (!isStopped && isCurrent(continuation)) refreshAutomaticOpening()
     }
 
     fun onDisplayRemoved(displayId: Int) {
@@ -1162,20 +1186,13 @@ class DesktopDisplayCoordinator(
     }
 
     private fun failMove(failure: DesktopDisplayException, recover: Boolean) {
-        val pending = move ?: return
-        move = null
-        pending.cancelTimeout()
-        checkNotNull(host).cancelLaunch(pending.request.requestId)
-        val incoming = owner?.takeIf { it.requestId == pending.request.requestId }
-        if (incoming != null) {
-            release(incoming.lease)
-            incoming.finish?.invoke()
-            pending.previous?.finish?.invoke()
-        }
+        val retirement = reserveMoveRetirement() ?: return
+        val pending = retirement.move
+        detachMoveRetirement(retirement)
         error = failure
         phase = "error"
         publish()
-        pending.completion(Result.failure(failure))
+        finishMoveRetirement(retirement, Result.failure(failure))
         if (isStopped || move != null) return
         val available = displays()
         val remainingOwner = owner
@@ -1237,8 +1254,12 @@ class DesktopDisplayCoordinator(
         generation == expectedGeneration &&
         sameAttemptContext(expected)
 
-    private fun isCurrentRevision(revision: Long) =
-        !isStopped && startupMachine.snapshot().revision == revision
+    private fun captureContinuation() = Continuation(
+        startupMachine.snapshot(), owner, move, requestSequence, generation)
+
+    private fun isCurrent(value: Continuation) = sameContinuation(
+        value.startup, value.owner, value.move, value.requestSequence, value.generation,
+    )
 
     private fun startupIdentity(request: DesktopLaunchRequest) = StartupIdentity(
         request.sessionGeneration, StartupSpec(request.mode, request.desktopEnv),
@@ -1271,6 +1292,31 @@ class DesktopDisplayCoordinator(
         renderSize = null
     }
 
+    private fun reserveMoveRetirement(): MoveRetirement? {
+        val pending = move ?: return null
+        move = null
+        val identity = startupIdentity(pending.request)
+        val incoming = owner?.takeIf { it.lease != pending.previous?.lease &&
+            (it.requestId == pending.request.requestId || it.launchIdentity == identity) }
+        incoming?.let(::clearOwner)
+        val previous = pending.previous?.takeIf {
+            it.lease != incoming?.lease && it.lease != owner?.lease }
+        phase = if (owner == null) "hidden" else "attached"
+        return MoveRetirement(pending, incoming, previous)
+    }
+
+    private fun detachMoveRetirement(retirement: MoveRetirement) {
+        retirement.move.cancelTimeout()
+        host?.cancelLaunch(retirement.move.request.requestId)
+        retirement.incoming?.detach?.invoke()
+    }
+
+    private fun finishMoveRetirement(retirement: MoveRetirement, result: Result<Unit>) {
+        retirement.incoming?.finish?.invoke()
+        retirement.previous?.finish?.invoke()
+        retirement.move.completion(result)
+    }
+
     private fun queueStartupResult(
         settlement: StartupSettlement<(Result<Unit>) -> Unit>?,
         afterDelivery: () -> Unit = {},
@@ -1292,15 +1338,19 @@ class DesktopDisplayCoordinator(
         return true
     }
 
-    private fun finishStartupResultDelivery(deliverResults: Boolean) {
-        if (!deliverResults) return
-        try {
-            while (startupResultDeliveries.isNotEmpty()) {
-                startupResultDeliveries.removeFirst().invoke()
-            }
-        } finally {
-            deliveringStartupResults = false
+    private fun finishStartupResultDelivery(deliverResults: Boolean, afterDelivery: () -> Unit = {}) {
+        if (!deliverResults) {
+            if (deliveringStartupResults) startupResultFinalizers.addLast(afterDelivery)
+            else afterDelivery()
+            return
         }
+        startupResultFinalizers.addLast(afterDelivery)
+        try {
+            while (startupResultDeliveries.isNotEmpty() || startupResultFinalizers.isNotEmpty()) {
+                while (startupResultDeliveries.isNotEmpty()) startupResultDeliveries.removeFirst().invoke()
+                if (startupResultFinalizers.isNotEmpty()) startupResultFinalizers.removeFirst().invoke()
+            }
+        } finally { deliveringStartupResults = false }
     }
 
     private fun publish() {
