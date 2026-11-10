@@ -428,7 +428,7 @@ class DesktopDisplayCoordinator(
         val capturedGeneration = generation
         previous?.let(::clearOwner)
         previous?.detach?.invoke()
-        if (pending == null) previous?.finish?.invoke()
+        if (pending?.previous !== previous) previous?.finish?.invoke()
         if (isStopped ||
             !sameContinuation(
                 captured, null, pending, capturedRequestSequence, capturedGeneration)) {
@@ -485,10 +485,10 @@ class DesktopDisplayCoordinator(
     fun stop(preserveRestart: Boolean = false) {
         assertMainThread()
         val wasStopped = isStopped
-        val beforeCancel = captureContinuation()
+        val beforeCancel = startupMachine.snapshot()
         if (!preserveRestart) {
             cancelPendingRestart()
-            if (wasStopped || isStopped || !isCurrent(beforeCancel)) return
+            if (wasStopped || isStopped || !sameAttemptContext(beforeCancel)) return
         } else if (wasStopped) return
         val stopped = startupFailure("The Linux session was stopped")
         val retirement = reserveMoveRetirement()

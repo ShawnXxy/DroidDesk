@@ -1560,6 +1560,76 @@ class DisplayLocalStartupTest {
     }
 
     @Test
+    fun displacedIncomingClaimStopFinishesItsActivityExactlyOnce() {
+        val genericHost = LocalStartupHost(listOf(phone, tnt))
+        val generic = DesktopDisplayCoordinator(
+            host = genericHost,
+            placementStrategy = movableStrategy(),
+        )
+        generic.openActive {}
+        attach(generic, genericHost)
+        generic.open(tnt.id, tnt.key) {}
+        val request = genericHost.launches.last()
+        var finished = 0
+        val incoming = (generic.claim(tnt.id) { generic.stop() } as RendererClaim.Accepted).lease
+        generic.registerActivity(incoming, request.requestId, { tnt.id }) { finished++ }
+
+        val replacement = generic.claim(tnt.id) {}
+
+        assertSame(RendererClaim.Rejected, replacement)
+        assertTrue(generic.isStopped)
+        assertEquals(1, finished)
+    }
+
+    @Test
+    fun releaseOnlyRestartCancellationStillStopsAndSettlesReadiness() {
+        val localHost = LocalStartupHost(listOf(phone, tnt)).apply {
+            currentDisplay = phone.id
+        }
+        lateinit var local: DesktopDisplayCoordinator
+        local = DesktopDisplayCoordinator(
+            host = localHost,
+            placementStrategy = displayLocalStrategy,
+            stopForEnvironmentChange = { completion ->
+                local.stop(preserveRestart = true)
+                localHost.running = false
+                localHost.currentDisplay = tnt.id
+                completion(Result.success(Unit))
+            },
+        )
+        local.openActive(target(phone)) {}
+        attach(local, localHost)
+        lateinit var restartingLease: RendererLease
+        val restart = mutableListOf<Result<Unit>>()
+        localHost.currentDisplay = tnt.id
+        assertTrue(local.restartForEnvironmentIfNeeded(
+            target(tnt),
+            local.sessionGeneration,
+        ) {
+            restart += it
+            local.release(restartingLease)
+        })
+        val request = localHost.launches.last()
+        restartingLease = (local.claim(tnt.id) {} as RendererClaim.Accepted).lease
+        local.registerActivity(restartingLease, request.requestId, { tnt.id }) {}
+        val readiness = mutableListOf<Result<Unit>>()
+        local.awaitSessionReady(local.sessionGeneration, readiness::add)
+
+        local.stop()
+
+        assertTrue(local.isStopped)
+        assertEquals(
+            "SESSION_STOPPED",
+            (restart.single().exceptionOrNull() as DesktopDisplayException).code,
+        )
+        assertEquals(
+            "SESSION_STOPPED",
+            (readiness.single().exceptionOrNull() as DesktopDisplayException).code,
+        )
+        assertEquals(listOf(request.requestId), localHost.cancelledRequests.takeLast(1))
+    }
+
+    @Test
     fun alreadyStoppedRestartCancellationCannotStopItsCallbackReplacement() {
         val localHost = LocalStartupHost(listOf(phone, tnt)).apply {
             currentDisplay = phone.id
