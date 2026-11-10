@@ -8,6 +8,7 @@ import com.orailnoor.droiddesk.display.DesktopDisplayHost
 import com.orailnoor.droiddesk.display.DesktopLaunchRequest
 import com.orailnoor.droiddesk.display.ProfileKind
 import com.orailnoor.droiddesk.display.placement.DesktopOpenRequest
+import java.io.IOException
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
@@ -71,8 +72,8 @@ class DroidDeskServiceTest {
 
     @Test
     fun returnNotificationReportsRuntimeStatusFailureAndUsesSnapshot() {
-        val failure = IllegalStateException("unknown persisted environment")
-        val reported = mutableListOf<RuntimeException>()
+        val failure = IOException("desktop marker disappeared")
+        val reported = mutableListOf<Exception>()
 
         val running = notificationRuntimeRunning(
             snapshot = mapOf("sessionRunning" to true),

@@ -87,28 +87,84 @@ class AndroidCallerPlacementPolicyTest {
     }
 
     @Test
-    fun resolvedOpenDefersUntilTheActivityDisplayIsAttached() {
+    fun deferredResolvedOpenRejectsAStoppedAdmissionInsteadOfOpeningFresh() {
         var deferred: (() -> Unit)? = null
-        var opens = 0
+        val retries = mutableListOf<Long>()
+        var cancellations = 0
+        var current = true
 
         val wasDeferred = deferResolvedDesktopOpenIfNeeded(
             isAttached = false,
+            expectedEpoch = null,
+            sessionGeneration = 41,
+            isStopped = false,
+            isSessionCurrent = { current && it == 41L },
             deferUntilAttached = { deferred = it },
-            retry = { opens++ },
+            retry = retries::add,
+            cancel = { cancellations++ },
         )
 
         assertTrue(wasDeferred)
-        assertEquals(0, opens)
+        assertTrue(retries.isEmpty())
+        assertEquals(0, cancellations)
+        current = false
         deferred!!.invoke()
-        assertEquals(1, opens)
+        assertTrue(retries.isEmpty())
+        assertEquals(1, cancellations)
+    }
+
+    @Test
+    fun deferredResolvedOpenCarriesTheActiveEpochWhenStillCurrent() {
+        var deferred: (() -> Unit)? = null
+        val retries = mutableListOf<Long>()
+
+        assertTrue(
+            deferResolvedDesktopOpenIfNeeded(
+                isAttached = false,
+                expectedEpoch = null,
+                sessionGeneration = 41,
+                isStopped = false,
+                isSessionCurrent = { it == 41L },
+                deferUntilAttached = { deferred = it },
+                retry = retries::add,
+                cancel = { error("current admission must not cancel") },
+            ),
+        )
+        deferred!!.invoke()
+        assertEquals(listOf(41L), retries)
         assertFalse(
             deferResolvedDesktopOpenIfNeeded(
                 isAttached = true,
+                expectedEpoch = null,
+                sessionGeneration = 42,
+                isStopped = true,
+                isSessionCurrent = { false },
                 deferUntilAttached = { error("attached opens must not defer") },
-                retry = { opens++ },
+                retry = { error("attached opens continue directly") },
+                cancel = { error("attached opens continue directly") },
             ),
         )
-        assertEquals(1, opens)
+    }
+
+    @Test
+    fun deferredResolvedOpenWithoutAnAdmissionFailsInsteadOfOpeningLater() {
+        var deferred = false
+        var cancellations = 0
+
+        assertTrue(
+            deferResolvedDesktopOpenIfNeeded(
+                isAttached = false,
+                expectedEpoch = null,
+                sessionGeneration = 41,
+                isStopped = true,
+                isSessionCurrent = { false },
+                deferUntilAttached = { deferred = true },
+                retry = { error("stopped opens must not retry") },
+                cancel = { cancellations++ },
+            ),
+        )
+        assertFalse(deferred)
+        assertEquals(1, cancellations)
     }
 
     @Test
@@ -141,7 +197,7 @@ class AndroidCallerPlacementPolicyTest {
             "running phone and notification open" to sourceBetween(
                 source,
                 "if (environmentManager.status().running) {",
-                "if (coordinator.isStarting || coordinator.isRestarting)",
+                "val epoch = try",
             ),
             "resolved open adapter" to functionBody(source, "private fun requestResolvedDesktopOpen("),
             "ready runtime start" to sourceBetween(
@@ -188,6 +244,12 @@ class AndroidCallerPlacementPolicyTest {
         assertTrue(
             "resolved open adapter must defer until the activity can report its display",
             scopes.getValue("resolved open adapter").contains("deferResolvedDesktopOpenIfNeeded("),
+        )
+        val homeLaunch = functionBody(source, "private fun handleHomeLaunch(homeIntent: Intent)")
+        assertTrue(
+            "coordinator transitions must retain the legacy recovery path before runtime-running opens",
+            homeLaunch.indexOf("if (coordinator.isStarting || coordinator.isRestarting)") <
+                homeLaunch.indexOf("if (environmentManager.status().running)"),
         )
     }
 

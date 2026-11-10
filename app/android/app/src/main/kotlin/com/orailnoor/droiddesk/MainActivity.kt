@@ -65,11 +65,23 @@ internal fun forwardResolvedDesktopOpen(
 
 internal fun deferResolvedDesktopOpenIfNeeded(
     isAttached: Boolean,
+    expectedEpoch: Long?,
+    sessionGeneration: Long,
+    isStopped: Boolean,
+    isSessionCurrent: (Long) -> Boolean,
     deferUntilAttached: (() -> Unit) -> Unit,
-    retry: () -> Unit,
+    retry: (Long) -> Unit,
+    cancel: () -> Unit,
 ): Boolean {
     if (isAttached) return false
-    deferUntilAttached(retry)
+    val deferredEpoch = expectedEpoch ?: sessionGeneration.takeUnless { isStopped }
+    if (deferredEpoch == null) {
+        cancel()
+        return true
+    }
+    deferUntilAttached {
+        if (isSessionCurrent(deferredEpoch)) retry(deferredEpoch) else cancel()
+    }
     return true
 }
 
@@ -378,6 +390,10 @@ class MainActivity : FlutterActivity() {
             coordinator.moveToPhone { outcome -> outcome.exceptionOrNull()?.let { displayFailure(it) } }
             return
         }
+        if (coordinator.isStarting || coordinator.isRestarting) {
+            launchPreparedDesktop(coordinator.sessionGeneration, null)
+            return
+        }
         if (environmentManager.status().running) {
             requestResolvedDesktopOpen(
                 coordinator.sessionMode,
@@ -385,10 +401,6 @@ class MainActivity : FlutterActivity() {
                 start = false,
                 expectedEpoch = coordinator.sessionGeneration,
             )
-            return
-        }
-        if (coordinator.isStarting || coordinator.isRestarting) {
-            launchPreparedDesktop(coordinator.sessionGeneration, null)
             return
         }
         val epoch = try {
@@ -1245,9 +1257,23 @@ class MainActivity : FlutterActivity() {
         expectedEpoch: Long? = null,
         currentDisplayId: Int? = null,
     ) {
+        val coordinator = DesktopDisplayCoordinator.shared
         val decorView = window.decorView
-        if (deferResolvedDesktopOpenIfNeeded(
+        val displayId = currentDisplayId ?: if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            display?.displayId ?: decorView.display?.displayId
+        } else {
+            decorView.display?.displayId
+        } ?: if (coordinator.placementDiagnostics().allowsManualMoves) {
+            windowManager.defaultDisplay.displayId
+        } else {
+            null
+        }
+        if (displayId == null && deferResolvedDesktopOpenIfNeeded(
                 isAttached = decorView.isAttachedToWindow,
+                expectedEpoch = expectedEpoch,
+                sessionGeneration = coordinator.sessionGeneration,
+                isStopped = coordinator.isStopped,
+                isSessionCurrent = coordinator::isSessionCurrent,
                 deferUntilAttached = { retry ->
                     decorView.addOnAttachStateChangeListener(
                         object : android.view.View.OnAttachStateChangeListener {
@@ -1260,23 +1286,23 @@ class MainActivity : FlutterActivity() {
                         },
                     )
                 },
-                retry = {
+                retry = { deferredEpoch ->
                     requestResolvedDesktopOpen(
-                        mode,
-                        desktop,
-                        start,
+                        mode = mode,
+                        desktop = desktop,
+                        start = start,
+                        result = result,
+                        expectedEpoch = deferredEpoch,
+                    )
+                },
+                cancel = {
+                    displayFailure(
+                        DesktopDisplayException("SESSION_STOPPED", "The session was stopped before launch"),
                         result,
-                        expectedEpoch,
-                        currentDisplayId,
                     )
                 },
             )
         ) return
-        val displayId = currentDisplayId ?: if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            display?.displayId ?: window.decorView.display?.displayId
-        } else {
-            window.decorView.display?.displayId
-        }
         if (displayId == null) {
             displayFailure(
                 DesktopDisplayException("DISPLAY_UNAVAILABLE", "The app window has no current display"),
@@ -1284,7 +1310,6 @@ class MainActivity : FlutterActivity() {
             )
             return
         }
-        val coordinator = DesktopDisplayCoordinator.shared
         forwardResolvedDesktopOpen(
             currentDisplayId = displayId,
             mode = mode,

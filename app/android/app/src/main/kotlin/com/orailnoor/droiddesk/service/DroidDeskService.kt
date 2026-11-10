@@ -64,10 +64,10 @@ internal fun desktopReturnNotificationSpec(
 internal fun notificationRuntimeRunning(
     snapshot: Map<String, Any?>,
     readRuntimeRunning: () -> Boolean,
-    onFailure: (RuntimeException) -> Unit,
+    onFailure: (Exception) -> Unit,
 ): Boolean = try {
     readRuntimeRunning()
-} catch (error: RuntimeException) {
+} catch (error: Exception) {
     onFailure(error)
     snapshot["sessionRunning"] == true
 }
