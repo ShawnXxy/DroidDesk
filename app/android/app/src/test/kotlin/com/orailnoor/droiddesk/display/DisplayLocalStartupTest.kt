@@ -3,6 +3,7 @@ package com.orailnoor.droiddesk.display
 import android.app.Activity
 import android.content.pm.ActivityInfo
 import com.orailnoor.droiddesk.display.capability.PlacementMode
+import com.orailnoor.droiddesk.display.placement.DesktopOpenRequest
 import com.orailnoor.droiddesk.display.placement.DesktopPlacementStrategy
 import com.orailnoor.droiddesk.display.placement.DisplayLocalRestartAdapter
 import com.orailnoor.droiddesk.display.placement.MovableSecondaryDisplayAdapter
@@ -20,6 +21,802 @@ class DisplayLocalStartupTest {
         host = host,
         placementStrategy = displayLocalStrategy,
     )
+
+    @Test
+    fun displayLocalRequestOpenUsesTheLaunchingDisplayAndWaitsForRuntimeReadiness() {
+        val outcomes = mutableListOf<Result<Unit>>()
+        var serviceStarts = 0
+
+        coordinator.requestOpen(
+            request = openRequest(tnt, startSession = true),
+            startService = { serviceStarts++ },
+            completion = outcomes::add,
+        )
+
+        val launch = host.launches.single()
+        assertEquals(tnt, launch.display)
+        assertEquals(coordinator.sessionGeneration, launch.sessionGeneration)
+        assertEquals(1, serviceStarts)
+        assertTrue(outcomes.isEmpty())
+
+        attach()
+        assertTrue(outcomes.isEmpty())
+        coordinator.sessionStarted(launch.sessionGeneration, Result.success(Unit))
+
+        assertEquals(1, outcomes.size)
+        assertTrue(outcomes.single().isSuccess)
+    }
+
+    @Test
+    fun movableRequestOpenUsesTheHostsActiveDisplayWithoutAPlacementRestart() {
+        val genericHost = LocalStartupHost(listOf(phone, tnt)).apply {
+            currentDisplay = tnt.id
+        }
+        val generic = DesktopDisplayCoordinator(
+            host = genericHost,
+            placementStrategy = movableStrategy(),
+        )
+        val outcomes = mutableListOf<Result<Unit>>()
+        var serviceStarts = 0
+
+        generic.requestOpen(
+            request = openRequest(phone, startSession = false),
+            startService = { serviceStarts++ },
+            completion = outcomes::add,
+        )
+
+        assertEquals(tnt, genericHost.launches.single().display)
+        assertEquals(1, serviceStarts)
+        attach(generic, genericHost)
+        assertEquals(1, outcomes.size)
+        assertTrue(outcomes.single().isSuccess)
+    }
+
+    @Test
+    fun restartTransferCoalescesTheAdmittedPayloadAndCompletesEachRequestOnce() {
+        val localHost = LocalStartupHost(listOf(phone, tnt)).apply {
+            currentDisplay = phone.id
+        }
+        var stopCompletion: ((Result<Unit>) -> Unit)? = null
+        lateinit var local: DesktopDisplayCoordinator
+        local = DesktopDisplayCoordinator(
+            host = localHost,
+            placementStrategy = displayLocalStrategy,
+            stopForEnvironmentChange = { completion ->
+                local.stop(preserveRestart = true)
+                localHost.running = false
+                stopCompletion = completion
+            },
+        )
+        local.requestOpen(openRequest(phone, startSession = false), {}, {})
+        attach(local, localHost)
+        val admittedEpoch = local.sessionGeneration
+        localHost.currentDisplay = tnt.id
+        val request = openRequest(
+            tnt,
+            startSession = true,
+            expectedEpoch = admittedEpoch,
+            mode = "proot",
+            desktopEnv = "plasma",
+        )
+        val first = mutableListOf<Result<Unit>>()
+        val second = mutableListOf<Result<Unit>>()
+        var firstServiceStarts = 0
+        var secondServiceStarts = 0
+
+        local.requestOpen(request, { firstServiceStarts++ }, first::add)
+        local.requestOpen(request, { secondServiceStarts++ }, second::add)
+
+        assertTrue(first.isEmpty())
+        assertTrue(second.isEmpty())
+        stopCompletion!!.invoke(Result.success(Unit))
+        val launch = localHost.launches.last()
+        assertEquals(tnt, launch.display)
+        assertEquals("proot", launch.mode)
+        assertEquals("plasma", launch.desktopEnv)
+        assertTrue(launch.sessionGeneration > admittedEpoch)
+        assertEquals(1, firstServiceStarts)
+        assertEquals(0, secondServiceStarts)
+
+        attach(local, localHost)
+        local.sessionStarted(launch.sessionGeneration, Result.success(Unit))
+        local.sessionStarted(launch.sessionGeneration, Result.success(Unit))
+
+        assertEquals(1, first.size)
+        assertEquals(1, second.size)
+        assertTrue(first.single().isSuccess)
+        assertTrue(second.single().isSuccess)
+    }
+
+    @Test
+    fun legacyRestartDuplicatesCoalesceAcrossThePreservedStopEpoch() {
+        val localHost = LocalStartupHost(listOf(phone, tnt)).apply {
+            currentDisplay = phone.id
+        }
+        var stopCalls = 0
+        var stopCompletion: ((Result<Unit>) -> Unit)? = null
+        lateinit var local: DesktopDisplayCoordinator
+        local = DesktopDisplayCoordinator(
+            host = localHost,
+            placementStrategy = displayLocalStrategy,
+            stopForEnvironmentChange = { completion ->
+                stopCalls++
+                local.stop(preserveRestart = true)
+                localHost.running = false
+                stopCompletion = completion
+            },
+        )
+        local.openActive(target(phone)) {}
+        attach(local, localHost)
+        localHost.currentDisplay = tnt.id
+        val first = mutableListOf<Result<Unit>>()
+        val second = mutableListOf<Result<Unit>>()
+
+        assertTrue(local.restartForEnvironmentIfNeeded(
+            target(tnt), local.sessionGeneration, first::add))
+        assertTrue(local.restartForEnvironmentIfNeeded(
+            target(tnt), local.sessionGeneration, second::add))
+
+        assertEquals(1, stopCalls)
+        assertTrue(first.isEmpty())
+        assertTrue(second.isEmpty())
+        stopCompletion!!.invoke(Result.success(Unit))
+        val launch = localHost.launches.last()
+        attach(local, localHost)
+        local.sessionStarted(launch.sessionGeneration, Result.success(Unit))
+        assertTrue(first.single().isSuccess)
+        assertTrue(second.single().isSuccess)
+    }
+
+    @Test
+    fun coalescedRestartCompletionsKeepTheSettledPayloadAcrossNestedReplacement() {
+        val localHost = LocalStartupHost(listOf(phone, tnt)).apply {
+            currentDisplay = phone.id
+        }
+        var stopCompletion: ((Result<Unit>) -> Unit)? = null
+        lateinit var local: DesktopDisplayCoordinator
+        local = DesktopDisplayCoordinator(
+            host = localHost,
+            placementStrategy = displayLocalStrategy,
+            stopForEnvironmentChange = { completion ->
+                local.stop(preserveRestart = true)
+                localHost.running = false
+                stopCompletion = completion
+            },
+        )
+        local.requestOpen(openRequest(phone, startSession = false), {}, {})
+        attach(local, localHost)
+        localHost.currentDisplay = tnt.id
+        val request = openRequest(tnt, startSession = true)
+        val first = mutableListOf<Result<Unit>>()
+        val second = mutableListOf<Result<Unit>>()
+        val replacement = mutableListOf<Result<Unit>>()
+        var replacementEpoch: Long? = null
+
+        local.requestOpen(request, {}) { result ->
+            first += result
+            replacementEpoch = local.sessionGeneration
+            local.requestOpen(
+                openRequest(
+                    tnt,
+                    startSession = true,
+                    mode = "chroot",
+                    desktopEnv = "plasma",
+                ),
+                {},
+                replacement::add,
+            )
+            replacementEpoch = local.sessionGeneration
+        }
+        local.requestOpen(request, {}, second::add)
+        stopCompletion!!.invoke(Result.success(Unit))
+        val failedLaunch = localHost.launches.last()
+        attach(local, localHost)
+        val failure = IllegalStateException("runtime exited")
+
+        local.sessionStarted(failedLaunch.sessionGeneration, Result.failure(failure))
+
+        assertSame(failure, first.single().exceptionOrNull())
+        assertSame(failure, second.single().exceptionOrNull())
+        assertTrue(replacement.isEmpty())
+        assertTrue(checkNotNull(replacementEpoch) > failedLaunch.sessionGeneration)
+        assertEquals("chroot", local.sessionMode)
+        assertEquals("plasma", local.desktopEnv)
+
+        attach(local, localHost)
+        local.sessionStarted(checkNotNull(replacementEpoch), Result.success(Unit))
+        assertTrue(replacement.single().isSuccess)
+        assertNull(local.sessionFailure)
+    }
+
+    @Test
+    fun rejectedRestartDoesNotCacheItsServiceStarterForALaterValidRequest() {
+        val localHost = LocalStartupHost(listOf(phone, tnt)).apply {
+            currentDisplay = phone.id
+        }
+        var stopCompletion: ((Result<Unit>) -> Unit)? = null
+        lateinit var local: DesktopDisplayCoordinator
+        local = DesktopDisplayCoordinator(
+            host = localHost,
+            placementStrategy = displayLocalStrategy,
+            stopForEnvironmentChange = { completion ->
+                local.stop(preserveRestart = true)
+                localHost.running = false
+                stopCompletion = completion
+            },
+        )
+        local.requestOpen(openRequest(phone, startSession = false), {}, {})
+        attach(local, localHost)
+        localHost.currentDisplay = tnt.id
+        val first = mutableListOf<Result<Unit>>()
+        local.requestOpen(openRequest(tnt, startSession = true), {}, first::add)
+        var rejectedStarts = 0
+        val rejected = mutableListOf<Result<Unit>>()
+        var acceptedStarts = 0
+        val accepted = mutableListOf<Result<Unit>>()
+        val phoneRequest = openRequest(phone, startSession = true, mode = "chroot")
+        local.requestOpen(
+            phoneRequest,
+            { rejectedStarts++ },
+        ) { result ->
+            rejected += result
+            localHost.currentDisplay = phone.id
+            local.requestOpen(phoneRequest, { acceptedStarts++ }, accepted::add)
+        }
+        assertEquals(
+            "DISPLAY_UNAVAILABLE",
+            (rejected.single().exceptionOrNull() as DesktopDisplayException).code,
+        )
+        stopCompletion!!.invoke(Result.success(Unit))
+
+        assertEquals(
+            "SESSION_STOPPED",
+            (first.single().exceptionOrNull() as DesktopDisplayException).code,
+        )
+        assertEquals(0, rejectedStarts)
+        assertEquals(1, acceptedStarts)
+        attach(local, localHost)
+        local.sessionStarted(localHost.launches.last().sessionGeneration, Result.success(Unit))
+        assertTrue(accepted.single().isSuccess)
+    }
+
+    @Test
+    fun finishedRestartCacheIsRetiredBeforeListenerRetry() {
+        val localHost = LocalStartupHost(listOf(phone, tnt)).apply {
+            currentDisplay = phone.id
+        }
+        var stopCalls = 0
+        var retryStop: ((Result<Unit>) -> Unit)? = null
+        lateinit var local: DesktopDisplayCoordinator
+        local = DesktopDisplayCoordinator(
+            host = localHost,
+            placementStrategy = displayLocalStrategy,
+            stopForEnvironmentChange = { completion ->
+                stopCalls++
+                if (stopCalls == 1) {
+                    completion(Result.failure(IllegalStateException("stop failed")))
+                } else {
+                    local.stop(preserveRestart = true)
+                    localHost.running = false
+                    retryStop = completion
+                }
+            },
+        )
+        local.requestOpen(openRequest(phone, startSession = false), {}, {})
+        attach(local, localHost)
+        localHost.currentDisplay = tnt.id
+        val request = openRequest(tnt, startSession = true)
+        var initialStarts = 0
+        var retryStarts = 0
+        val retry = mutableListOf<Result<Unit>>()
+        var observedRestart = false
+        var retried = false
+        local.subscribe { state ->
+            val restarting = state["sessionRestarting"] as Boolean
+            if (restarting) observedRestart = true
+            else if (observedRestart && !retried) {
+                retried = true
+                local.requestOpen(request, { retryStarts++ }, retry::add)
+            }
+        }
+        val initial = mutableListOf<Result<Unit>>()
+
+        local.requestOpen(request, { initialStarts++ }, initial::add)
+
+        assertTrue(retried)
+        assertTrue(initial.single().isFailure)
+        assertTrue(retry.isEmpty())
+        retryStop!!.invoke(Result.success(Unit))
+        assertEquals(0, initialStarts)
+        assertEquals(1, retryStarts)
+        val launch = localHost.launches.last()
+        attach(local, localHost)
+        local.sessionStarted(launch.sessionGeneration, Result.success(Unit))
+        assertTrue(retry.single().isSuccess)
+    }
+
+    @Test
+    fun serviceStartFailureListenerCanReplaceTheOwnedAttempt() {
+        host.running = false
+        val replacement = mutableListOf<Result<Unit>>()
+        var replaced = false
+        coordinator.subscribeSessionStart {
+            if (!replaced && it.isFailure) {
+                replaced = true
+                coordinator.requestOpen(
+                    openRequest(tnt, startSession = true, mode = "chroot"),
+                    {},
+                    replacement::add,
+                )
+            }
+        }
+        val original = mutableListOf<Result<Unit>>()
+
+        coordinator.requestOpen(
+            openRequest(tnt, startSession = true),
+            { throw UnsupportedOperationException("service unavailable") },
+            original::add,
+        )
+
+        assertEquals(
+            "DISPLAY_NOT_ALLOWED",
+            (original.single().exceptionOrNull() as DesktopDisplayException).code,
+        )
+        assertTrue(replaced)
+        assertTrue(replacement.isEmpty())
+        assertEquals("chroot", host.launches.single().mode)
+        val epoch = host.launches.single().sessionGeneration
+        attach()
+        coordinator.sessionStarted(epoch, Result.success(Unit))
+        assertTrue(replacement.single().isSuccess)
+    }
+
+    @Test
+    fun settledPendingPlacementFansOneReadinessResultToEveryJoiner() {
+        val request = openRequest(tnt, startSession = true)
+        val first = mutableListOf<Result<Unit>>()
+        val second = mutableListOf<Result<Unit>>()
+        val late = mutableListOf<Result<Unit>>()
+        val replacement = mutableListOf<Result<Unit>>()
+        coordinator.requestOpen(request, {}) { result ->
+            first += result
+            coordinator.requestOpen(
+                openRequest(tnt, startSession = true, mode = "chroot"),
+                {},
+                replacement::add,
+            )
+        }
+        coordinator.requestOpen(request, {}, second::add)
+        val settledEpoch = host.launches.single().sessionGeneration
+        coordinator.sessionStarted(settledEpoch, Result.success(Unit))
+
+        coordinator.requestOpen(request, {}, late::add)
+
+        assertEquals(1, host.launches.size)
+        attach()
+        assertTrue(first.single().isSuccess)
+        assertTrue(second.single().isSuccess)
+        assertTrue(late.single().isSuccess)
+        assertTrue(replacement.isEmpty())
+        assertTrue(coordinator.sessionGeneration > settledEpoch)
+    }
+
+    @Test
+    fun deniedServiceStartClearsOnlyTheOwnedStartupAttempt() {
+        host.running = false
+        val outcomes = mutableListOf<Result<Unit>>()
+
+        coordinator.requestOpen(
+            request = openRequest(phone, startSession = true),
+            startService = { throw SecurityException("background start denied") },
+            completion = outcomes::add,
+        )
+
+        assertEquals(1, outcomes.size)
+        assertEquals(
+            "DISPLAY_NOT_ALLOWED",
+            (outcomes.single().exceptionOrNull() as DesktopDisplayException).code,
+        )
+        assertFalse(coordinator.isStarting)
+        assertTrue(host.launches.isEmpty())
+
+        coordinator.replacePlacementStrategy(movableStrategy())
+        assertEquals(PlacementMode.MOVABLE, coordinator.placementSelection.mode)
+    }
+
+    @Test
+    fun duplicateServiceStartDenialPreservesTheConsumedStartupClaim() {
+        val request = openRequest(tnt, startSession = true)
+        val first = mutableListOf<Result<Unit>>()
+        coordinator.requestOpen(request, {}, first::add)
+        val launch = host.launches.single()
+        val lease = attach()
+        assertTrue(coordinator.consumeSessionStart(lease))
+        val duplicate = mutableListOf<Result<Unit>>()
+
+        coordinator.requestOpen(
+            request = request,
+            startService = { throw SecurityException("duplicate start denied") },
+            completion = duplicate::add,
+        )
+
+        assertEquals(
+            "DISPLAY_NOT_ALLOWED",
+            (duplicate.single().exceptionOrNull() as DesktopDisplayException).code,
+        )
+        assertTrue(coordinator.isStarting)
+        assertEquals(launch.sessionGeneration, coordinator.beginSessionStart(lease))
+
+        coordinator.sessionStarted(launch.sessionGeneration, Result.success(Unit))
+        assertTrue(first.single().isSuccess)
+        assertEquals(1, duplicate.size)
+    }
+
+    @Test
+    fun requestOpenRetriesAnEnvironmentRestartAfterFailedStop() {
+        val localHost = LocalStartupHost(listOf(phone, tnt)).apply {
+            currentDisplay = tnt.id
+        }
+        var stopCalls = 0
+        val local = DesktopDisplayCoordinator(
+            host = localHost,
+            placementStrategy = displayLocalStrategy,
+            stopForEnvironmentChange = { stopCalls++ },
+        )
+        local.requestOpen(openRequest(tnt, startSession = false), {}, {})
+        attach(local, localHost)
+        local.startStopping()
+        local.finishStopping(IllegalStateException("runtime refused to stop"))
+        localHost.currentDisplay = phone.id
+        val outcomes = mutableListOf<Result<Unit>>()
+        val duplicate = mutableListOf<Result<Unit>>()
+        val request = openRequest(phone, startSession = false)
+
+        local.requestOpen(request, {}, outcomes::add)
+        local.requestOpen(request, {}, duplicate::add)
+
+        assertEquals(1, stopCalls)
+        assertTrue(local.isRestarting)
+        assertTrue(outcomes.isEmpty())
+        assertTrue(duplicate.isEmpty())
+    }
+
+    @Test
+    fun requestOpenRecoversTheFailedStopEpochWithoutAnotherRestart() {
+        val localHost = LocalStartupHost(listOf(phone, tnt)).apply {
+            currentDisplay = tnt.id
+        }
+        val local = DesktopDisplayCoordinator(
+            host = localHost,
+            placementStrategy = displayLocalStrategy,
+        )
+        local.requestOpen(openRequest(tnt, startSession = false), {}, {})
+        attach(local, localHost)
+        local.startStopping()
+        local.finishStopping(IllegalStateException("runtime refused to stop"))
+        val failedStopEpoch = local.sessionGeneration
+        localHost.launches.clear()
+        val outcomes = mutableListOf<Result<Unit>>()
+        val duplicate = mutableListOf<Result<Unit>>()
+        var serviceStarts = 0
+        val request = openRequest(
+            tnt,
+            startSession = false,
+            expectedEpoch = failedStopEpoch,
+        )
+
+        local.requestOpen(
+            request,
+            { serviceStarts++ },
+            outcomes::add,
+        )
+        local.requestOpen(request, { serviceStarts++ }, duplicate::add)
+
+        assertEquals(1, serviceStarts)
+        assertEquals(1, localHost.launches.size)
+        assertTrue(outcomes.isEmpty())
+        assertTrue(duplicate.isEmpty())
+        assertTrue(local.sessionGeneration > failedStopEpoch)
+        attach(local, localHost)
+        assertTrue(outcomes.single().isSuccess)
+        assertTrue(duplicate.single().isSuccess)
+    }
+
+    @Test
+    fun fallbackRecoveryRetainsTheAttemptAndTerminalFailureSettlesOnlyOnce() {
+        val genericHost = LocalStartupHost(listOf(phone, tnt)).apply {
+            currentDisplay = tnt.id
+            running = false
+            oneShotLaunchFailure = DesktopDisplayException(
+                "DISPLAY_NOT_ALLOWED",
+                "Android denied the external launch",
+            )
+        }
+        val generic = DesktopDisplayCoordinator(
+            host = genericHost,
+            placementStrategy = movableStrategy(),
+        )
+        val outcomes = mutableListOf<Result<Unit>>()
+
+        generic.requestOpen(
+            request = openRequest(tnt, startSession = true),
+            startService = {},
+            completion = outcomes::add,
+        )
+
+        assertEquals(listOf(tnt.id, phone.id), genericHost.launches.map { it.display.id })
+        assertEquals(1, outcomes.size)
+        assertEquals(
+            "DISPLAY_NOT_ALLOWED",
+            (outcomes.single().exceptionOrNull() as DesktopDisplayException).code,
+        )
+        assertTrue(generic.isStarting)
+
+        genericHost.fireTimers()
+
+        assertFalse(generic.isStarting)
+        assertEquals(1, outcomes.size)
+        generic.replacePlacementStrategy(displayLocalStrategy())
+        assertTrue(generic.isDisplayLocal)
+    }
+
+    @Test
+    fun asynchronousPlacementTimeoutKeepsTheFallbackRecoveryAttempt() {
+        val genericHost = LocalStartupHost(listOf(phone, tnt)).apply {
+            currentDisplay = tnt.id
+            running = false
+        }
+        val generic = DesktopDisplayCoordinator(
+            host = genericHost,
+            placementStrategy = movableStrategy(),
+        )
+        val outcomes = mutableListOf<Result<Unit>>()
+
+        generic.requestOpen(openRequest(tnt, startSession = true), {}, outcomes::add)
+        genericHost.fireTimers()
+
+        assertEquals(listOf(tnt.id, phone.id), genericHost.launches.map { it.display.id })
+        assertEquals(1, outcomes.size)
+        assertEquals(
+            "PLACEMENT_TIMEOUT",
+            (outcomes.single().exceptionOrNull() as DesktopDisplayException).code,
+        )
+        assertTrue(generic.isStarting)
+
+        attach(generic, genericHost)
+        generic.sessionStarted(genericHost.launches.last().sessionGeneration, Result.success(Unit))
+        assertFalse(generic.isStarting)
+        assertEquals(1, outcomes.size)
+    }
+
+    @Test
+    fun compatibleRetainedRendererPreventsDuplicatePlacementRollback() {
+        val request = openRequest(tnt, startSession = true)
+        val first = mutableListOf<Result<Unit>>()
+        coordinator.requestOpen(request, {}, first::add)
+        val launch = host.launches.single()
+        val lease = attach()
+        assertTrue(coordinator.consumeSessionStart(lease))
+        host.focusResult = false
+        host.launchFailure = DesktopDisplayException(
+            "DISPLAY_NOT_ALLOWED",
+            "Android denied the duplicate launch",
+        )
+        val duplicate = mutableListOf<Result<Unit>>()
+
+        coordinator.requestOpen(request, {}, duplicate::add)
+
+        assertEquals(
+            "DISPLAY_NOT_ALLOWED",
+            (duplicate.single().exceptionOrNull() as DesktopDisplayException).code,
+        )
+        assertTrue(coordinator.isStarting)
+        assertEquals(launch.sessionGeneration, coordinator.beginSessionStart(lease))
+        coordinator.sessionStarted(launch.sessionGeneration, Result.success(Unit))
+        assertTrue(first.single().isSuccess)
+        assertEquals(1, duplicate.size)
+    }
+
+    @Test
+    fun terminalPlacementFailureRollsBackTheOwnedAttemptWithoutAnOwner() {
+        host.running = false
+        host.launchFailure = DesktopDisplayException(
+            "DISPLAY_NOT_ALLOWED",
+            "Android denied this launch",
+        )
+        val outcomes = mutableListOf<Result<Unit>>()
+
+        coordinator.requestOpen(
+            request = openRequest(tnt, startSession = true),
+            startService = {},
+            completion = outcomes::add,
+        )
+
+        assertEquals(1, outcomes.size)
+        assertEquals(
+            "DISPLAY_NOT_ALLOWED",
+            (outcomes.single().exceptionOrNull() as DesktopDisplayException).code,
+        )
+        assertFalse(coordinator.isStarting)
+        coordinator.replacePlacementStrategy(movableStrategy())
+    }
+
+    @Test
+    fun startupListenerReplacementSurvivesTheOlderRequestCompletion() {
+        val original = mutableListOf<Result<Unit>>()
+        coordinator.requestOpen(
+            openRequest(tnt, startSession = true),
+            {},
+            original::add,
+        )
+        val failedEpoch = host.launches.single().sessionGeneration
+        attach()
+        val replacement = mutableListOf<Result<Unit>>()
+        var replacementEpoch: Long? = null
+        var replaced = false
+        coordinator.subscribeSessionStart { result ->
+            if (!replaced && result.isFailure) {
+                replaced = true
+                coordinator.requestOpen(
+                    openRequest(
+                        tnt,
+                        startSession = true,
+                        mode = "chroot",
+                        desktopEnv = "plasma",
+                    ),
+                    {},
+                    replacement::add,
+                )
+                replacementEpoch = host.launches.last().sessionGeneration
+            }
+        }
+        val failure = IllegalStateException("runtime exited")
+
+        coordinator.sessionStarted(failedEpoch, Result.failure(failure))
+
+        assertSame(failure, original.single().exceptionOrNull())
+        assertTrue(replaced)
+        assertTrue(replacement.isEmpty())
+        assertTrue(checkNotNull(replacementEpoch) > failedEpoch)
+        assertEquals("chroot", coordinator.sessionMode)
+        assertEquals("plasma", coordinator.desktopEnv)
+
+        attach()
+        coordinator.sessionStarted(checkNotNull(replacementEpoch), Result.success(Unit))
+        assertTrue(replacement.single().isSuccess)
+        assertNull(coordinator.sessionFailure)
+    }
+
+    @Test
+    fun rejoinedRestartUsesTheAdmittedEpochWhenAnObserverReplacesItsFailure() {
+        val localHost = LocalStartupHost(listOf(phone, tnt)).apply {
+            currentDisplay = phone.id
+        }
+        var stopCompletion: ((Result<Unit>) -> Unit)? = null
+        lateinit var local: DesktopDisplayCoordinator
+        local = DesktopDisplayCoordinator(
+            host = localHost,
+            placementStrategy = displayLocalStrategy,
+            stopForEnvironmentChange = { completion ->
+                local.stop(preserveRestart = true)
+                localHost.running = false
+                stopCompletion = completion
+            },
+        )
+        local.requestOpen(openRequest(phone, startSession = false), {}, {})
+        attach(local, localHost)
+        val tntRequest = openRequest(tnt, startSession = true)
+        val original = mutableListOf<Result<Unit>>()
+        localHost.currentDisplay = tnt.id
+        local.requestOpen(tntRequest, {}, original::add)
+        stopCompletion!!.invoke(Result.success(Unit))
+        val admittedLaunch = localHost.launches.last()
+        attach(local, localHost)
+        val queued = mutableListOf<Result<Unit>>()
+        localHost.currentDisplay = phone.id
+        local.requestOpen(openRequest(phone, startSession = true), {}, queued::add)
+        val rejoined = mutableListOf<Result<Unit>>()
+        localHost.currentDisplay = tnt.id
+        local.requestOpen(tntRequest, {}, rejoined::add)
+        var replacementEpoch: Long? = null
+        local.subscribeSessionStart {
+            if (it.isFailure && replacementEpoch == null) {
+                replacementEpoch = local.prepareSession("termux", "mate", start = true)
+            }
+        }
+        val failure = IllegalStateException("runtime exited")
+
+        local.sessionStarted(admittedLaunch.sessionGeneration, Result.failure(failure))
+
+        assertEquals(
+            "SESSION_STOPPED",
+            (original.single().exceptionOrNull() as DesktopDisplayException).code,
+        )
+        assertEquals(
+            "SESSION_STOPPED",
+            (queued.single().exceptionOrNull() as DesktopDisplayException).code,
+        )
+        assertSame(failure, rejoined.single().exceptionOrNull())
+        assertTrue(checkNotNull(replacementEpoch) > admittedLaunch.sessionGeneration)
+        assertNull(local.sessionFailure)
+        assertTrue(local.isStarting)
+
+        localHost.running = true
+        local.sessionStarted(checkNotNull(replacementEpoch), Result.success(Unit))
+        assertNull(local.sessionFailure)
+    }
+
+    @Test
+    fun invalidModeDoesNotStrandTheOpenAdmission() {
+        assertThrows(IllegalArgumentException::class.java) {
+            coordinator.requestOpen(
+                openRequest(tnt, startSession = true, mode = "invalid"),
+                {},
+                {},
+            )
+        }
+        val outcomes = mutableListOf<Result<Unit>>()
+
+        coordinator.requestOpen(openRequest(tnt, startSession = true), {}, outcomes::add)
+
+        assertEquals(1, host.launches.size)
+        assertTrue(outcomes.isEmpty())
+    }
+
+    @Test
+    fun invalidModeIsRejectedBeforeADisplayLocalRestartStopsTheSession() {
+        val localHost = LocalStartupHost(listOf(phone, tnt)).apply {
+            currentDisplay = phone.id
+        }
+        var stopCalls = 0
+        lateinit var local: DesktopDisplayCoordinator
+        local = DesktopDisplayCoordinator(
+            host = localHost,
+            placementStrategy = displayLocalStrategy,
+            stopForEnvironmentChange = { completion ->
+                stopCalls++
+                local.stop(preserveRestart = true)
+                localHost.running = false
+                completion(Result.success(Unit))
+            },
+        )
+        local.requestOpen(openRequest(phone, startSession = false), {}, {})
+        attach(local, localHost)
+        localHost.currentDisplay = tnt.id
+
+        assertThrows(IllegalArgumentException::class.java) {
+            local.requestOpen(
+                openRequest(tnt, startSession = true, mode = "invalid"),
+                {},
+                {},
+            )
+        }
+
+        assertEquals(0, stopCalls)
+        assertFalse(local.isRestarting)
+        assertFalse(local.isStopped)
+        assertEquals(phone.id, local.snapshot()["sessionDisplayId"])
+    }
+
+    @Test
+    fun unexpectedServiceStartExceptionFailsAndClearsTheOwnedAttempt() {
+        host.running = false
+        val outcomes = mutableListOf<Result<Unit>>()
+
+        coordinator.requestOpen(
+            openRequest(tnt, startSession = true),
+            { throw UnsupportedOperationException("service unavailable") },
+            outcomes::add,
+        )
+
+        assertEquals(
+            "DISPLAY_NOT_ALLOWED",
+            (outcomes.single().exceptionOrNull() as DesktopDisplayException).code,
+        )
+        assertFalse(coordinator.isStarting)
+        assertTrue(host.launches.isEmpty())
+        coordinator.replacePlacementStrategy(movableStrategy())
+    }
 
     @Test
     fun movableStrategySelectionAndLegacyOpenStayTruthful() {
@@ -2280,6 +3077,20 @@ class DisplayLocalStartupTest {
         display.id, display.key, displayLocalStrategy.environmentFor(display),
     )
 
+    private fun openRequest(
+        display: DesktopDisplay,
+        startSession: Boolean,
+        expectedEpoch: Long? = null,
+        mode: String = "termux",
+        desktopEnv: String = "xfce4",
+    ) = DesktopOpenRequest(
+        currentDisplayId = display.id,
+        mode = mode,
+        desktopEnv = desktopEnv,
+        startSession = startSession,
+        expectedEpoch = expectedEpoch,
+    )
+
     private fun attach(
         coordinator: DesktopDisplayCoordinator = this.coordinator,
         host: LocalStartupHost = this.host,
@@ -2323,6 +3134,7 @@ private class LocalStartupHost(var connected: List<DesktopDisplay>) : DesktopDis
     val cancelledRequests = mutableListOf<Long>()
     val returnRequired = mutableListOf<DesktopDisplayException>()
     var launchFailure: DesktopDisplayException? = null
+    var oneShotLaunchFailure: DesktopDisplayException? = null
     var launchAction: ((DesktopLaunchRequest) -> Unit)? = null
     var focusAction: (() -> Unit)? = null
     var displaysAction: (() -> Unit)? = null
@@ -2345,6 +3157,10 @@ private class LocalStartupHost(var connected: List<DesktopDisplay>) : DesktopDis
     override fun launch(request: DesktopLaunchRequest) {
         launches += request
         launchAction?.invoke(request)
+        oneShotLaunchFailure?.let {
+            oneShotLaunchFailure = null
+            throw it
+        }
         launchFailure?.let { throw it }
     }
     override fun focus(requestId: Long): Boolean {
