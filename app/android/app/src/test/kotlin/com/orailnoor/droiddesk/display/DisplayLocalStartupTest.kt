@@ -169,6 +169,54 @@ class DisplayLocalStartupTest {
     }
 
     @Test
+    fun stopPhaseAtoBtoAUsesTheFinalCallersServiceStarter() {
+        val localHost = LocalStartupHost(listOf(phone, tnt)).apply {
+            currentDisplay = phone.id
+        }
+        var stopCompletion: ((Result<Unit>) -> Unit)? = null
+        lateinit var local: DesktopDisplayCoordinator
+        local = DesktopDisplayCoordinator(
+            host = localHost,
+            placementStrategy = displayLocalStrategy,
+            stopForEnvironmentChange = { completion ->
+                local.stop(preserveRestart = true)
+                localHost.running = false
+                stopCompletion = completion
+            },
+        )
+        local.requestOpen(openRequest(phone, startSession = false), {}, {})
+        attach(local, localHost)
+        localHost.currentDisplay = tnt.id
+        val requestA = openRequest(tnt, startSession = true, mode = "proot")
+        val firstA = mutableListOf<Result<Unit>>()
+        var firstStarts = 0
+        local.requestOpen(requestA, { firstStarts++ }, firstA::add)
+        val requestB = openRequest(tnt, startSession = true, mode = "chroot")
+        val requestBResults = mutableListOf<Result<Unit>>()
+        local.requestOpen(requestB, {}, requestBResults::add)
+        val finalA = mutableListOf<Result<Unit>>()
+        var finalStarts = 0
+
+        local.requestOpen(requestA, { finalStarts++ }, finalA::add)
+        stopCompletion!!.invoke(Result.success(Unit))
+
+        assertEquals(
+            "SESSION_STOPPED",
+            (firstA.single().exceptionOrNull() as DesktopDisplayException).code,
+        )
+        assertEquals(
+            "SESSION_STOPPED",
+            (requestBResults.single().exceptionOrNull() as DesktopDisplayException).code,
+        )
+        assertEquals(0, firstStarts)
+        assertEquals(1, finalStarts)
+        val launch = localHost.launches.last()
+        attach(local, localHost)
+        local.sessionStarted(launch.sessionGeneration, Result.success(Unit))
+        assertTrue(finalA.single().isSuccess)
+    }
+
+    @Test
     fun coalescedRestartCompletionsKeepTheSettledPayloadAcrossNestedReplacement() {
         val localHost = LocalStartupHost(listOf(phone, tnt)).apply {
             currentDisplay = phone.id

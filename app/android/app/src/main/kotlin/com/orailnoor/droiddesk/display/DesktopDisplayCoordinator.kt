@@ -178,7 +178,7 @@ class DesktopDisplayCoordinator(
     private var acceptedLaunchIdentity: StartupIdentity? = null
     private var openOperation: OpenOperation? = null
     private val restartRequests = mutableMapOf<OpenKey, RestartRequest>()
-    private var sessionRestarting = false
+    private var startingRestart: RestartRequest? = null; private var sessionRestarting = false
     private var restartStartService: () -> Unit = {}
     private val restartController = DisplayLocalSessionController(object : DisplayLocalSessionHost<RestartRequest> {
         override fun sessionEpoch() = publishedSessionGeneration
@@ -189,8 +189,7 @@ class DesktopDisplayCoordinator(
             validateRestartTarget(checkNotNull(target.key.target))
         }
         override fun restartingChanged(restarting: Boolean) {
-            if (!restarting) restartRequests.clear()
-            sessionRestarting = restarting
+            if (!restarting) { restartRequests.clear(); startingRestart = null }; sessionRestarting = restarting
             publish()
         }
         override fun stopForEnvironmentChange(completion: (Result<Unit>) -> Unit) {
@@ -205,9 +204,9 @@ class DesktopDisplayCoordinator(
             }
         }
         override fun startOnTarget(target: RestartRequest, completion: (Result<Unit>) -> Unit) {
-            val request = target.key.request.copy(startSession = true, expectedEpoch = null)
+            startingRestart = target; val request = target.key.request.copy(startSession = true, expectedEpoch = null)
             prepareAndOpen(OpenKey(target.key.target, request), target.startService) { epoch, result ->
-                target.resultEpoch = epoch; completion(result)
+                if (startingRestart === target) startingRestart = null; target.resultEpoch = epoch; completion(result)
             }
         }
     }, assertMainThread)
@@ -612,8 +611,7 @@ class DesktopDisplayCoordinator(
             return
         }
         val requestedKey = OpenKey(target, request); val existingRestart = restartRequests[requestedKey]
-        val joinsOpen = currentOpenOperation()?.key == requestedKey || existingRestart != null
-        val expectedEpoch = request.expectedEpoch
+        val joinsOpen = currentOpenOperation()?.key == requestedKey || existingRestart != null; val expectedEpoch = request.expectedEpoch
         if (expectedEpoch != null && !isSessionCurrent(expectedEpoch) &&
             !joinsOpen && !sessionRestarting &&
             !(stopFailed && expectedEpoch == publishedSessionGeneration)) {
@@ -641,6 +639,7 @@ class DesktopDisplayCoordinator(
             completedSynchronously = !returned
             if (!restartController.hasPendingRestart) restartRequests.clear()
             val failure = result.exceptionOrNull()
+            if ((failure as? DesktopDisplayException)?.code == "SESSION_STOPPED" && startingRestart !== request && restartRequests[key] === request) restartRequests.remove(key)
             if (failure != null &&
                 (failure as? DesktopDisplayException)?.code != "SESSION_STOPPED" &&
                 !request.failureReported &&
