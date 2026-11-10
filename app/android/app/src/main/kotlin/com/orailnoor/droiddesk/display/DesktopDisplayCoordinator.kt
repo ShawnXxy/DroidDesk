@@ -420,12 +420,11 @@ class DesktopDisplayCoordinator(
         owner = null
         profileRefresher = null
         releaseSessionStartClaim(previous?.lease)
-        previous?.detach?.invoke()
-        if (pending == null || previous?.lease != pending.previous?.lease) previous?.finish?.invoke()
-        check(!isStopped) { "SESSION_STOPPED" }
         appliedKind = null
         renderSize = null
-        if (sessionGeneration != epoch || move !== pending || owner != null) return RendererClaim.Rejected
+        previous?.detach?.invoke()
+        if (pending == null || previous?.lease != pending.previous?.lease) previous?.finish?.invoke()
+        if (isStopped || sessionGeneration != epoch || move !== pending || owner != null) return RendererClaim.Rejected
         val lease = RendererLease(++generation, displayId)
         val requestId = pending?.takeIf { it.request.display.id == displayId }?.request?.requestId
         owner = Owner(lease, detachPrevious, requestId = requestId)

@@ -1106,6 +1106,40 @@ class DisplayLocalStartupTest {
     }
 
     @Test
+    fun stopDuringPreviousOwnerCleanupRejectsInsteadOfThrowing() {
+        val generic = DesktopDisplayCoordinator(
+            host = LocalStartupHost(listOf(phone, tnt)),
+            placementStrategy = movableStrategy(),
+        )
+        generic.claim(phone.id) { generic.stop() }
+
+        val replacement = generic.claim(tnt.id) {}
+
+        assertSame(RendererClaim.Rejected, replacement)
+        assertTrue(generic.isStopped)
+    }
+
+    @Test
+    fun rejectedOuterClaimPreservesNestedOwnerGeometry() {
+        val generic = DesktopDisplayCoordinator(
+            host = LocalStartupHost(listOf(phone, tnt)),
+            placementStrategy = movableStrategy(),
+        )
+        lateinit var nested: RendererLease
+        generic.claim(phone.id) {
+            nested = (generic.claim(phone.id) {} as RendererClaim.Accepted).lease
+            generic.reportGeometry(nested, ProfileKind.PHONE, PixelSize(1280, 720))
+        }
+
+        val outer = generic.claim(tnt.id) {}
+
+        assertSame(RendererClaim.Rejected, outer)
+        assertTrue(generic.isCurrent(nested))
+        assertEquals(1280, generic.snapshot()["renderWidth"])
+        assertEquals(720, generic.snapshot()["renderHeight"])
+    }
+
+    @Test
     fun fallbackFocusRestoresTheActiveAttemptsRendererIdentity() {
         val genericHost = LocalStartupHost(listOf(phone, tnt))
         val generic = DesktopDisplayCoordinator(
