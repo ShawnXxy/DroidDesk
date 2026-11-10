@@ -362,6 +362,31 @@ class DisplayLocalStartupTest {
     }
 
     @Test
+    fun waiterRegistrationDoesNotSuppressReplacementStartupUpdates() {
+        val originalEpoch = coordinator.prepareSession("proot", "xfce4", true)
+        val lease = (coordinator.claim(phone.id) {} as RendererClaim.Accepted).lease
+        var refreshes = 0
+        coordinator.setProfileRefresher(lease) { completion ->
+            refreshes++
+            completion(Result.success(Unit))
+        }
+        val readiness = mutableListOf<Result<Unit>>()
+        coordinator.awaitSessionReady(originalEpoch) {
+            coordinator.awaitSessionReady(coordinator.sessionGeneration, readiness::add)
+        }
+        var publications = 0
+        val unsubscribe = coordinator.subscribe { publications++ }
+
+        val replacementEpoch = coordinator.prepareSession("chroot", "plasma", true)
+        unsubscribe()
+
+        assertTrue(readiness.isEmpty())
+        assertTrue(coordinator.isSessionCurrent(replacementEpoch))
+        assertEquals(1, refreshes)
+        assertEquals(1, publications)
+    }
+
+    @Test
     fun observerRegisteredByReentrantPublicationDoesNotReceiveTheOldResult() {
         val epoch = coordinator.prepareSession("proot", "xfce4", start = true)
         val observed = mutableListOf<Result<Unit>>()

@@ -292,9 +292,9 @@ class DesktopDisplayCoordinator(
         sessionMode = mode
         desktopEnv = desktop
         finishStartupResultDelivery(deliverResults)
-        if (isCurrentRevision(transition.revision)) {
+        if (isSessionCurrent(transition.snapshot.epoch)) {
             if (start) profileRefresher?.invoke {}
-            if (isCurrentRevision(transition.revision)) publish()
+            if (isSessionCurrent(transition.snapshot.epoch)) publish()
         }
         return checkNotNull(transition.prepare).identity.epoch
     }
