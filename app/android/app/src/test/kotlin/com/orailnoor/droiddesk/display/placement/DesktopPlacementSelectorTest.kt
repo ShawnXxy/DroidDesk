@@ -1,14 +1,55 @@
 package com.orailnoor.droiddesk.display.placement
 
+import android.content.pm.ActivityInfo
+import com.orailnoor.droiddesk.display.DesktopDisplay
+import com.orailnoor.droiddesk.display.DisplayEnvironment
 import com.orailnoor.droiddesk.display.capability.PlacementMode
 import com.orailnoor.droiddesk.display.support.PresentationFixtures
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class DesktopPlacementSelectorTest {
     private val selector = DesktopPlacementSelector(DeviceQuirkCatalog())
+
+    @Test
+    fun bootstrapStrategyPreservesLegacyR2AndGenericBehavior() {
+        val r2: DesktopPlacementStrategy = bootstrapPlacementStrategy(
+            PresentationFixtures.r2Identity,
+            DeviceQuirkCatalog(),
+        )
+        val generic: DesktopPlacementStrategy = bootstrapPlacementStrategy(
+            PresentationFixtures.ambiguousOemIdentity,
+            DeviceQuirkCatalog(),
+        )
+        val external = DesktopDisplay(7, "display:7", "External", false, true, null)
+        val tnt = external.copy(id = 100003, key = "display:100003")
+
+        assertEquals(PlacementMode.DISPLAY_LOCAL, r2.selection.mode)
+        assertEquals(PlacementSelectionSource.DEVICE_QUIRK, r2.selection.source)
+        assertFalse(r2.allowsManualMoves)
+        assertFalse(r2.allowsAutomaticMoves)
+        assertEquals(DisplayEnvironment.TNT, r2.environmentFor(tnt))
+        assertEquals(
+            ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE,
+            r2.requestedOrientation(tnt, ActivityInfo.SCREEN_ORIENTATION_PORTRAIT),
+        )
+        assertFalse(r2.shouldAutoLaunchCurrentDisplay(tnt, installed = true))
+
+        assertEquals(PlacementMode.MOVABLE, generic.selection.mode)
+        assertEquals(PlacementSelectionSource.SAFE_DEFAULT, generic.selection.source)
+        assertTrue(generic.allowsManualMoves)
+        assertTrue(generic.allowsAutomaticMoves)
+        assertNull(generic.environmentRestartWarning)
+        assertEquals(DisplayEnvironment.OTHER_EXTERNAL, generic.environmentFor(external))
+        assertEquals(
+            ActivityInfo.SCREEN_ORIENTATION_PORTRAIT,
+            generic.requestedOrientation(external, ActivityInfo.SCREEN_ORIENTATION_PORTRAIT),
+        )
+        assertTrue(generic.shouldAutoLaunchCurrentDisplay(external, installed = true))
+    }
 
     @Test
     fun userOverrideWinsOverRuntimeAndQuirkEvidence() {

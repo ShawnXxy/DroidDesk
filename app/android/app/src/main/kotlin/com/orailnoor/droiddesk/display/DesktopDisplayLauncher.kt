@@ -14,7 +14,6 @@ import android.os.Looper
 import android.util.Log
 import android.net.Uri
 import android.view.Display
-import com.orailnoor.droiddesk.display.capability.PlacementMode
 import com.orailnoor.droiddesk.display.placement.AcceptedDisplayHandoffAdmission
 import com.orailnoor.droiddesk.display.placement.AcceptedDisplayHandoffEvidence
 import com.orailnoor.droiddesk.display.placement.AcceptedDisplayHandoffEvidenceSnapshot
@@ -22,10 +21,6 @@ import com.orailnoor.droiddesk.display.placement.AcceptedDisplayHandoffRegistry
 import com.orailnoor.droiddesk.display.placement.DesktopPlacementPort
 import com.orailnoor.droiddesk.display.placement.DesktopPlacementStrategy
 import com.orailnoor.droiddesk.display.placement.DisplayConnectionIdentity
-import com.orailnoor.droiddesk.display.placement.DisplayLocalRestartAdapter
-import com.orailnoor.droiddesk.display.placement.MovableSecondaryDisplayAdapter
-import com.orailnoor.droiddesk.display.placement.PlacementSelection
-import com.orailnoor.droiddesk.display.placement.PlacementSelectionSource
 import com.orailnoor.droiddesk.view.DesktopActivity
 import com.orailnoor.droiddesk.runtime.ChrootRuntime
 import com.orailnoor.droiddesk.runtime.LinuxRuntime
@@ -153,12 +148,6 @@ internal class AndroidDesktopDisplayHost(
         val displayId: Int,
         val connectionKey: String,
     )
-
-    constructor(
-        context: Context,
-        repository: DisplayRepository,
-        environmentPolicy: DisplayEnvironmentPolicy,
-    ) : this(context, repository, environmentPolicy.desktopPlacementStrategy())
 
     private val handler = Handler(Looper.getMainLooper())
     private val displayManager = context.getSystemService(DisplayManager::class.java)
@@ -423,24 +412,5 @@ internal class AndroidDesktopDisplayHost(
     override fun notifyReturnRequired(error: DesktopDisplayException) {
         Log.e("DesktopDisplay", "Desktop recovery requires user action: ${error.code}: ${error.message}")
         DroidDeskService.notifyReturnRequired(context, error.message ?: "Phone placement was not confirmed")
-    }
-}
-
-private fun DisplayEnvironmentPolicy.desktopPlacementStrategy(): DesktopPlacementStrategy {
-    val mode = if (displayLocalMode) PlacementMode.DISPLAY_LOCAL else PlacementMode.MOVABLE
-    val selection = PlacementSelection(
-        mode = mode,
-        source = if (displayLocalMode) {
-            PlacementSelectionSource.DEVICE_QUIRK
-        } else {
-            PlacementSelectionSource.SAFE_DEFAULT
-        },
-        allowAutomaticMoves = allowCrossDisplayMoves,
-        reason = "Legacy display environment policy selected ${mode.wireName} placement",
-    )
-    return if (displayLocalMode) {
-        DisplayLocalRestartAdapter(selection)
-    } else {
-        MovableSecondaryDisplayAdapter(selection)
     }
 }

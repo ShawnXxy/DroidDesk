@@ -1,5 +1,6 @@
 package com.orailnoor.droiddesk.display.placement
 
+import android.os.Build
 import com.orailnoor.droiddesk.display.capability.DeviceIdentity
 import com.orailnoor.droiddesk.display.capability.DisplayPlacementEvidence
 import com.orailnoor.droiddesk.display.capability.PlacementMode
@@ -18,6 +19,50 @@ data class PlacementSelection(
     val reason: String,
     val tntDisplayIds: Set<Int> = emptySet(),
 )
+
+fun bootstrapPlacementSelection(
+    identity: DeviceIdentity?,
+    quirks: DeviceQuirkCatalog = DeviceQuirkCatalog(),
+): PlacementSelection {
+    val quirk = identity?.let(quirks::resolve)
+    val mode = quirk?.mode ?: PlacementMode.MOVABLE
+    return PlacementSelection(
+        mode = mode,
+        source = if (quirk == null) {
+            PlacementSelectionSource.SAFE_DEFAULT
+        } else {
+            PlacementSelectionSource.DEVICE_QUIRK
+        },
+        allowAutomaticMoves = quirk == null,
+        reason = if (quirk == null) {
+            "Bootstrap placement uses the movable compatibility default"
+        } else {
+            "An isolated device quirk selected ${mode.wireName} bootstrap placement"
+        },
+        tntDisplayIds = quirk?.tntDisplayIds.orEmpty(),
+    )
+}
+
+fun bootstrapPlacementStrategy(
+    identity: DeviceIdentity? = null,
+    quirks: DeviceQuirkCatalog = DeviceQuirkCatalog(),
+): DesktopPlacementStrategy {
+    val selection = bootstrapPlacementSelection(identity, quirks)
+    return when (selection.mode) {
+        PlacementMode.DISPLAY_LOCAL -> DisplayLocalRestartAdapter(selection)
+        PlacementMode.MOVABLE -> MovableSecondaryDisplayAdapter(selection)
+    }
+}
+
+fun bootstrapCurrentDevicePlacementStrategy(): DesktopPlacementStrategy =
+    bootstrapPlacementStrategy(
+        DeviceIdentity(
+            Build.MANUFACTURER,
+            Build.BRAND,
+            Build.DEVICE,
+            Build.MODEL,
+        ),
+    )
 
 class DesktopPlacementSelector(
     private val quirks: DeviceQuirkCatalog,

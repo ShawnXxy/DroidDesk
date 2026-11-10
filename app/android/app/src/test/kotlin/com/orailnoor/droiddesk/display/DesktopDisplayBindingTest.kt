@@ -1,6 +1,10 @@
 package com.orailnoor.droiddesk.display
 
 import android.app.Activity
+import com.orailnoor.droiddesk.display.capability.PlacementMode
+import com.orailnoor.droiddesk.display.placement.DisplayLocalRestartAdapter
+import com.orailnoor.droiddesk.display.placement.PlacementSelection
+import com.orailnoor.droiddesk.display.placement.PlacementSelectionSource
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -22,7 +26,14 @@ class DesktopDisplayBindingTest {
     fun hostRejectionReturnsBeforeDisplayLocalOrientationWork() {
         val coordinator = DesktopDisplayCoordinator(
             host = BindingHost(accepted = false),
-            environmentPolicy = DisplayEnvironmentPolicy.forDevice("darwin"),
+            placementStrategy = DisplayLocalRestartAdapter(
+                PlacementSelection(
+                    mode = PlacementMode.DISPLAY_LOCAL,
+                    source = PlacementSelectionSource.DEVICE_QUIRK,
+                    allowAutomaticMoves = false,
+                    reason = "binding rejection test",
+                ),
+            ),
         )
 
         assertFalse(coordinator.bindActivity(Activity()))
