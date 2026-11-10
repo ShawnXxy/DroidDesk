@@ -160,13 +160,12 @@ class DesktopDisplayCoordinator(
     private var requestSequence = 0L
     private var lastTarget: DesktopDisplay? = null
     private var sessionTarget: DesktopStartupTarget? = null
-    private val startupMachine =
-        StartupAttemptMachine<(Result<Unit>) -> Unit>(1L, StartupSpec("termux", "xfce4"))
+    private val startupMachine = StartupAttemptMachine<(Result<Unit>) -> Unit>(1L, StartupSpec("termux", "xfce4"))
     private var acceptedLaunchIdentity: StartupIdentity? = null
     private var sessionRestarting = false
     private var restartStartService: () -> Unit = {}
     private val restartController = DisplayLocalSessionController(object : DisplayLocalSessionHost<RestartRequest> {
-        override fun sessionEpoch() = sessionGeneration
+        override fun sessionEpoch() = publishedSessionGeneration
         override fun isSessionCurrent(epoch: Long) = this@DesktopDisplayCoordinator.isSessionCurrent(epoch)
         override fun validateTarget(target: RestartRequest) {
             validateRestartTarget(target.target)
@@ -257,7 +256,7 @@ class DesktopDisplayCoordinator(
         return reservedEpoch
     }
 
-    fun isSessionCurrent(value: Long): Boolean = !isStopped && sessionGeneration == value
+    fun isSessionCurrent(value: Long): Boolean = !isStopped && publishedSessionGeneration == value
 
     fun prepareSession(mode: String, desktop: String, start: Boolean, expectedEpoch: Long? = null): Long {
         assertMainThread()
@@ -541,7 +540,7 @@ class DesktopDisplayCoordinator(
     ): Boolean {
         assertMainThread()
         if (!sessionRestarting && !placementStrategy.requiresSessionRestart(sessionTarget, target)) return false
-        val epoch = if (stopFailed && expectedEpoch == sessionGeneration) beginSession() else expectedEpoch
+        val epoch = if (stopFailed && expectedEpoch == publishedSessionGeneration) beginSession() else expectedEpoch
         restartController.requestRestart(
             RestartRequest(target, sessionMode, desktopEnv),
             epoch,
@@ -581,7 +580,7 @@ class DesktopDisplayCoordinator(
         cancelAutomaticOpening()
         automaticAttempts.clear()
         automaticSuppressed.clear()
-        automaticEpoch = sessionGeneration
+        automaticEpoch = publishedSessionGeneration
         reapplyActivityOrientations()
         publish()
     }
@@ -1072,8 +1071,8 @@ class DesktopDisplayCoordinator(
         val connections = current.filterNot { it.isDefault }.map { it.key }.toSet()
         automaticAttempts.retainAll(connections)
         automaticSuppressed.retainAll(connections)
-        if (automaticEpoch != sessionGeneration) {
-            automaticEpoch = sessionGeneration
+        if (automaticEpoch != publishedSessionGeneration) {
+            automaticEpoch = publishedSessionGeneration
             automaticAttempts.clear()
         }
         val target = automaticTarget(current)
@@ -1085,7 +1084,7 @@ class DesktopDisplayCoordinator(
         cancelAutomaticOpening()
         automaticTargetKey = target.key
         val sequence = automaticSequence
-        val epoch = sessionGeneration
+        val epoch = publishedSessionGeneration
         cancelAutomaticTimer = platform.scheduleTimeout(500L) {
             if (sequence != automaticSequence || !isSessionCurrent(epoch)) return@scheduleTimeout
             cancelAutomaticTimer = null
@@ -1182,11 +1181,9 @@ class DesktopDisplayCoordinator(
         startupResultDeliveries.addLast {
             val previousEpoch = observerSessionGeneration.get()
             observerSessionGeneration.set(settlement.identity.epoch)
-            try {
-                observers.forEach { it(settlement.result) }
-            } finally {
-                if (previousEpoch == null) observerSessionGeneration.remove()
-                else observerSessionGeneration.set(previousEpoch)
+            try { observers.forEach { it(settlement.result) } } finally {
+                if (previousEpoch == null) observerSessionGeneration.remove() else
+                    observerSessionGeneration.set(previousEpoch)
             }
             settlement.waiters.forEach { it(settlement.result) }
             afterDelivery()

@@ -336,6 +336,32 @@ class DisplayLocalStartupTest {
     }
 
     @Test
+    fun sessionStartObserverCanReservePrepareAwaitAndLaunchAReplacement() {
+        val originalEpoch = coordinator.prepareSession("proot", "xfce4", true)
+        val readiness = mutableListOf<Result<Unit>>()
+        var replacementEpoch: Long? = null
+        coordinator.subscribeSessionStart {
+            val reservedEpoch = coordinator.beginSession()
+            replacementEpoch = coordinator.prepareSession(
+                "chroot",
+                "plasma",
+                start = true,
+                expectedEpoch = reservedEpoch,
+            )
+            coordinator.awaitSessionReady(checkNotNull(replacementEpoch), readiness::add)
+            coordinator.openActive(target(tnt)) {}
+        }
+
+        coordinator.sessionStarted(originalEpoch, Result.success(Unit))
+
+        assertTrue(readiness.isEmpty())
+        assertEquals(
+            replacementEpoch,
+            host.launches.single().sessionGeneration,
+        )
+    }
+
+    @Test
     fun observerRegisteredByReentrantPublicationDoesNotReceiveTheOldResult() {
         val epoch = coordinator.prepareSession("proot", "xfce4", start = true)
         val observed = mutableListOf<Result<Unit>>()
