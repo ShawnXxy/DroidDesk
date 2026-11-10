@@ -698,6 +698,7 @@ class DesktopDisplayCoordinator(
     private fun continueOpen(operation: OpenOperation, startService: () -> Unit,
         completion: ((Long?, Result<Unit>) -> Unit)?) {
         val primary = completion == null
+        if (completion != null) { operation.placementPending = true; operation.completions += completion }
         val epoch = checkNotNull(operation.epoch)
         val startFailure = try {
             startService()
@@ -712,15 +713,14 @@ class DesktopDisplayCoordinator(
         }
         if (startFailure != null) {
             val result = Result.failure<Unit>(startFailure)
-            val callbacks = completion?.let(::listOf) ?: operation.takeCompletions()
+            val callbacks = operation.takeCompletions()
             if (primary && openOperation === operation) openOperation = null
             if (primary && operation.key.request.startSession) sessionStarted(epoch, result)
             callbacks.forEach { it(epoch, result) }
             return
         }
         if (!isSessionCurrent(epoch)) {
-            completeOpen(
-                operation, epoch, startupFailure("The Linux session was stopped"), completion)
+            completeOpen(operation, epoch, startupFailure("The Linux session was stopped"))
             return
         }
         val requestSequenceBefore = requestSequence
@@ -728,7 +728,7 @@ class DesktopDisplayCoordinator(
         var returned = false
         var deferred: Result<Unit>? = null
         fun placed(result: Result<Unit>) {
-            val callbacks = completion?.let(::listOf) ?: operation.takeCompletions()
+            val callbacks = operation.takeCompletions()
             if (result.isFailure) {
                 if (primary && !placementTransaction) rollbackOwnedOpen(operation, epoch, result)
                 releaseOpenOperation(operation)
@@ -746,9 +746,8 @@ class DesktopDisplayCoordinator(
         deferred?.let(::placed)
     }
 
-    private fun completeOpen(operation: OpenOperation, epoch: Long, result: Result<Unit>,
-        completion: ((Long?, Result<Unit>) -> Unit)? = null) {
-        val callbacks = completion?.let(::listOf) ?: operation.takeCompletions()
+    private fun completeOpen(operation: OpenOperation, epoch: Long, result: Result<Unit>) {
+        val callbacks = operation.takeCompletions()
         releaseOpenOperation(operation)
         callbacks.forEach { it(epoch, result) }
     }

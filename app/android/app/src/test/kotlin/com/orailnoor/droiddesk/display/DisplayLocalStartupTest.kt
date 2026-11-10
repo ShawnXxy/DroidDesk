@@ -501,6 +501,35 @@ class DisplayLocalStartupTest {
     }
 
     @Test
+    fun repeatedOpenJoinsAPendingFollowUpPlacement() {
+        val request = openRequest(tnt, startSession = true)
+        val first = mutableListOf<Result<Unit>>()
+        coordinator.requestOpen(request, {}, first::add)
+        val epoch = host.launches.single().sessionGeneration
+        attach()
+        host.focusResult = false
+        val second = mutableListOf<Result<Unit>>()
+        val third = mutableListOf<Result<Unit>>()
+        var secondStarts = 0
+        var thirdStarts = 0
+
+        coordinator.requestOpen(request, { secondStarts++ }, second::add)
+        coordinator.requestOpen(request, { thirdStarts++ }, third::add)
+
+        assertEquals(2, host.launches.size)
+        assertEquals(1, secondStarts)
+        assertEquals(0, thirdStarts)
+        assertTrue(second.isEmpty())
+        assertTrue(third.isEmpty())
+
+        attach()
+        coordinator.sessionStarted(epoch, Result.success(Unit))
+        assertTrue(first.single().isSuccess)
+        assertTrue(second.single().isSuccess)
+        assertTrue(third.single().isSuccess)
+    }
+
+    @Test
     fun requestOpenRetriesAnEnvironmentRestartAfterFailedStop() {
         val localHost = LocalStartupHost(listOf(phone, tnt)).apply {
             currentDisplay = tnt.id
