@@ -1642,6 +1642,103 @@ class DisplayLocalStartupTest {
     }
 
     @Test
+    fun refreshedIneligibleRetainedDisplayIsNotKept() {
+        val genericHost = LocalStartupHost(listOf(phone, tnt))
+        val generic = DesktopDisplayCoordinator(
+            host = genericHost,
+            placementStrategy = movableStrategy(),
+        )
+        val epoch = generic.prepareSession("proot", "xfce4", start = true)
+        val readiness = mutableListOf<Result<Unit>>()
+        val observed = mutableListOf<Result<Unit>>()
+        val placement = mutableListOf<Result<Unit>>()
+        var detached = 0
+        var finished = 0
+        generic.awaitSessionReady(epoch, readiness::add)
+        generic.subscribeSessionStart(observed::add)
+        generic.openActive {}
+        attach(
+            coordinator = generic,
+            host = genericHost,
+            detach = { detached++ },
+            finish = { finished++ },
+            actualDisplay = { phone.id },
+        )
+        genericHost.focusResult = false
+        generic.openActive(placement::add)
+        genericHost.displaysAction = {
+            genericHost.connected = listOf(
+                phone.copy(eligible = false, reason = "Placement permission changed"),
+                tnt,
+            )
+            genericHost.currentDisplay = null
+        }
+
+        genericHost.fireTimers()
+
+        val failure = placement.single().exceptionOrNull()
+        assertEquals("PLACEMENT_TIMEOUT", (failure as DesktopDisplayException).code)
+        assertSame(failure, readiness.single().exceptionOrNull())
+        assertSame(failure, observed.single().exceptionOrNull())
+        assertEquals(1, detached)
+        assertEquals(1, finished)
+        assertEquals(listOf(failure), genericHost.returnRequired)
+    }
+
+    @Test
+    fun ownerOnlyReleaseWithoutFallbackSettlesReadiness() {
+        val genericHost = LocalStartupHost(listOf(phone, tnt))
+        val generic = DesktopDisplayCoordinator(
+            host = genericHost,
+            placementStrategy = movableStrategy(),
+        )
+        val epoch = generic.prepareSession("proot", "xfce4", start = true)
+        val readiness = mutableListOf<Result<Unit>>()
+        val observed = mutableListOf<Result<Unit>>()
+        val placement = mutableListOf<Result<Unit>>()
+        generic.awaitSessionReady(epoch, readiness::add)
+        generic.subscribeSessionStart(observed::add)
+        generic.openActive {}
+        val retained = attach(generic, genericHost) { phone.id }
+        genericHost.focusResult = false
+        generic.openActive {
+            placement += it
+            generic.release(retained)
+        }
+
+        genericHost.fireTimers()
+
+        val failure = placement.single().exceptionOrNull()
+        assertEquals("PLACEMENT_TIMEOUT", (failure as DesktopDisplayException).code)
+        assertSame(failure, readiness.single().exceptionOrNull())
+        assertSame(failure, observed.single().exceptionOrNull())
+        assertEquals(listOf(failure), genericHost.returnRequired)
+    }
+
+    @Test
+    fun moveCompletionTopologyChangeRecomputesFallback() {
+        val hdmi = DesktopDisplay(200004, "hdmi", "HDMI", false, true, null)
+        val genericHost = LocalStartupHost(listOf(phone, tnt, hdmi))
+        val generic = DesktopDisplayCoordinator(
+            host = genericHost,
+            placementStrategy = movableStrategy(),
+        )
+        generic.prepareSession("proot", "xfce4", start = true)
+        generic.open(hdmi.id, hdmi.key) {}
+        attach(generic, genericHost) { hdmi.id }
+        generic.open(tnt.id, tnt.key) {
+            genericHost.connected = listOf(phone, tnt)
+        }
+
+        genericHost.fireTimers()
+
+        assertEquals(
+            listOf(hdmi.id, tnt.id, phone.id),
+            genericHost.launches.map { it.display.id },
+        )
+    }
+
+    @Test
     fun retainedOwnerActualDisplayIsRecomputedAfterCurrentDisplayCallback() {
         val currentPhone = phone.copy(
             eligible = false,

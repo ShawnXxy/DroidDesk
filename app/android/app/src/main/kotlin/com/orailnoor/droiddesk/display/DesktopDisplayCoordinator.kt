@@ -1223,12 +1223,17 @@ class DesktopDisplayCoordinator(
         if (!isCurrent(continuation)) return finishRetirement()
         available = displays()
         if (!isCurrent(continuation)) return finishRetirement()
-        val stableRetainedDisplay = retainedDisplay?.takeIf { display ->
-            actual == retained?.lease?.displayId &&
-                available.any { it.id == display.id && it.key == display.key }
+        val stableRetainedDisplay = retainedDisplay?.let { display ->
+            available.firstOrNull {
+                it.id == display.id && it.key == display.key && canLaunch(it)
+            }
         }
+        if (!isCurrent(continuation)) return finishRetirement()
+        actual = retained?.actualDisplay?.invoke()
+        if (!isCurrent(continuation)) return finishRetirement()
         val selected = continuation.startup.selectedIdentity
         val compatible = stableRetainedDisplay != null &&
+            actual == retained?.lease?.displayId &&
             (selected == null || retained?.launchIdentity?.let {
                 sameStartupAttempt(it, selected)
             } == true)
@@ -1239,10 +1244,7 @@ class DesktopDisplayCoordinator(
             discarded.detach()
             if (!isCurrent(continuation)) return finishRetirement(discarded)
             available = displays()
-            if (!isCurrent(continuation)) {
-                finishRetirement(discarded)
-                return
-            }
+            if (!isCurrent(continuation)) return finishRetirement(discarded)
         }
 
         val settledSuccess = continuation.startup.terminalResult?.isSuccess == true
@@ -1253,10 +1255,7 @@ class DesktopDisplayCoordinator(
             pending.previousTarget,
             pending.request.display,
         )
-        if (!isCurrent(continuation)) {
-            finishRetirement(discarded)
-            return
-        }
+        if (!isCurrent(continuation)) return finishRetirement(discarded)
         var recoverToFallback = recover && !pending.recovery &&
             fallback != null && fallback.key != pending.request.display.key
         if (retained != null && discarded == null && !matchesSelected && !recoverToFallback) {
@@ -1264,24 +1263,15 @@ class DesktopDisplayCoordinator(
             clearOwner(retained)
             continuation = captureContinuation()
             retained.detach()
-            if (!isCurrent(continuation)) {
-                finishRetirement(retained)
-                return
-            }
+            if (!isCurrent(continuation)) return finishRetirement(retained)
             available = displays()
-            if (!isCurrent(continuation)) {
-                finishRetirement(retained)
-                return
-            }
+            if (!isCurrent(continuation)) return finishRetirement(retained)
             fallback = placementStrategy.fallbackTarget(
                 available,
                 pending.previousTarget,
                 pending.request.display,
             )
-            if (!isCurrent(continuation)) {
-                finishRetirement(retained)
-                return
-            }
+            if (!isCurrent(continuation)) return finishRetirement(retained)
             recoverToFallback = fallback?.let {
                 recover && !pending.recovery && it.key != pending.request.display.key
             } == true
@@ -1320,28 +1310,34 @@ class DesktopDisplayCoordinator(
             if (isStopped || (!isCurrent(continuation) && !ownerOnlyRelease)) {
                 return@finishStartupResultDelivery
             }
-            if (publishedFailure && error == null) {
-                error = failure
-                phase = "error"
+            if (matchesSelected && !ownerOnlyRelease) {
+                if (publishedFailure && error == null) { error = failure; phase = "error" }
+                return@finishStartupResultDelivery
             }
-            if (matchesSelected) return@finishStartupResultDelivery
-            if (ownerOnlyRelease) {
-                available = displays()
-                if (isStopped || owner != null || move !== continuation.move ||
-                    requestSequence != continuation.requestSequence ||
-                    generation != continuation.generation ||
-                    !sameAttemptContext(continuation.startup)) return@finishStartupResultDelivery
-                fallback = placementStrategy.fallbackTarget(
-                    available,
-                    pending.previousTarget,
-                    pending.request.display,
-                )
-                recoverToFallback = fallback?.let {
-                    recover && !pending.recovery && it.key != pending.request.display.key
-                } == true
-            }
+            available = displays()
+            val expectedOwner = if (ownerOnlyRelease) null else continuation.owner
+            if (isStopped || owner !== expectedOwner || move !== continuation.move ||
+                requestSequence != continuation.requestSequence ||
+                generation != continuation.generation ||
+                !sameAttemptContext(continuation.startup)) return@finishStartupResultDelivery
+            fallback = placementStrategy.fallbackTarget(
+                available,
+                pending.previousTarget,
+                pending.request.display,
+            )
+            recoverToFallback = fallback?.let {
+                recover && !pending.recovery && it.key != pending.request.display.key
+            } == true
+            if (publishedFailure && error == null) { error = failure; phase = "error" }
             if (recoverToFallback) {
                 openTarget(checkNotNull(fallback), {}, recovery = true)
+            } else if (ownerOnlyRelease) {
+                val lateSettlement = startupMachine.settle(
+                    pending.request.sessionGeneration, result, failure,
+                )
+                finishStartupResultDelivery(queueStartupResult(lateSettlement)) {
+                    checkNotNull(host).notifyReturnRequired(failure)
+                }
             } else {
                 checkNotNull(host).notifyReturnRequired(failure)
             }
