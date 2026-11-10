@@ -9,13 +9,24 @@ import org.junit.Test
 
 class SessionStartTransferTest {
     @Test
+    fun claimReturnsAcceptedLease() {
+        val coordinator = DesktopDisplayCoordinator()
+
+        val claim = coordinator.claim(7) {}
+        val lease = (claim as RendererClaim.Accepted).lease
+
+        assertEquals(RendererLease(generation = 1, displayId = 7), lease)
+        assertTrue(coordinator.isCurrent(lease))
+    }
+
+    @Test
     fun rendererReplacementTransfersConsumedSessionStart() {
         val coordinator = DesktopDisplayCoordinator()
         val epoch = coordinator.prepareSession("proot", "xfce4", true)
-        val first = coordinator.claim(0) {}
+        val first = (coordinator.claim(0) {} as RendererClaim.Accepted).lease
         assertTrue(coordinator.consumeSessionStart(first))
 
-        val replacement = coordinator.claim(0) {}
+        val replacement = (coordinator.claim(0) {} as RendererClaim.Accepted).lease
 
         assertTrue(coordinator.consumeSessionStart(replacement))
         assertNull(coordinator.beginSessionStart(first))
@@ -26,7 +37,7 @@ class SessionStartTransferTest {
     fun replacementCanAwaitStartupAlreadyBegunByRetiredRenderer() {
         val coordinator = DesktopDisplayCoordinator()
         val epoch = coordinator.prepareSession("proot", "xfce4", true)
-        val first = coordinator.claim(0) {}
+        val first = (coordinator.claim(0) {} as RendererClaim.Accepted).lease
         assertTrue(coordinator.consumeSessionStart(first))
         assertEquals(epoch, coordinator.beginSessionStart(first))
         coordinator.claim(0) {}

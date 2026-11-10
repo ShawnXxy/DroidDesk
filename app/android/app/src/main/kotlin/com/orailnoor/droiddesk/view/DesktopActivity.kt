@@ -55,6 +55,7 @@ import com.orailnoor.droiddesk.display.input.externalInputRoute
 import com.orailnoor.droiddesk.display.input.shouldFinishInputRelay
 import com.orailnoor.droiddesk.display.input.usesRendererPointerCapture
 import com.orailnoor.droiddesk.display.RendererLease
+import com.orailnoor.droiddesk.display.RendererClaim
 import com.orailnoor.droiddesk.display.DisplayProfile
 import com.orailnoor.droiddesk.display.DisplayProfilePolicy
 import com.orailnoor.droiddesk.display.ProfileKind
@@ -80,6 +81,17 @@ internal fun continueAfterActivityBinding(
     }
     rejectAttachment()
     finishActivity()
+}
+
+internal fun continueAfterRendererClaim(
+    claim: RendererClaim,
+    finishActivity: () -> Unit,
+    continueWithLease: (RendererLease) -> Unit,
+) {
+    when (claim) {
+        is RendererClaim.Accepted -> continueWithLease(claim.lease)
+        RendererClaim.Rejected -> finishActivity()
+    }
 }
 
 class DesktopActivity : Activity() {
@@ -353,9 +365,16 @@ class DesktopActivity : Activity() {
             finish()
             return
         }
-        val lease = displayCoordinator.claim(windowManager.defaultDisplay.displayId) {
+        val claim = displayCoordinator.claim(windowManager.defaultDisplay.displayId) {
             detachRenderer()
         }
+        var acceptedLease: RendererLease? = null
+        continueAfterRendererClaim(
+            claim = claim,
+            finishActivity = { finish() },
+            continueWithLease = { acceptedLease = it },
+        )
+        val lease = acceptedLease ?: return
         rendererLease = lease
         lorieView = TermuxMainActivity.getInstance().attachLorieView(this, lease.generation)
         displayCoordinator.registerActivity(

@@ -218,7 +218,7 @@ class DesktopDisplayLauncherPolicyTest {
         ))
         assertTrue(host.bindDesktopOnCreateFromPreviousEvidence(request.display.key))
 
-        val lease = coordinator.claim(request.display.id) {}
+        val lease = (coordinator.claim(request.display.id) {} as RendererClaim.Accepted).lease
         coordinator.registerActivity(lease, request.requestId) {}
         assertTrue(host.bindDesktopOnResumeWithoutEvidence(request.display.key))
         assertTrue(host.confirmDelayedDecorEvidence(request.display.key))

@@ -177,7 +177,7 @@ class DisplayLocalStartupTest {
             host = genericHost,
             placementStrategy = movable,
         )
-        val lease = generic.claim(phone.id) {}
+        val lease = (generic.claim(phone.id) {} as RendererClaim.Accepted).lease
         genericHost.running = false
 
         val failure = assertThrows(DesktopDisplayException::class.java) {
@@ -627,7 +627,7 @@ class DisplayLocalStartupTest {
         actualDisplay: () -> Int = { host.launches.last().display.id },
     ) {
         val request = host.launches.last()
-        val lease = coordinator.claim(request.display.id) {}
+        val lease = (coordinator.claim(request.display.id) {} as RendererClaim.Accepted).lease
         coordinator.registerActivity(lease, request.requestId, actualDisplay) {}
         coordinator.reportGeometry(lease, ProfileKind.MONITOR, PixelSize(1920, 1080))
         coordinator.onAttached(lease, request.requestId, PixelSize(1920, 1080))
