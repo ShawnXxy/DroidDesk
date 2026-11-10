@@ -235,6 +235,7 @@ class DesktopDisplayCoordinator(
     fun beginSession(): Long {
         assertMainThread()
         if (pendingStops > 0) throw DesktopDisplayException("SESSION_STOPPED", "Desktop teardown is still finishing")
+        cancelAutomaticOpening()
         val previousFailure = startupMachine.snapshot().terminalFailure
         val transition = startupMachine.reserveEpoch(startupFailure("The Linux startup was replaced"))
         val reservedEpoch = transition.snapshot.epoch
@@ -336,16 +337,15 @@ class DesktopDisplayCoordinator(
             failure = failure,
             notifyObservers = true,
         ) ?: return
-        val deliverResults = queueStartupResult(settlement)
+        val deliverResults = queueStartupResult(settlement) {
+            if (isCurrentRevision(settlement.revision)) publish()
+            if (result.isSuccess && isSessionCurrent(epoch)) refreshAutomaticOpening()
+        }
         if (failure != null) {
             error = failure
             if (!isStopped) phase = "error"
         }
-        publish()
         finishStartupResultDelivery(deliverResults)
-        if (result.isSuccess && isSessionCurrent(epoch)) {
-            refreshAutomaticOpening()
-        }
     }
 
     fun startStopping(preserveRestart: Boolean = false) {
@@ -1171,12 +1171,14 @@ class DesktopDisplayCoordinator(
 
     private fun queueStartupResult(
         settlement: StartupSettlement<(Result<Unit>) -> Unit>?,
+        afterDelivery: () -> Unit = {},
     ): Boolean {
         settlement ?: return false
         val observers = if (settlement.notifyObservers) sessionStartListeners.toList() else emptyList()
         startupResultDeliveries.addLast {
             observers.forEach { it(settlement.result) }
             settlement.waiters.forEach { it(settlement.result) }
+            afterDelivery()
         }
         if (deliveringStartupResults) return false
         deliveringStartupResults = true
