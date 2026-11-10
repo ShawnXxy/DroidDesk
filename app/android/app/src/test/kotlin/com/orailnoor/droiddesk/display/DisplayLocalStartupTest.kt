@@ -780,11 +780,11 @@ class DisplayLocalStartupTest {
         val epoch = coordinator.prepareSession("proot", "xfce4", start = true)
         coordinator.openActive(target(tnt)) {}
         val request = host.launches.single()
-        val first = coordinator.claim(tnt.id) {}
+        val first = (coordinator.claim(tnt.id) {} as RendererClaim.Accepted).lease
         coordinator.registerActivity(first, request.requestId) {}
         assertTrue(coordinator.consumeSessionStart(first))
 
-        val replacement = coordinator.claim(tnt.id) {}
+        val replacement = (coordinator.claim(tnt.id) {} as RendererClaim.Accepted).lease
         coordinator.registerActivity(replacement, request.requestId) {}
 
         assertTrue(coordinator.consumeSessionStart(replacement))
@@ -798,12 +798,12 @@ class DisplayLocalStartupTest {
         val superseded = mutableListOf<Result<Unit>>()
         coordinator.openActive(target(tnt), superseded::add)
         val request = host.launches.single()
-        val first = coordinator.claim(tnt.id) {}
+        val first = (coordinator.claim(tnt.id) {} as RendererClaim.Accepted).lease
         coordinator.registerActivity(first, request.requestId) {}
         assertTrue(coordinator.consumeSessionStart(first))
 
         val retryEpoch = coordinator.prepareSession("chroot", "plasma", start = true)
-        val replacement = coordinator.claim(tnt.id) {}
+        val replacement = (coordinator.claim(tnt.id) {} as RendererClaim.Accepted).lease
         coordinator.registerActivity(replacement, request.requestId) {}
 
         assertEquals(
@@ -946,7 +946,7 @@ class DisplayLocalStartupTest {
         var incomingFinished = 0
         generic.openActive {}
         val phoneRequest = genericHost.launches.single()
-        val previous = generic.claim(phone.id) {}
+        val previous = (generic.claim(phone.id) {} as RendererClaim.Accepted).lease
         generic.registerActivity(previous, phoneRequest.requestId, { phone.id }) {
             previousFinished++
         }
@@ -954,11 +954,11 @@ class DisplayLocalStartupTest {
         val placement = mutableListOf<Result<Unit>>()
         generic.open(tnt.id, tnt.key, placement::add)
         val pendingRequest = genericHost.launches.last()
-        val intermediate = generic.claim(tnt.id) {}
+        val intermediate = (generic.claim(tnt.id) {} as RendererClaim.Accepted).lease
         generic.registerActivity(intermediate, pendingRequest.requestId, { tnt.id }) {
             intermediateFinished++
         }
-        val incoming = generic.claim(tnt.id) {}
+        val incoming = (generic.claim(tnt.id) {} as RendererClaim.Accepted).lease
         generic.registerActivity(incoming, pendingRequest.requestId, { tnt.id }) {
             incomingFinished++
         }
@@ -987,7 +987,7 @@ class DisplayLocalStartupTest {
         var previousFinished = 0
         generic.openActive {}
         val phoneRequest = genericHost.launches.single()
-        val previous = generic.claim(phone.id) {}
+        val previous = (generic.claim(phone.id) {} as RendererClaim.Accepted).lease
         generic.registerActivity(previous, phoneRequest.requestId, { phone.id }) {
             previousFinished++
         }
@@ -1007,11 +1007,11 @@ class DisplayLocalStartupTest {
         var claimReturned = false
         var registrationReturned = false
         var incomingDetached = 0
-        val incoming = generic.claim(tnt.id) {
+        val incoming = (generic.claim(tnt.id) {
             assertTrue(claimReturned)
             assertTrue(registrationReturned)
             incomingDetached++
-        }
+        } as RendererClaim.Accepted).lease
         claimReturned = true
         generic.registerActivity(incoming, pendingRequest.requestId, { tnt.id }) {}
         registrationReturned = true
@@ -1052,29 +1052,57 @@ class DisplayLocalStartupTest {
     }
 
     @Test
-    fun previousOwnerCleanupCannotReplaceTheSessionBeforeClaimReturns() {
+    fun reentrantPreviousOwnerCleanupCannotInstallAStaleClaim() {
         val genericHost = LocalStartupHost(listOf(phone, tnt))
         val generic = DesktopDisplayCoordinator(
             host = genericHost,
             placementStrategy = movableStrategy(),
         )
         var replacementEpoch: Long? = null
+        var previousDetached = false
         generic.openActive {}
         val phoneRequest = genericHost.launches.single()
-        val previous = generic.claim(phone.id) {
+        val previous = (generic.claim(phone.id) {
+            previousDetached = true
             replacementEpoch = generic.prepareSession("chroot", "plasma", start = true)
-        }
+        } as RendererClaim.Accepted).lease
         generic.registerActivity(previous, phoneRequest.requestId, { phone.id }) {}
         generic.onAttached(previous, phoneRequest.requestId, PixelSize(1920, 1080))
         generic.open(tnt.id, tnt.key) {}
 
-        val incoming = generic.claim(tnt.id) {}
+        var incomingDetached = 0
+        val incoming = generic.claim(tnt.id) {
+            incomingDetached++
+        }
 
-        assertNull(replacementEpoch)
-        assertTrue(generic.isCurrent(incoming))
-        genericHost.fireTimers()
+        assertTrue(previousDetached)
         assertNotNull(replacementEpoch)
-        assertFalse(generic.isCurrent(incoming))
+        assertSame(RendererClaim.Rejected, incoming)
+        assertEquals(0, incomingDetached)
+        genericHost.fireTimers()
+        assertEquals(0, incomingDetached)
+    }
+
+    @Test
+    fun reentrantClaimWinsWithoutBeingOverwrittenByTheOuterClaim() {
+        val genericHost = LocalStartupHost(listOf(phone, tnt))
+        val generic = DesktopDisplayCoordinator(
+            host = genericHost,
+            placementStrategy = movableStrategy(),
+        )
+        var nested: RendererLease? = null
+        generic.claim(phone.id) {
+            nested = (generic.claim(phone.id) {} as RendererClaim.Accepted).lease
+        }
+        var outerDetached = 0
+
+        val outer = generic.claim(tnt.id) { outerDetached++ }
+
+        assertTrue(generic.isCurrent(checkNotNull(nested)))
+        assertSame(RendererClaim.Rejected, outer)
+        assertEquals(0, outerDetached)
+        genericHost.fireTimers()
+        assertEquals(0, outerDetached)
     }
 
     @Test
@@ -1162,7 +1190,7 @@ class DisplayLocalStartupTest {
         coordinator.subscribeSessionStart(observed::add)
         coordinator.openActive(target(tnt), placement::add)
         val request = host.launches.single()
-        val incoming = coordinator.claim(tnt.id) {}
+        val incoming = (coordinator.claim(tnt.id) {} as RendererClaim.Accepted).lease
         coordinator.registerActivity(incoming, request.requestId, { tnt.id }) {}
         var retryEpoch: Long? = null
         var reentered = false

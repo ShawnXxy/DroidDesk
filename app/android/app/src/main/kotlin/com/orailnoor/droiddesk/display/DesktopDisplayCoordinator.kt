@@ -416,17 +416,19 @@ class DesktopDisplayCoordinator(
         check(!isStopped) { "SESSION_STOPPED" }
         val previous = owner
         val pending = move
+        val epoch = sessionGeneration
         owner = null
         profileRefresher = null
         releaseSessionStartClaim(previous?.lease)
+        previous?.detach?.invoke()
+        if (pending == null || previous?.lease != pending.previous?.lease) previous?.finish?.invoke()
         check(!isStopped) { "SESSION_STOPPED" }
         appliedKind = null
         renderSize = null
-        val requestId = pending?.takeIf { move === it && it.request.display.id == displayId }?.request?.requestId
+        if (sessionGeneration != epoch || move !== pending || owner != null) return RendererClaim.Rejected
         val lease = RendererLease(++generation, displayId)
+        val requestId = pending?.takeIf { it.request.display.id == displayId }?.request?.requestId
         owner = Owner(lease, detachPrevious, requestId = requestId)
-        val cleanup = { previous?.detach?.invoke(); if (pending == null || previous?.lease != pending.previous?.lease) previous?.finish?.invoke() }
-        if (previous != null) host?.scheduleTimeout(0, cleanup) ?: cleanup()
         return RendererClaim.Accepted(lease)
     }
 
