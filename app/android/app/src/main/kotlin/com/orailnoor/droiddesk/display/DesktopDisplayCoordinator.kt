@@ -19,6 +19,11 @@ import java.util.concurrent.atomic.AtomicBoolean
 
 data class RendererLease(val generation: Long, val displayId: Int)
 
+sealed interface RendererClaim {
+    data class Accepted(val lease: RendererLease) : RendererClaim
+    data object Rejected : RendererClaim
+}
+
 data class DesktopLaunchRequest(
     val display: DesktopDisplay,
     val requestId: Long,
@@ -346,7 +351,7 @@ class DesktopDisplayCoordinator(
     }
 
     // The cleanup belongs to this lease and runs before the next owner attaches.
-    fun claim(displayId: Int, detachPrevious: () -> Unit): RendererLease {
+    fun claim(displayId: Int, detachPrevious: () -> Unit): RendererClaim {
         assertMainThread()
         check(!isStopped) { "SESSION_STOPPED" }
         val previous = owner
@@ -358,10 +363,10 @@ class DesktopDisplayCoordinator(
         check(!isStopped) { "SESSION_STOPPED" }
         appliedKind = null
         renderSize = null
-        return RendererLease(++generation, displayId).also {
-            owner = Owner(it, detachPrevious)
-            publish()
-        }
+        val lease = RendererLease(++generation, displayId)
+        owner = Owner(lease, detachPrevious)
+        publish()
+        return RendererClaim.Accepted(lease)
     }
 
     fun isCurrent(lease: RendererLease): Boolean = owner?.lease == lease && !isStopped

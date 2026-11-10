@@ -1,9 +1,38 @@
 package com.orailnoor.droiddesk.view
 
+import com.orailnoor.droiddesk.display.RendererClaim
+import com.orailnoor.droiddesk.display.RendererLease
 import org.junit.Assert.assertEquals
 import org.junit.Test
 
 class DesktopActivityBindingTest {
+    @Test
+    fun acceptedRendererClaimContinuesWithExtractedLeaseWithoutFinishing() {
+        val calls = mutableListOf<String>()
+        val lease = RendererLease(generation = 4, displayId = 9)
+
+        continueAfterRendererClaim(
+            claim = RendererClaim.Accepted(lease),
+            finishActivity = { calls += "finish" },
+            continueWithLease = { calls += "continue:$it" },
+        )
+
+        assertEquals(listOf("continue:$lease"), calls)
+    }
+
+    @Test
+    fun rejectedRendererClaimFinishesWithoutContinuingRendererSetup() {
+        val calls = mutableListOf<String>()
+
+        continueAfterRendererClaim(
+            claim = RendererClaim.Rejected,
+            finishActivity = { calls += "finish" },
+            continueWithLease = { calls += "continue" },
+        )
+
+        assertEquals(listOf("finish"), calls)
+    }
+
     @Test
     fun rejectedBindingRunsRejectionAndStopsLifecycleContinuation() {
         val calls = mutableListOf<String>()
