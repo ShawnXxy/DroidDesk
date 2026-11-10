@@ -1221,7 +1221,12 @@ class DesktopDisplayCoordinator(
         if (!isCurrent(continuation)) return finishRetirement()
         actual = retained?.actualDisplay?.invoke()
         if (!isCurrent(continuation)) return finishRetirement()
-        val stableRetainedDisplay = retainedDisplay?.takeIf { actual == retained?.lease?.displayId }
+        available = displays()
+        if (!isCurrent(continuation)) return finishRetirement()
+        val stableRetainedDisplay = retainedDisplay?.takeIf { display ->
+            actual == retained?.lease?.displayId &&
+                available.any { it.id == display.id && it.key == display.key }
+        }
         val selected = continuation.startup.selectedIdentity
         val compatible = stableRetainedDisplay != null &&
             (selected == null || retained?.launchIdentity?.let {
@@ -1240,8 +1245,9 @@ class DesktopDisplayCoordinator(
             }
         }
 
+        val settledSuccess = continuation.startup.terminalResult?.isSuccess == true
         val matchesSelected = compatible &&
-            (selected == null || retained?.launchIdentity == selected)
+            (settledSuccess || selected == null || retained?.launchIdentity == selected)
         var fallback = if (matchesSelected) null else placementStrategy.fallbackTarget(
             available,
             pending.previousTarget,
@@ -1276,8 +1282,9 @@ class DesktopDisplayCoordinator(
                 finishRetirement(retained)
                 return
             }
-            recoverToFallback = recover && !pending.recovery &&
-                fallback != null && fallback.key != pending.request.display.key
+            recoverToFallback = fallback?.let {
+                recover && !pending.recovery && it.key != pending.request.display.key
+            } == true
         }
 
         val terminal = !matchesSelected && !recoverToFallback
@@ -1302,14 +1309,37 @@ class DesktopDisplayCoordinator(
                 error = null
                 if (phase == "error") phase = if (owner == null) "hidden" else "attached"
             }
+            val currentBeforeFinish = isCurrent(continuation)
             discarded?.finish?.invoke()
             finishMoveRetirement(retirement, result)
-            if (isStopped || !isCurrent(continuation)) return@finishStartupResultDelivery
+            val ownerOnlyRelease = currentBeforeFinish && continuation.owner != null &&
+                !isStopped && owner == null && move === continuation.move &&
+                requestSequence == continuation.requestSequence &&
+                generation == continuation.generation &&
+                sameAttemptContext(continuation.startup)
+            if (isStopped || (!isCurrent(continuation) && !ownerOnlyRelease)) {
+                return@finishStartupResultDelivery
+            }
             if (publishedFailure && error == null) {
                 error = failure
                 phase = "error"
             }
             if (matchesSelected) return@finishStartupResultDelivery
+            if (ownerOnlyRelease) {
+                available = displays()
+                if (isStopped || owner != null || move !== continuation.move ||
+                    requestSequence != continuation.requestSequence ||
+                    generation != continuation.generation ||
+                    !sameAttemptContext(continuation.startup)) return@finishStartupResultDelivery
+                fallback = placementStrategy.fallbackTarget(
+                    available,
+                    pending.previousTarget,
+                    pending.request.display,
+                )
+                recoverToFallback = fallback?.let {
+                    recover && !pending.recovery && it.key != pending.request.display.key
+                } == true
+            }
             if (recoverToFallback) {
                 openTarget(checkNotNull(fallback), {}, recovery = true)
             } else {
