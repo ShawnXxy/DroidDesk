@@ -1299,10 +1299,9 @@ class DesktopDisplayCoordinator(
                 error = null
                 if (phase == "error") phase = if (owner == null) "hidden" else "attached"
             }
-            val currentBeforeFinish = isCurrent(continuation)
             discarded?.finish?.invoke()
             finishMoveRetirement(retirement, result)
-            val ownerOnlyRelease = currentBeforeFinish && continuation.owner != null &&
+            val ownerOnlyRelease = continuation.owner != null &&
                 !isStopped && owner == null && move === continuation.move &&
                 requestSequence == continuation.requestSequence &&
                 generation == continuation.generation &&
@@ -1326,20 +1325,25 @@ class DesktopDisplayCoordinator(
                 pending.request.display,
             )
             recoverToFallback = fallback?.let {
-                recover && !pending.recovery && it.key != pending.request.display.key
+                settlement == null && recover && !pending.recovery &&
+                    it.key != pending.request.display.key
             } == true
             if (publishedFailure && error == null) { error = failure; phase = "error" }
             if (recoverToFallback) {
                 openTarget(checkNotNull(fallback), {}, recovery = true)
-            } else if (ownerOnlyRelease) {
-                val lateSettlement = startupMachine.settle(
-                    pending.request.sessionGeneration, result, failure,
-                )
-                finishStartupResultDelivery(queueStartupResult(lateSettlement)) {
-                    checkNotNull(host).notifyReturnRequired(failure)
-                }
             } else {
-                checkNotNull(host).notifyReturnRequired(failure)
+                val lateSettlement = if (settlement == null &&
+                    continuation.startup.selectedIdentity == failedIdentity) {
+                    startupMachine.settle(pending.request.sessionGeneration, result, failure)
+                } else null
+                if (lateSettlement == null) {
+                    checkNotNull(host).notifyReturnRequired(failure)
+                } else {
+                    val lateContinuation = captureContinuation()
+                    finishStartupResultDelivery(queueStartupResult(lateSettlement)) {
+                        if (isCurrent(lateContinuation)) checkNotNull(host).notifyReturnRequired(failure)
+                    }
+                }
             }
         }
     }
