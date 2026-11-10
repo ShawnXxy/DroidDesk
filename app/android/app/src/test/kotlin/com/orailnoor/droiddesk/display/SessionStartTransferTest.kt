@@ -78,6 +78,19 @@ class SessionStartTransferTest {
     }
 
     @Test
+    fun releasedNestedClaimDuringCleanupStillRejectsTheOuterClaim() {
+        val coordinator = DesktopDisplayCoordinator()
+        coordinator.claim(0) {
+            val nested = (coordinator.claim(0) {} as RendererClaim.Accepted).lease
+            coordinator.release(nested)
+        }
+
+        val outer = coordinator.claim(7) {}
+
+        assertSame(RendererClaim.Rejected, outer)
+    }
+
+    @Test
     fun stopDuringClaimCleanupReturnsRejectedInsteadOfThrowing() {
         val coordinator = DesktopDisplayCoordinator()
         coordinator.claim(0) { coordinator.stop() }

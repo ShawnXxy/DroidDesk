@@ -957,6 +957,65 @@ class DisplayLocalStartupTest {
     }
 
     @Test
+    fun pendingMoveCannotTransferRetainedClaimAcrossEpochAndSpec() {
+        val genericHost = LocalStartupHost(listOf(phone, tnt))
+        val generic = DesktopDisplayCoordinator(
+            host = genericHost,
+            placementStrategy = movableStrategy(),
+        )
+        generic.prepareSession("proot", "xfce4", start = true)
+        generic.openActive {}
+        val retained = attach(generic, genericHost) { phone.id }
+        generic.prepareSession("chroot", "plasma", start = true)
+        generic.open(tnt.id, tnt.key) {}
+
+        val consumed = generic.consumeSessionStart(retained)
+        val begun = generic.beginSessionStart(retained)
+
+        assertFalse(consumed)
+        assertNull(begun)
+    }
+
+    @Test
+    fun consumeRebindsRetainedReservationAcrossSameAttemptTargets() {
+        val hdmi = DesktopDisplay(200004, "hdmi", "HDMI", false, true, null)
+        val genericHost = LocalStartupHost(listOf(phone, tnt, hdmi))
+        val generic = DesktopDisplayCoordinator(
+            host = genericHost,
+            placementStrategy = movableStrategy(allowAutomaticMoves = false),
+        )
+        val epoch = generic.prepareSession("proot", "xfce4", start = true)
+        generic.openActive {}
+        val retained = attach(generic, genericHost) { phone.id }
+        generic.open(tnt.id, tnt.key) {}
+        assertTrue(generic.consumeSessionStart(retained))
+        genericHost.fireTimers()
+        generic.open(hdmi.id, hdmi.key) {}
+
+        assertTrue(generic.consumeSessionStart(retained))
+        assertEquals(epoch, generic.beginSessionStart(retained))
+    }
+
+    @Test
+    fun delayedBeginRebindsRetainedReservationAcrossSameAttemptTargets() {
+        val hdmi = DesktopDisplay(200004, "hdmi", "HDMI", false, true, null)
+        val genericHost = LocalStartupHost(listOf(phone, tnt, hdmi))
+        val generic = DesktopDisplayCoordinator(
+            host = genericHost,
+            placementStrategy = movableStrategy(allowAutomaticMoves = false),
+        )
+        val epoch = generic.prepareSession("proot", "xfce4", start = true)
+        generic.openActive {}
+        val retained = attach(generic, genericHost) { phone.id }
+        generic.open(tnt.id, tnt.key) {}
+        assertTrue(generic.consumeSessionStart(retained))
+        genericHost.fireTimers()
+        generic.open(hdmi.id, hdmi.key) {}
+
+        assertEquals(epoch, generic.beginSessionStart(retained))
+    }
+
+    @Test
     fun focusReuseRearmsTheRetainedRendererAndCompletesReadiness() {
         val genericHost = LocalStartupHost(listOf(phone, tnt))
         val generic = DesktopDisplayCoordinator(
