@@ -109,7 +109,7 @@ class DesktopActivity : Activity() {
     private var inputController: X11InputController? = null
     private val displayCoordinator = DesktopDisplayCoordinator.shared
     private var rendererLease: RendererLease? = null
-    private var rendererReleased = false
+    private val rendererCleanup = RendererCleanup()
     private var inputDeviceListenerRegistered = false
     private val inputDeviceHandler = Handler(Looper.getMainLooper())
     private val inputDeviceListener = object : InputManager.InputDeviceListener {
@@ -118,7 +118,7 @@ class DesktopActivity : Activity() {
         override fun onInputDeviceChanged(deviceId: Int) = scheduleDesktopInputRefresh()
     }
     private val refreshDesktopInput = Runnable {
-        if (!rendererReleased && isCurrentRenderer()) attachDesktopInput()
+        if (!rendererCleanup.isReleased && isCurrentRenderer()) attachDesktopInput()
     }
     private var displayRequestId = 0L
     private var sessionEpoch = 0L
@@ -576,7 +576,7 @@ class DesktopActivity : Activity() {
     }
 
     private fun scheduleDesktopInputRefresh() {
-        if (!inputDeviceListenerRegistered || rendererReleased) return
+        if (!inputDeviceListenerRegistered || rendererCleanup.isReleased) return
         inputDeviceHandler.removeCallbacks(refreshDesktopInput)
         inputDeviceHandler.post(refreshDesktopInput)
     }
@@ -597,7 +597,7 @@ class DesktopActivity : Activity() {
     )
 
     private fun scheduleGeometry() {
-        if (geometryQueued || !::placeholder.isInitialized || rendererReleased) return
+        if (geometryQueued || !::placeholder.isInitialized || rendererCleanup.isReleased) return
         geometryQueued = true
         placeholder.postOnAnimation(geometryUpdate)
     }
@@ -1337,16 +1337,41 @@ class DesktopActivity : Activity() {
     } == true
 
     private fun detachRenderer() {
-        if (rendererReleased) return
-        rendererReleased = true
+        if (rendererCleanup.isReleased) return
+        val ownedLease = rendererLease
+        val ownsLorieView = ownedLease != null &&
+            TermuxMainActivity.getInstance().isLorieViewOwner(ownedLease.generation)
+        rendererCleanup.run(
+            releaseOwnedInput = { releaseRendererInput(ownsLorieView) },
+            completeTeardown = { completeRendererTeardown(ownedLease, ownsLorieView) },
+        )
+    }
+
+    private fun releaseRendererInput(ownsLorieView: Boolean) {
+        extraKeysBar?.releaseAll()
+        extraKeysBar = null
+        TermuxMainActivity.getInstance().apply {
+            if (ownsLorieView) {
+                mExtraKeys = null
+                useTermuxEKBarBehaviour = false
+            }
+        }
+        inputController?.let { controller ->
+            ExternalDesktopInputBridge.detach(controller)
+            controller.dispose()
+        }
+        inputController = null
+    }
+
+    private fun completeRendererTeardown(
+        ownedLease: RendererLease?,
+        ownsLorieView: Boolean,
+    ) {
         unregisterInputDeviceListener()
         sessionStartPending = false
         awaitingSessionStart = false
         profileRevision++
         desktopReady = false
-        val ownedLease = rendererLease
-        val ownsLorieView = ownedLease != null &&
-            TermuxMainActivity.getInstance().isLorieViewOwner(ownedLease.generation)
         if (ownsLorieView) {
             environmentManager.cancelDisplayProfile(EnvironmentKind.fromSessionMode(sessionMode))
         }
@@ -1363,28 +1388,14 @@ class DesktopActivity : Activity() {
         geometryListener = null
         if (::placeholder.isInitialized) placeholder.setOnApplyWindowInsetsListener(null)
         collapsedFadeHandler.removeCallbacks(fadeCollapsedControl)
-        extraKeysBar?.releaseAll()
-        extraKeysBar = null
-        val lease = rendererLease
-        TermuxMainActivity.getInstance().apply {
-            if (lease != null && isLorieViewOwner(lease.generation)) {
-                mExtraKeys = null
-                useTermuxEKBarBehaviour = false
-            }
-        }
         loadingMessageHandler.removeCallbacks(loadingMessageTicker)
         loadingMessageHandler.removeCallbacks(loadingEstimateTicker)
         surfaceCallback?.let { callback -> lorieView?.holder?.removeCallback(callback) }
         surfaceCallback = null
-        inputController?.let { controller ->
-            ExternalDesktopInputBridge.detach(controller)
-            controller.dispose()
-        }
         if (shouldFinishInputRelay(ownedLease != null, ownsLorieView)) {
             ExternalInputRelayActivity.finishIfOpen()
         }
-        inputController = null
-        lease?.let { TermuxMainActivity.getInstance().releaseLorieView(it.generation) }
+        ownedLease?.let { TermuxMainActivity.getInstance().releaseLorieView(it.generation) }
         (lorieView?.parent as? ViewGroup)?.removeView(lorieView)
         lorieView = null
         x11ServiceClient?.disconnect()
