@@ -70,20 +70,22 @@ internal fun deferResolvedDesktopOpenIfNeeded(
     isStopped: Boolean,
     isSessionCurrent: (Long) -> Boolean,
     deferUntilAttached: (() -> Unit) -> Unit,
-    retry: (Long) -> Unit,
+    retry: (Long?) -> Unit,
     cancel: () -> Unit,
 ): Boolean {
     if (isAttached) return false
     val deferredEpoch = expectedEpoch ?: sessionGeneration.takeUnless { isStopped }
-    if (deferredEpoch == null) {
-        cancel()
-        return true
-    }
     deferUntilAttached {
-        if (isSessionCurrent(deferredEpoch)) retry(deferredEpoch) else cancel()
+        if (deferredEpoch == null || isSessionCurrent(deferredEpoch)) retry(deferredEpoch) else cancel()
     }
     return true
 }
+
+internal fun shouldDeferResolvedDesktopOpen(
+    displayId: Int?,
+    isAttached: Boolean,
+    allowsManualMoves: Boolean,
+): Boolean = !isAttached && (displayId == null || !allowsManualMoves)
 
 internal object MainActivityLaunchPolicy {
     fun shouldHandleInitialIntent(restored: Boolean, firstActivityInProcess: Boolean): Boolean =
@@ -1268,7 +1270,11 @@ class MainActivity : FlutterActivity() {
         } else {
             null
         }
-        if (displayId == null && deferResolvedDesktopOpenIfNeeded(
+        if (shouldDeferResolvedDesktopOpen(
+                displayId,
+                decorView.isAttachedToWindow,
+                coordinator.placementDiagnostics(displayId).allowsManualMoves,
+            ) && deferResolvedDesktopOpenIfNeeded(
                 isAttached = decorView.isAttachedToWindow,
                 expectedEpoch = expectedEpoch,
                 sessionGeneration = coordinator.sessionGeneration,

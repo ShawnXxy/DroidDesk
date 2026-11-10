@@ -89,7 +89,7 @@ class AndroidCallerPlacementPolicyTest {
     @Test
     fun deferredResolvedOpenRejectsAStoppedAdmissionInsteadOfOpeningFresh() {
         var deferred: (() -> Unit)? = null
-        val retries = mutableListOf<Long>()
+        val retries = mutableListOf<Long?>()
         var cancellations = 0
         var current = true
 
@@ -116,7 +116,7 @@ class AndroidCallerPlacementPolicyTest {
     @Test
     fun deferredResolvedOpenCarriesTheActiveEpochWhenStillCurrent() {
         var deferred: (() -> Unit)? = null
-        val retries = mutableListOf<Long>()
+        val retries = mutableListOf<Long?>()
 
         assertTrue(
             deferResolvedDesktopOpenIfNeeded(
@@ -147,8 +147,9 @@ class AndroidCallerPlacementPolicyTest {
     }
 
     @Test
-    fun deferredResolvedOpenWithoutAnAdmissionFailsInsteadOfOpeningLater() {
-        var deferred = false
+    fun deferredResolvedOpenWithoutAnAdmissionRetriesFreshAfterAttachment() {
+        var deferred: (() -> Unit)? = null
+        val retries = mutableListOf<Long?>()
         var cancellations = 0
 
         assertTrue(
@@ -158,13 +159,48 @@ class AndroidCallerPlacementPolicyTest {
                 sessionGeneration = 41,
                 isStopped = true,
                 isSessionCurrent = { false },
-                deferUntilAttached = { deferred = true },
-                retry = { error("stopped opens must not retry") },
+                deferUntilAttached = { deferred = it },
+                retry = retries::add,
                 cancel = { cancellations++ },
             ),
         )
-        assertFalse(deferred)
-        assertEquals(1, cancellations)
+        assertTrue(retries.isEmpty())
+        assertEquals(0, cancellations)
+        deferred!!.invoke()
+        assertEquals(listOf<Long?>(null), retries)
+        assertEquals(0, cancellations)
+    }
+
+    @Test
+    fun knownLocalDisplayStillWaitsForDecorAttachment() {
+        assertTrue(
+            shouldDeferResolvedDesktopOpen(
+                displayId = 73,
+                isAttached = false,
+                allowsManualMoves = false,
+            ),
+        )
+        assertFalse(
+            shouldDeferResolvedDesktopOpen(
+                displayId = 73,
+                isAttached = false,
+                allowsManualMoves = true,
+            ),
+        )
+        assertTrue(
+            shouldDeferResolvedDesktopOpen(
+                displayId = null,
+                isAttached = false,
+                allowsManualMoves = true,
+            ),
+        )
+        assertFalse(
+            shouldDeferResolvedDesktopOpen(
+                displayId = null,
+                isAttached = true,
+                allowsManualMoves = false,
+            ),
+        )
     }
 
     @Test
