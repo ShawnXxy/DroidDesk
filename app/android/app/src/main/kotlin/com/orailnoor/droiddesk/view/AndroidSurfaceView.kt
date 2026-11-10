@@ -31,6 +31,21 @@ internal fun <T> createViewForRendererClaim(
     RendererClaim.Rejected -> createPlaceholder()
 }
 
+internal class RendererCleanup {
+    var isReleased = false
+        private set
+
+    fun run(
+        releaseOwnedInput: () -> Unit,
+        completeTeardown: () -> Unit,
+    ) {
+        if (isReleased) return
+        isReleased = true
+        releaseOwnedInput()
+        completeTeardown()
+    }
+}
+
 class AndroidSurfaceView(
     val context: Context,
     id: Int,
@@ -43,7 +58,7 @@ class AndroidSurfaceView(
     private val coordinator = DesktopDisplayCoordinator.shared
     private val platformView: View
     private var lease: RendererLease? = null
-    private var released = false
+    private val rendererCleanup = RendererCleanup()
 
     companion object {
         private const val TAG = "AndroidSurfaceView"
@@ -133,16 +148,20 @@ class AndroidSurfaceView(
     }
 
     private fun releaseRenderer() {
-        if (released) return
-        released = true
-        inputController?.dispose()
-        inputController = null
-        x11ServiceClient?.disconnect()
-        x11ServiceClient = null
-        lease?.let { MainActivity.getInstance().releaseLorieView(it.generation) }
-        lorieView?.let { view ->
-            (view.parent as? ViewGroup)?.removeView(view)
-        }
-        lorieView = null
+        rendererCleanup.run(
+            releaseOwnedInput = {
+                inputController?.dispose()
+                inputController = null
+            },
+            completeTeardown = {
+                x11ServiceClient?.disconnect()
+                x11ServiceClient = null
+                lease?.let { MainActivity.getInstance().releaseLorieView(it.generation) }
+                lorieView?.let { view ->
+                    (view.parent as? ViewGroup)?.removeView(view)
+                }
+                lorieView = null
+            },
+        )
     }
 }
