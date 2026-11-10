@@ -2,17 +2,15 @@ package com.orailnoor.droiddesk.display
 
 import android.os.Looper
 import android.content.Context
-import android.os.Build
 import android.app.Activity
 import android.content.Intent
 import com.orailnoor.droiddesk.display.capability.PlacementMode
 import com.orailnoor.droiddesk.display.placement.DesktopOpenRequest
 import com.orailnoor.droiddesk.display.placement.DesktopPlacementPort
 import com.orailnoor.droiddesk.display.placement.DesktopPlacementStrategy
-import com.orailnoor.droiddesk.display.placement.DisplayLocalRestartAdapter
-import com.orailnoor.droiddesk.display.placement.MovableSecondaryDisplayAdapter
 import com.orailnoor.droiddesk.display.placement.PlacementSelection
-import com.orailnoor.droiddesk.display.placement.PlacementSelectionSource
+import com.orailnoor.droiddesk.display.placement.bootstrapCurrentDevicePlacementStrategy
+import com.orailnoor.droiddesk.display.placement.bootstrapPlacementStrategy
 import com.orailnoor.droiddesk.display.startup.*
 import com.orailnoor.droiddesk.service.DesktopStopReason
 import com.orailnoor.droiddesk.service.DroidDeskService
@@ -32,6 +30,15 @@ data class DesktopLaunchRequest(
     val sessionGeneration: Long,
     val mode: String,
     val desktopEnv: String,
+)
+
+data class DesktopPlacementDiagnostics(
+    val selection: PlacementSelection,
+    val allowsManualMoves: Boolean,
+    val allowsAutomaticMoves: Boolean,
+    val environmentRestartWarning: String?,
+    val environment: DisplayEnvironment?,
+    val shouldAutoLaunchCurrentDisplay: Boolean,
 )
 
 interface DesktopDisplayHost {
@@ -82,43 +89,16 @@ private class ReplaceableDesktopPlacementStrategy(
     ) = delegate.fallbackTarget(displays, previous, failed)
 }
 
-private fun DisplayEnvironmentPolicy.legacyPlacementStrategy(): DesktopPlacementStrategy {
-    val mode = if (displayLocalMode) PlacementMode.DISPLAY_LOCAL else PlacementMode.MOVABLE
-    val selection = PlacementSelection(
-        mode = mode,
-        source = if (displayLocalMode) {
-            PlacementSelectionSource.DEVICE_QUIRK
-        } else {
-            PlacementSelectionSource.SAFE_DEFAULT
-        },
-        allowAutomaticMoves = allowCrossDisplayMoves,
-        reason = "Legacy display environment policy selected ${mode.wireName} placement",
-    )
-    val adapter = if (displayLocalMode) {
-        DisplayLocalRestartAdapter(selection)
-    } else {
-        MovableSecondaryDisplayAdapter(selection)
-    }
-    return object : DesktopPlacementStrategy by adapter {
-        override fun environmentFor(display: DesktopDisplay) =
-            this@legacyPlacementStrategy.environmentFor(display.id)
-
-        override fun requestedOrientation(display: DesktopDisplay, originalOrientation: Int) =
-            requestedOrientationFor(display.id, originalOrientation)
-    }
-}
-
 class DesktopDisplayCoordinator(
     private val assertMainThread: () -> Unit = {},
     private var host: DesktopDisplayHost? = null,
     private var settingsStore: DisplaySettingsStore? = null,
-    environmentPolicy: DisplayEnvironmentPolicy = DisplayEnvironmentPolicy.forDevice(""),
     placementStrategy: DesktopPlacementStrategy? = null,
     private var stopForEnvironmentChange: (((Result<Unit>) -> Unit) -> Unit)? = null,
 ) {
     private var strategyWasProvided = placementStrategy != null
     private val placementStrategy = ReplaceableDesktopPlacementStrategy(
-        placementStrategy ?: environmentPolicy.legacyPlacementStrategy(),
+        placementStrategy ?: bootstrapPlacementStrategy(),
     )
     private data class Owner(
         val lease: RendererLease,
@@ -228,6 +208,8 @@ class DesktopDisplayCoordinator(
     val sessionFailure: DesktopDisplayException? get() = error
     val hasRunningSession: Boolean get() = (!isStopped || stopFailed) && host?.sessionRunning() == true
     val placementSelection: PlacementSelection get() = placementStrategy.selection
+    val allowsManualMoves: Boolean get() = placementStrategy.allowsManualMoves
+    val environmentRestartWarning: String? get() = placementStrategy.environmentRestartWarning
     val isDisplayLocal: Boolean get() = placementSelection.mode == PlacementMode.DISPLAY_LOCAL
     var sessionMode = "termux"
         private set
@@ -524,9 +506,7 @@ class DesktopDisplayCoordinator(
         assertMainThread()
         if (host != null) return
         if (!strategyWasProvided) {
-            placementStrategy.replace(
-                DisplayEnvironmentPolicy.forDevice(Build.DEVICE).legacyPlacementStrategy(),
-            )
+            placementStrategy.replace(bootstrapCurrentDevicePlacementStrategy())
         }
         settingsStore = DisplaySettingsStore(context)
         val discovery = DisplayRepository(context)
@@ -880,6 +860,38 @@ class DesktopDisplayCoordinator(
             discovered
         }
     }
+
+    fun placementDiagnostics(
+        displayId: Int? = null,
+        installed: Boolean = false,
+    ): DesktopPlacementDiagnostics {
+        val platform = host
+        val targetId = displayId ?: platform?.currentDisplayId()
+        val display = if (platform == null || targetId == null) {
+            null
+        } else {
+            displays().firstOrNull { it.id == targetId }
+        }
+        return DesktopPlacementDiagnostics(
+            selection = placementStrategy.selection,
+            allowsManualMoves = placementStrategy.allowsManualMoves,
+            allowsAutomaticMoves = placementStrategy.allowsAutomaticMoves,
+            environmentRestartWarning = placementStrategy.environmentRestartWarning,
+            environment = display?.let(placementStrategy::environmentFor),
+            shouldAutoLaunchCurrentDisplay = display?.let {
+                placementStrategy.shouldAutoLaunchCurrentDisplay(it, installed)
+            } ?: false,
+        )
+    }
+
+    fun environmentForDisplay(displayId: Int): DisplayEnvironment? =
+        placementDiagnostics(displayId).environment
+
+    fun environmentForCurrentDisplay(): DisplayEnvironment? =
+        placementDiagnostics().environment
+
+    fun shouldAutoLaunchCurrentDisplay(displayId: Int, installed: Boolean): Boolean =
+        placementDiagnostics(displayId, installed).shouldAutoLaunchCurrentDisplay
 
     fun snapshot(): Map<String, Any?> {
         assertMainThread()
