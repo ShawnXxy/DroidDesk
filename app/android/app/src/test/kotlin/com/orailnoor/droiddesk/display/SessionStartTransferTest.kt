@@ -1,5 +1,6 @@
 package com.orailnoor.droiddesk.display
 
+import java.lang.reflect.Modifier
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -8,6 +9,13 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class SessionStartTransferTest {
+    @Test
+    fun sessionGenerationKeepsVolatilePublicationForWorkerReads() {
+        val field = DesktopDisplayCoordinator::class.java.getDeclaredField("sessionGeneration")
+
+        assertTrue(Modifier.isVolatile(field.modifiers))
+    }
+
     @Test
     fun claimReturnsAcceptedLease() {
         val coordinator = DesktopDisplayCoordinator()
@@ -48,6 +56,117 @@ class SessionStartTransferTest {
 
         assertEquals(1, outcomes.size)
         assertTrue(outcomes.single().isSuccess)
+    }
+
+    @Test
+    fun supersededAttemptCannotCompleteAReentrantReplacement() {
+        val coordinator = DesktopDisplayCoordinator()
+        val originalEpoch = coordinator.prepareSession("proot", "xfce4", true)
+        val first = mutableListOf<Result<Unit>>()
+        val second = mutableListOf<Result<Unit>>()
+        val replacement = mutableListOf<Result<Unit>>()
+        var replacementEpoch: Long? = null
+        coordinator.awaitSessionReady(originalEpoch) { result ->
+            first += result
+            replacementEpoch = coordinator.prepareSession("chroot", "plasma", true)
+            coordinator.awaitSessionReady(checkNotNull(replacementEpoch), replacement::add)
+        }
+        coordinator.awaitSessionReady(originalEpoch, second::add)
+
+        val supersedingEpoch = coordinator.prepareSession("termux", "mate", true)
+
+        assertEquals(
+            "SESSION_STOPPED",
+            (first.single().exceptionOrNull() as DesktopDisplayException).code,
+        )
+        assertEquals(
+            "SESSION_STOPPED",
+            (second.single().exceptionOrNull() as DesktopDisplayException).code,
+        )
+        assertTrue(checkNotNull(replacementEpoch) > supersedingEpoch)
+        coordinator.sessionStarted(supersedingEpoch, Result.success(Unit))
+        assertTrue(replacement.isEmpty())
+
+        coordinator.sessionStarted(checkNotNull(replacementEpoch), Result.success(Unit))
+        assertTrue(replacement.single().isSuccess)
+    }
+
+    @Test
+    fun oldWaitersKeepTheirResultWhenLaterWaiterStopsTheRetry() {
+        val coordinator = DesktopDisplayCoordinator()
+        val failedEpoch = coordinator.prepareSession("proot", "xfce4", true)
+        val first = mutableListOf<Result<Unit>>()
+        val second = mutableListOf<Result<Unit>>()
+        val third = mutableListOf<Result<Unit>>()
+        val retry = mutableListOf<Result<Unit>>()
+        coordinator.awaitSessionReady(failedEpoch) { result ->
+            first += result
+            val retryEpoch = coordinator.prepareSession("chroot", "plasma", true)
+            coordinator.awaitSessionReady(retryEpoch, retry::add)
+        }
+        coordinator.awaitSessionReady(failedEpoch) { result ->
+            second += result
+            coordinator.stop()
+        }
+        coordinator.awaitSessionReady(failedEpoch, third::add)
+        val failure = IllegalStateException("runtime exited")
+
+        coordinator.sessionStarted(failedEpoch, Result.failure(failure))
+
+        assertSame(failure, first.single().exceptionOrNull())
+        assertSame(failure, second.single().exceptionOrNull())
+        assertSame(failure, third.single().exceptionOrNull())
+        assertEquals(
+            "SESSION_STOPPED",
+            (retry.single().exceptionOrNull() as DesktopDisplayException).code,
+        )
+        coordinator.sessionStarted(failedEpoch, Result.success(Unit))
+        assertEquals(1, first.size)
+        assertEquals(1, second.size)
+        assertEquals(1, third.size)
+        assertEquals(1, retry.size)
+    }
+
+    @Test
+    fun nestedSettlementCannotOvertakeTheCapturedObserverCohort() {
+        val coordinator = DesktopDisplayCoordinator()
+        val observed = mutableListOf<String>()
+        coordinator.subscribeSessionStart {
+            observed += it.exceptionOrNull()?.message ?: "original succeeded"
+        }
+        val originalEpoch = coordinator.prepareSession("proot", "xfce4", true)
+        coordinator.awaitSessionReady(originalEpoch) {
+            val replacementEpoch = coordinator.prepareSession("chroot", "plasma", true)
+            coordinator.sessionStarted(
+                replacementEpoch,
+                Result.failure(IllegalStateException("replacement failed")),
+            )
+        }
+
+        coordinator.sessionStarted(originalEpoch, Result.success(Unit))
+
+        assertEquals(
+            listOf("original succeeded", "replacement failed"),
+            observed,
+        )
+    }
+
+    @Test
+    fun stopDrainsAnAttemptInvalidatedByANewerReservation() {
+        val coordinator = DesktopDisplayCoordinator()
+        val epoch = coordinator.prepareSession("proot", "xfce4", true)
+        val outcomes = mutableListOf<Result<Unit>>()
+        coordinator.awaitSessionReady(epoch, outcomes::add)
+        val reservedEpoch = coordinator.beginSession()
+
+        coordinator.stop()
+
+        assertTrue(reservedEpoch > epoch)
+        assertEquals(1, outcomes.size)
+        assertEquals(
+            "SESSION_STOPPED",
+            (outcomes.single().exceptionOrNull() as DesktopDisplayException).code,
+        )
     }
 
     @Test
