@@ -343,11 +343,7 @@ class DesktopDisplayCoordinator(
         }
         publish()
         finishStartupResultDelivery(deliverResults)
-        if (
-            result.isSuccess &&
-            isCurrentRevision(settlement.revision) &&
-            isSessionCurrent(epoch)
-        ) {
+        if (result.isSuccess && isSessionCurrent(epoch)) {
             refreshAutomaticOpening()
         }
     }
@@ -1179,8 +1175,8 @@ class DesktopDisplayCoordinator(
         settlement ?: return false
         val observers = if (settlement.notifyObservers) sessionStartListeners.toList() else emptyList()
         startupResultDeliveries.addLast {
-            settlement.waiters.forEach { it(settlement.result) }
             observers.forEach { it(settlement.result) }
+            settlement.waiters.forEach { it(settlement.result) }
         }
         if (deliveringStartupResults) return false
         deliveringStartupResults = true

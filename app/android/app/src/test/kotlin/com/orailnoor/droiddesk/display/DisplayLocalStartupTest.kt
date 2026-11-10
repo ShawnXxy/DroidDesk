@@ -257,6 +257,24 @@ class DisplayLocalStartupTest {
     }
 
     @Test
+    fun sameSpecNoStartRecoveryStillRefreshesAutomaticOpening() {
+        val genericHost = LocalStartupHost(listOf(phone, tnt))
+        val generic = DesktopDisplayCoordinator(
+            host = genericHost,
+            placementStrategy = movableStrategy(),
+        )
+        val epoch = generic.prepareSession("proot", "xfce4", start = true)
+        generic.awaitSessionReady(epoch) {
+            generic.prepareSession("proot", "xfce4", start = false)
+        }
+
+        generic.sessionStarted(epoch, Result.success(Unit))
+        genericHost.fireTimers()
+
+        assertEquals(listOf(tnt.id), genericHost.launches.map { it.display.id })
+    }
+
+    @Test
     fun observerRegisteredByReentrantPublicationDoesNotReceiveTheOldResult() {
         val epoch = coordinator.prepareSession("proot", "xfce4", start = true)
         val observed = mutableListOf<Result<Unit>>()

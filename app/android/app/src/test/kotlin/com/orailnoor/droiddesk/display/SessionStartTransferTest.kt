@@ -152,6 +152,26 @@ class SessionStartTransferTest {
     }
 
     @Test
+    fun observersSeeTheSettledEpochBeforeWaitersRecoverTheSession() {
+        val coordinator = DesktopDisplayCoordinator()
+        val failedEpoch = coordinator.prepareSession("proot", "xfce4", true)
+        val observedEpochs = mutableListOf<Long>()
+        coordinator.subscribeSessionStart { observedEpochs += coordinator.sessionGeneration }
+        var recoveredEpoch: Long? = null
+        coordinator.awaitSessionReady(failedEpoch) {
+            recoveredEpoch = coordinator.prepareSession("proot", "xfce4", false)
+        }
+
+        coordinator.sessionStarted(
+            failedEpoch,
+            Result.failure(IllegalStateException("runtime exited")),
+        )
+
+        assertEquals(listOf(failedEpoch), observedEpochs)
+        assertTrue(checkNotNull(recoveredEpoch) > failedEpoch)
+    }
+
+    @Test
     fun stopDrainsAnAttemptInvalidatedByANewerReservation() {
         val coordinator = DesktopDisplayCoordinator()
         val epoch = coordinator.prepareSession("proot", "xfce4", true)
