@@ -6,6 +6,7 @@ import android.os.Build
 import android.app.Activity
 import android.content.Intent
 import com.orailnoor.droiddesk.display.capability.PlacementMode
+import com.orailnoor.droiddesk.display.placement.DesktopOpenRequest
 import com.orailnoor.droiddesk.display.placement.DesktopPlacementPort
 import com.orailnoor.droiddesk.display.placement.DesktopPlacementStrategy
 import com.orailnoor.droiddesk.display.placement.DisplayLocalRestartAdapter
@@ -142,11 +143,20 @@ class DesktopDisplayCoordinator(
         val displayId: Int?,
         val display: DesktopDisplay?,
     )
-    private data class RestartRequest(
-        val target: DesktopStartupTarget,
-        val mode: String,
-        val desktopEnv: String,
-    )
+    private data class OpenKey(val target: DesktopStartupTarget?, val request: DesktopOpenRequest)
+    private class OpenOperation(
+        val key: OpenKey,
+        completion: (Long?, Result<Unit>) -> Unit,
+    ) {
+        var epoch: Long? = null; var placementPending = true
+        val completions = mutableListOf(completion)
+        fun takeCompletions() = completions.toList().also {
+            placementPending = false; completions.clear()
+        }
+    }
+    private class RestartRequest(val key: OpenKey, val startService: () -> Unit, val expectedEpoch: Long) {
+        var resultEpoch: Long? = null; var failureReported = false
+    }
     private var owner: Owner? = null
     private var generation = 0L
     private var repository: DisplayRepository? = null
@@ -166,16 +176,20 @@ class DesktopDisplayCoordinator(
     private var sessionTarget: DesktopStartupTarget? = null
     private val startupMachine = StartupAttemptMachine<(Result<Unit>) -> Unit>(1L, StartupSpec("termux", "xfce4"))
     private var acceptedLaunchIdentity: StartupIdentity? = null
-    private var sessionRestarting = false
+    private var openOperation: OpenOperation? = null
+    private val restartRequests = mutableMapOf<OpenKey, RestartRequest>()
+    private var startingRestart: RestartRequest? = null; private var sessionRestarting = false
     private var restartStartService: () -> Unit = {}
     private val restartController = DisplayLocalSessionController(object : DisplayLocalSessionHost<RestartRequest> {
         override fun sessionEpoch() = publishedSessionGeneration
         override fun isSessionCurrent(epoch: Long) = this@DesktopDisplayCoordinator.isSessionCurrent(epoch)
+        override fun sameRequest(first: RestartRequest, second: RestartRequest) =
+            first.key == second.key
         override fun validateTarget(target: RestartRequest) {
-            validateRestartTarget(target.target)
+            validateRestartTarget(checkNotNull(target.key.target))
         }
         override fun restartingChanged(restarting: Boolean) {
-            sessionRestarting = restarting
+            if (!restarting) { restartRequests.clear(); startingRestart = null }; sessionRestarting = restarting
             publish()
         }
         override fun stopForEnvironmentChange(completion: (Result<Unit>) -> Unit) {
@@ -190,20 +204,9 @@ class DesktopDisplayCoordinator(
             }
         }
         override fun startOnTarget(target: RestartRequest, completion: (Result<Unit>) -> Unit) {
-            try {
-                val epoch = prepareSession(target.mode, target.desktopEnv, true)
-                restartStartService()
-                openActive(target.target) { result ->
-                    if (result.isFailure) completion(result) else awaitSessionReady(epoch, completion)
-                }
-            } catch (failure: DesktopDisplayException) {
-                completion(Result.failure(failure))
-            } catch (failure: SecurityException) {
-                android.util.Log.e("DesktopDisplay", "Android denied the restarted Linux service", failure)
-                completion(Result.failure(DesktopDisplayException(
-                    "DISPLAY_NOT_ALLOWED",
-                    "Android denied restarting the Linux service",
-                )))
+            startingRestart = target; val request = target.key.request.copy(startSession = true, expectedEpoch = null)
+            prepareAndOpen(OpenKey(target.key.target, request), target.startService) { epoch, result ->
+                if (startingRestart === target) startingRestart = null; target.resultEpoch = epoch; completion(result)
             }
         }
     }, assertMainThread)
@@ -587,21 +590,204 @@ class DesktopDisplayCoordinator(
         assertMainThread()
         if (!sessionRestarting && !placementStrategy.requiresSessionRestart(sessionTarget, target)) return false
         val epoch = if (stopFailed && expectedEpoch == publishedSessionGeneration) beginSession() else expectedEpoch
-        restartController.requestRestart(
-            RestartRequest(target, sessionMode, desktopEnv),
-            epoch,
-        ) { result ->
-            result.exceptionOrNull()?.let {
-                if ((it as? DesktopDisplayException)?.code != "SESSION_STOPPED") {
-                    reportError(it as? DesktopDisplayException ?: DesktopDisplayException(
-                        "SESSION_RESTART_FAILED", it.message ?: "Linux could not restart on this display",
-                    ))
-                }
-            }
-            completion(result)
-        }
+        val request = DesktopOpenRequest(
+            target.displayId, sessionMode, desktopEnv, startSession = true, expectedEpoch = null,
+        )
+        requestRestart(OpenKey(target, request), epoch, restartStartService, completion)
         return true
     }
+
+    fun requestOpen(
+        request: DesktopOpenRequest,
+        startService: () -> Unit,
+        completion: (Result<Unit>) -> Unit,
+    ) {
+        assertMainThread()
+        require(request.mode == "termux" || request.mode == "proot" || request.mode == "chroot") { "Invalid Linux runtime" }
+        val target = try {
+            if (placementStrategy.allowsManualMoves) null else startupTarget(request.currentDisplayId)
+        } catch (failure: DesktopDisplayException) {
+            completion(Result.failure(failure))
+            return
+        }
+        val requestedKey = OpenKey(target, request); val existingRestart = restartRequests[requestedKey]
+        val joinsOpen = currentOpenOperation()?.key == requestedKey || existingRestart != null; val expectedEpoch = request.expectedEpoch
+        if (expectedEpoch != null && !isSessionCurrent(expectedEpoch) &&
+            !joinsOpen && !sessionRestarting &&
+            !(stopFailed && expectedEpoch == publishedSessionGeneration)) {
+            completion(startupFailure("The session was stopped before launch"))
+            return
+        }
+        val admittedEpoch = existingRestart?.expectedEpoch ?: if (stopFailed && !joinsOpen &&
+            (expectedEpoch == null || expectedEpoch == publishedSessionGeneration)) beginSession() else expectedEpoch
+        val preparedRequest = if (admittedEpoch != expectedEpoch) request.copy(expectedEpoch = admittedEpoch) else request
+        if (target != null &&
+            (sessionRestarting || placementStrategy.requiresSessionRestart(sessionTarget, target))) {
+            requestRestart(requestedKey, admittedEpoch ?: publishedSessionGeneration,
+                startService, completion)
+            return
+        }
+        prepareAndOpen(requestedKey, startService, preparedRequest) { _, result -> completion(result) }
+    }
+
+    private fun requestRestart(key: OpenKey, expectedEpoch: Long, startService: () -> Unit,
+        completion: (Result<Unit>) -> Unit) {
+        val existing = restartRequests[key]
+        val request = existing ?: RestartRequest(key, startService, expectedEpoch).also { restartRequests[key] = it }
+        var returned = false; var completedSynchronously = false
+        restartController.requestRestart(request, if (existing == null) request.expectedEpoch else publishedSessionGeneration) { result ->
+            completedSynchronously = !returned
+            if (!restartController.hasPendingRestart) restartRequests.clear()
+            val failure = result.exceptionOrNull()
+            if ((failure as? DesktopDisplayException)?.code == "SESSION_STOPPED" && startingRestart !== request && restartRequests[key] === request) restartRequests.remove(key)
+            if (failure != null &&
+                (failure as? DesktopDisplayException)?.code != "SESSION_STOPPED" &&
+                !request.failureReported &&
+                (request.resultEpoch == null || isSessionCurrent(checkNotNull(request.resultEpoch)))) {
+                request.failureReported = true
+                if (sessionFailure == null) reportError(
+                    failure as? DesktopDisplayException ?: DesktopDisplayException(
+                        "SESSION_RESTART_FAILED",
+                        failure.message ?: "Linux could not restart on this display"))
+            }
+            if (completedSynchronously && restartController.hasPendingRestart &&
+                restartRequests[key] === request) restartRequests.remove(key)
+            completion(result)
+        }
+        returned = true
+    }
+
+    private fun prepareAndOpen(key: OpenKey, startService: () -> Unit,
+        request: DesktopOpenRequest = key.request,
+        completion: (Long?, Result<Unit>) -> Unit) {
+        val existing = currentOpenOperation()
+        if (existing != null) {
+            when {
+                existing.key != key -> completion(existing.epoch, openFailure(
+                    "Linux startup is already opening a different desktop request"))
+                existing.placementPending -> existing.completions += completion
+                else -> continueOpen(existing, startService, completion)
+            }
+            return
+        }
+        val snapshot = startupMachine.snapshot()
+        if (snapshot.baseIdentity != null && snapshot.terminalResult == null) {
+            completion(snapshot.epoch, openFailure(
+                "Linux startup was prepared outside coordinator open orchestration"))
+            return
+        }
+        val operation = OpenOperation(key, completion)
+        openOperation = operation
+        val epoch = try {
+            prepareSession(request.mode, request.desktopEnv,
+                request.startSession, request.expectedEpoch)
+        } catch (failure: DesktopDisplayException) {
+            if (openOperation === operation) openOperation = null
+            val result = Result.failure<Unit>(failure)
+            operation.takeCompletions().forEach { it(null, result) }
+            return
+        }
+        operation.epoch = epoch
+        if (openOperation !== operation || !isSessionCurrent(epoch)) {
+            completeOpen(operation, epoch, startupFailure("The Linux session was stopped"))
+            return
+        }
+        continueOpen(operation, startService, null)
+    }
+
+    private fun continueOpen(operation: OpenOperation, startService: () -> Unit,
+        completion: ((Long?, Result<Unit>) -> Unit)?) {
+        val primary = completion == null
+        if (completion != null) { operation.placementPending = true; operation.completions += completion }
+        val epoch = checkNotNull(operation.epoch)
+        val startFailure = try {
+            startService()
+            null
+        } catch (failure: DesktopDisplayException) {
+            failure
+        } catch (failure: RuntimeException) {
+            DesktopDisplayException(
+                "DISPLAY_NOT_ALLOWED",
+                if (failure is SecurityException) "Android denied starting the Linux service"
+                else failure.message ?: "Android could not start the Linux service")
+        }
+        if (startFailure != null) {
+            val result = Result.failure<Unit>(startFailure)
+            val callbacks = operation.takeCompletions()
+            if (primary && openOperation === operation) openOperation = null
+            if (primary && operation.key.request.startSession) sessionStarted(epoch, result)
+            callbacks.forEach { it(epoch, result) }
+            return
+        }
+        if (!isSessionCurrent(epoch)) {
+            completeOpen(operation, epoch, startupFailure("The Linux session was stopped"))
+            return
+        }
+        val requestSequenceBefore = requestSequence
+        var placementTransaction = false
+        var returned = false
+        var deferred: Result<Unit>? = null
+        fun placed(result: Result<Unit>) {
+            val callbacks = operation.takeCompletions()
+            if (result.isFailure) {
+                if (primary && !placementTransaction) rollbackOwnedOpen(operation, epoch, result)
+                releaseOpenOperation(operation)
+                callbacks.forEach { it(epoch, result) }
+                return
+            }
+            releaseOpenOperation(operation)
+            awaitSessionReady(epoch) { result -> callbacks.forEach { it(epoch, result) } }
+        }
+        openActive(operation.key.target) {
+            if (returned) placed(it) else deferred = it
+        }
+        placementTransaction = requestSequence != requestSequenceBefore
+        returned = true
+        deferred?.let(::placed)
+    }
+
+    private fun completeOpen(operation: OpenOperation, epoch: Long, result: Result<Unit>) {
+        val callbacks = operation.takeCompletions()
+        releaseOpenOperation(operation)
+        callbacks.forEach { it(epoch, result) }
+    }
+
+    private fun rollbackOwnedOpen(operation: OpenOperation, epoch: Long, result: Result<Unit>) {
+        if (!operation.key.request.startSession || !isSessionCurrent(epoch) || move != null) return
+        val snapshot = startupMachine.snapshot()
+        val selected = snapshot.selectedIdentity
+        val retainedCompatible = selected != null && owner?.launchIdentity?.let {
+            sameStartupAttempt(it, selected)
+        } == true
+        if (snapshot.baseIdentity?.epoch == epoch &&
+            snapshot.terminalResult == null && !retainedCompatible) {
+            sessionStarted(epoch, result)
+        }
+    }
+
+    private fun currentOpenOperation(): OpenOperation? {
+        val current = openOperation ?: return null
+        val epoch = current.epoch ?: return current
+        val snapshot = startupMachine.snapshot()
+        val valid = if (current.key.request.startSession) {
+            snapshot.baseIdentity?.epoch == epoch &&
+                (current.placementPending || snapshot.terminalResult == null)
+        } else current.placementPending && isSessionCurrent(epoch)
+        return current.takeIf { valid } ?: run { openOperation = null; null }
+    }
+
+    private fun releaseOpenOperation(operation: OpenOperation) {
+        if (openOperation !== operation || operation.placementPending) return
+        val snapshot = startupMachine.snapshot()
+        if (!operation.key.request.startSession ||
+            snapshot.baseIdentity?.epoch != operation.epoch ||
+            snapshot.terminalResult != null) {
+            openOperation = null
+        }
+    }
+
+    private fun openFailure(message: String) = Result.failure<Unit>(
+        DesktopDisplayException("INVALID_ARGUMENT", message))
 
     private fun validateRestartTarget(target: DesktopStartupTarget) {
         val actual = host?.currentDisplayId()
