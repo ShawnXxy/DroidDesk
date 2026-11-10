@@ -290,6 +290,62 @@ class SessionStartTransferTest {
     }
 
     @Test
+    fun terminalMoveFailureDrainsNestedResultsBeforeMoveCompletion() {
+        val host = TransferDisplayHost().apply {
+            current = null
+            connected = listOf(external)
+        }
+        val coordinator = DesktopDisplayCoordinator(host = host)
+        val events = mutableListOf<String>()
+        val oldReadiness = mutableListOf<Result<Unit>>()
+        val oldObserved = mutableListOf<Result<Unit>>()
+        val retryReadiness = mutableListOf<Result<Unit>>()
+        val retryObserved = mutableListOf<Result<Unit>>()
+        var retryEpoch: Long? = null
+        val epoch = coordinator.prepareSession("proot", "xfce4", true)
+        coordinator.awaitSessionReady(epoch) {
+            oldReadiness += it
+            events += "old-readiness"
+        }
+        coordinator.subscribeSessionStart { result ->
+            if (result.isFailure) {
+                oldObserved += result
+                events += "old-observer"
+                retryEpoch = coordinator.prepareSession("chroot", "plasma", true)
+                coordinator.awaitSessionReady(checkNotNull(retryEpoch)) {
+                    retryReadiness += it
+                    events += "retry-readiness"
+                }
+                coordinator.sessionStarted(checkNotNull(retryEpoch), Result.success(Unit))
+            } else {
+                retryObserved += result
+                events += "retry-observer"
+            }
+        }
+        coordinator.open(host.external.id, host.external.key) {
+            events += "move-completion"
+        }
+
+        host.fireTimers()
+
+        val failure = oldObserved.single().exceptionOrNull()
+        assertEquals("PLACEMENT_TIMEOUT", (failure as DesktopDisplayException).code)
+        assertSame(failure, oldReadiness.single().exceptionOrNull())
+        assertTrue(retryObserved.single().isSuccess)
+        assertTrue(retryReadiness.single().isSuccess)
+        assertEquals(
+            listOf(
+                "old-observer",
+                "old-readiness",
+                "retry-observer",
+                "retry-readiness",
+                "move-completion",
+            ),
+            events,
+        )
+    }
+
+    @Test
     fun restartRequestsForTheSameKeyCoalesceAndCompleteTogether() {
         val host = RestartHost()
         val controller = DisplayLocalSessionController(host)
@@ -567,16 +623,26 @@ class SessionStartTransferTest {
 
 private class TransferDisplayHost : DesktopDisplayHost {
     private val phone = DesktopDisplay(0, "phone", "Phone", true, true, null)
+    val external = DesktopDisplay(7, "external", "External", false, true, null)
+    var connected = listOf(phone)
+    var current: DesktopDisplay? = phone
+    private val timers = mutableListOf<() -> Unit>()
 
-    override fun currentDisplay() = phone
-    override fun displays() = listOf(phone)
+    override fun currentDisplay() = current
+    override fun displays() = connected
     override fun defaultProfileKind() = ProfileKind.PHONE
     override fun sessionRunning() = true
     override fun launch(request: DesktopLaunchRequest) {}
     override fun focus(requestId: Long) = true
     override fun cancelLaunch(requestId: Long) {}
-    override fun scheduleTimeout(delayMillis: Long, action: () -> Unit): () -> Unit = {}
+    override fun scheduleTimeout(delayMillis: Long, action: () -> Unit): () -> Unit {
+        timers += action
+        return { timers.remove(action); Unit }
+    }
     override fun notifyReturnRequired(error: DesktopDisplayException) {}
+    fun fireTimers() {
+        timers.toList().forEach { it() }
+    }
 }
 
 private class RestartHost(

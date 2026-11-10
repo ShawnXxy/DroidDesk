@@ -1186,34 +1186,135 @@ class DesktopDisplayCoordinator(
     }
 
     private fun failMove(failure: DesktopDisplayException, recover: Boolean) {
+        val result = Result.failure<Unit>(failure)
         val retirement = reserveMoveRetirement() ?: return
         val pending = retirement.move
-        detachMoveRetirement(retirement)
-        error = failure
-        phase = "error"
-        publish()
-        finishMoveRetirement(retirement, Result.failure(failure))
-        if (isStopped || move != null) return
-        val available = displays()
-        val remainingOwner = owner
-        if (remainingOwner != null) {
-            val actual = remainingOwner.actualDisplay()
-            if (actual == remainingOwner.lease.displayId && available.any { it.id == actual && it.eligible }) return
-            release(remainingOwner.lease)
-            remainingOwner.finish?.invoke()
-            phase = "error"
-            publish()
+        val failedIdentity = startupIdentity(pending.request)
+        fun finishRetirement(discarded: Owner? = null) {
+            finishStartupResultDelivery(false) {
+                discarded?.finish?.invoke()
+                finishMoveRetirement(retirement, result)
+            }
         }
-        val fallback = placementStrategy.fallbackTarget(
+
+        var continuation = captureContinuation()
+        detachMoveRetirement(retirement)
+        if (!isCurrent(continuation)) return finishRetirement()
+
+        val retained = owner
+        var actual = retained?.actualDisplay?.invoke()
+        if (!isCurrent(continuation)) return finishRetirement()
+        var available = displays()
+        if (!isCurrent(continuation)) return finishRetirement()
+        actual = retained?.actualDisplay?.invoke()
+        if (!isCurrent(continuation)) return finishRetirement()
+        val retainedTarget = retained?.launchIdentity?.target
+        val retainedDisplay = retained?.takeIf { actual == it.lease.displayId }?.let {
+            available.firstOrNull { display ->
+                display.id == actual &&
+                    (retainedTarget == null ||
+                        retainedTarget.displayId == display.id &&
+                        retainedTarget.displayKey == display.key) &&
+                    canLaunch(display)
+            }
+        }
+        if (!isCurrent(continuation)) return finishRetirement()
+        actual = retained?.actualDisplay?.invoke()
+        if (!isCurrent(continuation)) return finishRetirement()
+        val stableRetainedDisplay = retainedDisplay?.takeIf { actual == retained?.lease?.displayId }
+        val selected = continuation.startup.selectedIdentity
+        val compatible = stableRetainedDisplay != null &&
+            (selected == null || retained?.launchIdentity?.let {
+                sameStartupAttempt(it, selected)
+            } == true)
+        var discarded = retained?.takeIf { !compatible }
+        if (discarded != null) {
+            clearOwner(discarded)
+            continuation = captureContinuation()
+            discarded.detach()
+            if (!isCurrent(continuation)) return finishRetirement(discarded)
+            available = displays()
+            if (!isCurrent(continuation)) {
+                finishRetirement(discarded)
+                return
+            }
+        }
+
+        val matchesSelected = compatible &&
+            (selected == null || retained?.launchIdentity == selected)
+        var fallback = if (matchesSelected) null else placementStrategy.fallbackTarget(
             available,
             pending.previousTarget,
             pending.request.display,
         )
-        if (recover && !pending.recovery &&
-            fallback != null && fallback.key != pending.request.display.key) {
-            openTarget(fallback, {}, recovery = true)
+        if (!isCurrent(continuation)) {
+            finishRetirement(discarded)
+            return
+        }
+        var recoverToFallback = recover && !pending.recovery &&
+            fallback != null && fallback.key != pending.request.display.key
+        if (retained != null && discarded == null && !matchesSelected && !recoverToFallback) {
+            discarded = retained
+            clearOwner(retained)
+            continuation = captureContinuation()
+            retained.detach()
+            if (!isCurrent(continuation)) {
+                finishRetirement(retained)
+                return
+            }
+            available = displays()
+            if (!isCurrent(continuation)) {
+                finishRetirement(retained)
+                return
+            }
+            fallback = placementStrategy.fallbackTarget(
+                available,
+                pending.previousTarget,
+                pending.request.display,
+            )
+            if (!isCurrent(continuation)) {
+                finishRetirement(retained)
+                return
+            }
+            recoverToFallback = recover && !pending.recovery &&
+                fallback != null && fallback.key != pending.request.display.key
+        }
+
+        val terminal = !matchesSelected && !recoverToFallback
+        val settlement = if (terminal &&
+            continuation.startup.selectedIdentity == failedIdentity) {
+            startupMachine.settle(
+                pending.request.sessionGeneration,
+                result,
+                failure,
+            )
         } else {
-            checkNotNull(host).notifyReturnRequired(failure)
+            null
+        }
+        val deliverResults = queueStartupResult(settlement)
+        error = failure
+        phase = "error"
+        continuation = captureContinuation()
+        if (isCurrent(continuation)) publish()
+        finishStartupResultDelivery(deliverResults) {
+            val publishedFailure = error === failure
+            if (publishedFailure) {
+                error = null
+                if (phase == "error") phase = if (owner == null) "hidden" else "attached"
+            }
+            discarded?.finish?.invoke()
+            finishMoveRetirement(retirement, result)
+            if (isStopped || !isCurrent(continuation)) return@finishStartupResultDelivery
+            if (publishedFailure && error == null) {
+                error = failure
+                phase = "error"
+            }
+            if (matchesSelected) return@finishStartupResultDelivery
+            if (recoverToFallback) {
+                openTarget(checkNotNull(fallback), {}, recovery = true)
+            } else {
+                checkNotNull(host).notifyReturnRequired(failure)
+            }
         }
     }
 
