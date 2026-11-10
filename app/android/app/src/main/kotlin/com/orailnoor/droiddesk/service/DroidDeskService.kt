@@ -28,10 +28,53 @@ import com.orailnoor.droiddesk.runtime.AndroidAppSync
 import com.orailnoor.droiddesk.runtime.RootShell
 import com.orailnoor.droiddesk.runtime.ProcessLinuxEnvironmentRegistry
 import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicBoolean
 import java.lang.ref.WeakReference
 import java.io.IOException
 
 enum class DesktopStopReason { USER, ENVIRONMENT_CHANGE }
+
+internal class ServiceStartGate {
+    private val requested = AtomicBoolean()
+    fun start(operation: () -> Unit) {
+        if (!requested.compareAndSet(false, true)) return
+        try { operation() } catch (error: RuntimeException) {
+            requested.set(false)
+            throw error
+        }
+    }
+    fun reset() = requested.set(false)
+}
+
+internal data class DesktopReturnNotificationSpec(
+    val contentTitle: String,
+    val actionLabel: String,
+    val action: String,
+)
+
+internal fun desktopReturnNotificationSpec(
+    snapshot: Map<String, Any?>,
+    runtimeRunning: Boolean,
+): DesktopReturnNotificationSpec {
+    val canReturnToPhone =
+        snapshot["crossDisplayMovesAllowed"] == true &&
+            (snapshot["sessionRunning"] == true || runtimeRunning)
+    return if (canReturnToPhone) {
+        DesktopReturnNotificationSpec(
+            "Linux session preserved", "Return to phone", MainActivity.ACTION_RETURN_TO_PHONE)
+    } else {
+        DesktopReturnNotificationSpec(
+            "Desktop placement needs attention", "Open", MainActivity.ACTION_OPEN_DESKTOP)
+    }
+}
+
+internal fun notificationRuntimeRunning(
+    snapshot: Map<String, Any?>, readRuntimeRunning: () -> Boolean,
+    onFailure: (RuntimeException) -> Unit,
+): Boolean = try { readRuntimeRunning() } catch (error: RuntimeException) {
+    onFailure(error)
+    snapshot["sessionRunning"] == true
+}
 
 internal fun performDesktopTeardown(
     stopEnvironment: () -> Unit,
@@ -91,12 +134,20 @@ class DroidDeskService : Service() {
         private const val ACTION_STOP = "com.orailnoor.droiddesk.action.STOP_DESKTOP"
         private val sessionExecutor = Executors.newSingleThreadExecutor { task -> Thread(task, "DesktopSessionOperations") }
         private val mainHandler = Handler(Looper.getMainLooper())
+        private val startGate = ServiceStartGate()
         private var activeService: WeakReference<DroidDeskService>? = null
         @Volatile private var legacyIntentProcess: Process? = null
         @Volatile private var legacyIntentActive = false
 
         fun executeSession(operation: () -> Unit) {
             sessionExecutor.execute(operation)
+        }
+
+        fun ensureStarted(context: Context) = startGate.start {
+            val app = context.applicationContext
+            val intent = Intent(app, DroidDeskService::class.java)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) app.startForegroundService(intent)
+            else app.startService(intent)
         }
 
         fun stopDesktop(
@@ -141,6 +192,8 @@ class DroidDeskService : Service() {
                         activeService?.get()?.let {
                             ServiceCompat.stopForeground(it, ServiceCompat.STOP_FOREGROUND_REMOVE)
                         }
+                        activeService = null
+                        startGate.reset()
                         app.stopService(Intent(app, DroidDeskService::class.java))
                         completion(Result.success(Unit))
                     } else {
@@ -202,13 +255,20 @@ class DroidDeskService : Service() {
 
         fun notifyReturnRequired(context: Context, message: String) {
             val manager = context.getSystemService(NotificationManager::class.java)
-            val displayLocal = DesktopDisplayCoordinator.shared.isDisplayLocal
+            val coordinator = DesktopDisplayCoordinator.shared
             manager.createNotificationChannel(NotificationChannel(
                 CHANNEL_ID, "DroidDesk Linux Service", NotificationManager.IMPORTANCE_LOW,
             ))
+            val snapshot = coordinator.snapshot()
+            val running = notificationRuntimeRunning(
+                snapshot,
+                { ProcessLinuxEnvironmentRegistry.get(context).environmentManager.status().running },
+                { Log.e(TAG, "Could not read Linux runtime status for recovery notification", it) },
+            )
+            val spec = desktopReturnNotificationSpec(snapshot, running)
             val returnIntent = PendingIntent.getActivity(
                 context, 2, Intent(context, MainActivity::class.java)
-                    .setAction(if (displayLocal) MainActivity.ACTION_OPEN_DESKTOP else MainActivity.ACTION_RETURN_TO_PHONE)
+                    .setAction(spec.action)
                     .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP),
                 PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
             )
@@ -216,15 +276,12 @@ class DroidDeskService : Service() {
                 context, 1, Intent(context, DroidDeskService::class.java).setAction(ACTION_STOP),
                 PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
             )
-            val running = runCatching {
-                ProcessLinuxEnvironmentRegistry.get(context).environmentManager.status().running
-            }.getOrDefault(false)
             manager.notify(NOTIFICATION_ID, NotificationCompat.Builder(context, CHANNEL_ID)
-                .setContentTitle(if (running && !displayLocal) "Linux session preserved" else "Desktop placement needs attention")
+                .setContentTitle(spec.contentTitle)
                 .setContentText(message)
                 .setSmallIcon(android.R.drawable.ic_menu_compass)
                 .setContentIntent(returnIntent)
-                .addAction(0, if (displayLocal) "Open" else "Return to phone", returnIntent)
+                .addAction(0, spec.actionLabel, returnIntent)
                 .addAction(0, "Stop", stopIntent)
                 .setOngoing(true)
                 .setOnlyAlertOnce(true)
@@ -238,6 +295,7 @@ class DroidDeskService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        startGate.start {}
         activeService = WeakReference(this)
         DesktopDisplayCoordinator.shared.initialize(applicationContext)
         AndroidAppBridge.start(this)
@@ -274,7 +332,10 @@ class DroidDeskService : Service() {
         startupNotification = null
         AndroidAppBridge.stop()
         releaseWakeLock()
-        if (activeService?.get() === this) activeService = null
+        if (activeService?.get() === this) {
+            activeService = null
+            startGate.reset()
+        }
         super.onDestroy()
     }
 
