@@ -6,8 +6,14 @@ import com.orailnoor.droiddesk.display.DesktopDisplayCoordinator
 import com.orailnoor.droiddesk.display.DesktopDisplayException
 import com.orailnoor.droiddesk.display.DesktopDisplayHost
 import com.orailnoor.droiddesk.display.DesktopLaunchRequest
+import com.orailnoor.droiddesk.display.PixelSize
 import com.orailnoor.droiddesk.display.ProfileKind
+import com.orailnoor.droiddesk.display.RendererClaim
+import com.orailnoor.droiddesk.display.capability.PlacementMode
 import com.orailnoor.droiddesk.display.placement.DesktopOpenRequest
+import com.orailnoor.droiddesk.display.placement.MovableSecondaryDisplayAdapter
+import com.orailnoor.droiddesk.display.placement.PlacementSelection
+import com.orailnoor.droiddesk.display.placement.PlacementSelectionSource
 import java.io.IOException
 import java.util.concurrent.CancellationException
 import java.util.concurrent.CountDownLatch
@@ -483,6 +489,184 @@ class DroidDeskServiceTest {
         tracker.onStopForeground()
         assertEquals(false, tracker.isForeground())
         assertNull(tracker.nextUpdate(null, "Linux desktop is stopped"))
+    }
+
+    @Test
+    fun successfulReopenInRunningMovableSessionReclaimsRecoveryNotification() {
+        val phone = DesktopDisplay(0, "phone", "Phone", isDefault = true, eligible = true, null)
+        val external = DesktopDisplay(2, "hdmi:2", "External", isDefault = false, eligible = true, null)
+        var running = false
+        var lastLaunched: DesktopLaunchRequest? = null
+        var failLaunch: DesktopDisplayException? = null
+        val rendered = mutableListOf<String>()
+        val gate = ServiceStartGate()
+        val tracker = ServiceNotificationTracker()
+
+        val host = object : DesktopDisplayHost {
+            override fun currentDisplay() = phone
+            override fun displays() = listOf(phone, external)
+            override fun defaultProfileKind() = ProfileKind.PHONE
+            override fun sessionRunning() = running
+            override fun launch(request: DesktopLaunchRequest) {
+                failLaunch?.let { throw it }
+                lastLaunched = request
+            }
+            override fun focus(requestId: Long) = false
+            override fun cancelLaunch(requestId: Long) = Unit
+            override fun scheduleTimeout(delayMillis: Long, action: () -> Unit): () -> Unit = {}
+            override fun notifyReturnRequired(error: DesktopDisplayException) {
+                tracker.onRecoveryShown()
+                rendered += "RECOVERY:${error.message}"
+            }
+        }
+        val coordinator = DesktopDisplayCoordinator(
+            host = host,
+            placementStrategy = MovableSecondaryDisplayAdapter(
+                PlacementSelection(
+                    mode = PlacementMode.MOVABLE,
+                    source = PlacementSelectionSource.RUNTIME_EVIDENCE,
+                    allowAutomaticMoves = false,
+                    reason = "movable test",
+                ),
+            ),
+        )
+        var startupNotification: DesktopStartupNotification? = null
+        startupNotification = DesktopStartupNotification(coordinator) { text ->
+            tracker.nextUpdate(null, text)?.let { rendered += it }
+        }
+        val unsubscribe = coordinator.subscribe { state ->
+            if (tracker.shouldReclaimRecovery(state)) {
+                startupNotification?.let { notification ->
+                    tracker.nextUpdate(null, notification.text)?.let { rendered += it }
+                }
+            }
+        }
+
+        // Initial startup on phone
+        coordinator.requestOpen(
+            request = DesktopOpenRequest(phone.id, "proot", "xfce4", startSession = true, expectedEpoch = null),
+            startService = {
+                gate.start {
+                    val initial = startupNotification.text
+                    tracker.onStartForeground(initial)
+                    rendered += initial
+                }
+            },
+            completion = {},
+        )
+        val initialLaunch = checkNotNull(lastLaunched)
+        val initialLease = (coordinator.claim(phone.id) {} as RendererClaim.Accepted).lease
+        coordinator.registerActivity(initialLease, initialLaunch.requestId, { phone.id }) {}
+        coordinator.onAttached(initialLease, initialLaunch.requestId, PixelSize(1920, 1080))
+        assertTrue(coordinator.consumeSessionStart(initialLease))
+        val epoch = checkNotNull(coordinator.beginSessionStart(initialLease))
+        running = true
+        coordinator.sessionStarted(epoch, Result.success(Unit))
+        assertEquals("Linux desktop is running", rendered.last())
+
+        // Detach phone view and fail placement on external monitor (no fallback when recover=false on second failure)
+        coordinator.release(initialLease)
+        failLaunch = DesktopDisplayException("DISPLAY_NOT_ALLOWED", "Android denied placement")
+        coordinator.requestOpen(
+            request = DesktopOpenRequest(phone.id, "proot", "xfce4", startSession = false, expectedEpoch = null),
+            startService = { gate.start { error("gate must coalesce") } },
+            completion = {},
+        )
+        assertEquals("RECOVERY:Android denied placement", rendered.last())
+
+        // Unrelated display refresh must not clobber recovery while unattached
+        coordinator.onDisplaysChanged()
+        assertEquals("RECOVERY:Android denied placement", rendered.last())
+
+        // Reopen on phone in already-running session (startSession = false, DesktopStartupNotification text unchanged)
+        failLaunch = null
+        coordinator.requestOpen(
+            request = DesktopOpenRequest(phone.id, "proot", "xfce4", startSession = false, expectedEpoch = null),
+            startService = { gate.start { error("gate must coalesce") } },
+            completion = {},
+        )
+        // Still moving before attachment is confirmed — recovery stays visible
+        assertEquals("RECOVERY:Android denied placement", rendered.last())
+
+        val reopenLaunch = checkNotNull(lastLaunched)
+        val reopenLease = (coordinator.claim(phone.id) {} as RendererClaim.Accepted).lease
+        coordinator.registerActivity(reopenLease, reopenLaunch.requestId, { phone.id }) {}
+        coordinator.onAttached(reopenLease, reopenLaunch.requestId, PixelSize(1920, 1080))
+
+        assertEquals("Linux desktop is running", rendered.last())
+        val countAfterReclaim = rendered.size
+        coordinator.onDisplaysChanged()
+        assertEquals(countAfterReclaim, rendered.size)
+
+        // Move to external monitor, then fail a move back while external fallback also fails,
+        // then unplug external so onDisplayRemoved triggers recovery=true attachment (state["error"] != null)
+        var availableDisplays = listOf(phone, external)
+        val fallbackHost = object : DesktopDisplayHost {
+            override fun currentDisplay() = phone
+            override fun displays() = availableDisplays
+            override fun defaultProfileKind() = ProfileKind.PHONE
+            override fun sessionRunning() = true
+            override fun launch(request: DesktopLaunchRequest) {
+                failLaunch?.let { throw it }
+                lastLaunched = request
+            }
+            override fun focus(requestId: Long) = false
+            override fun cancelLaunch(requestId: Long) = Unit
+            override fun scheduleTimeout(delayMillis: Long, action: () -> Unit): () -> Unit = {}
+            override fun notifyReturnRequired(error: DesktopDisplayException) {
+                tracker.onRecoveryShown()
+                rendered += "RECOVERY:${error.message}"
+            }
+        }
+        val fallbackCoordinator = DesktopDisplayCoordinator(
+            host = fallbackHost,
+            placementStrategy = MovableSecondaryDisplayAdapter(
+                PlacementSelection(
+                    mode = PlacementMode.MOVABLE,
+                    source = PlacementSelectionSource.RUNTIME_EVIDENCE,
+                    allowAutomaticMoves = false,
+                    reason = "movable fallback test",
+                ),
+            ),
+        )
+        var fallbackStartup: DesktopStartupNotification? = null
+        fallbackStartup = DesktopStartupNotification(fallbackCoordinator) { text ->
+            tracker.nextUpdate(null, text)?.let { rendered += it }
+        }
+        val fallbackUnsubscribe = fallbackCoordinator.subscribe { state ->
+            if (tracker.shouldReclaimRecovery(state)) {
+                fallbackStartup?.let { notification ->
+                    tracker.nextUpdate(null, notification.text)?.let { rendered += it }
+                }
+            }
+        }
+        fallbackCoordinator.open(external.id, external.key) {}
+        val extLaunch = checkNotNull(lastLaunched)
+        val extLease = (fallbackCoordinator.claim(external.id) {} as RendererClaim.Accepted).lease
+        fallbackCoordinator.registerActivity(extLease, extLaunch.requestId, { external.id }) {}
+        fallbackCoordinator.onAttached(extLease, extLaunch.requestId, PixelSize(1920, 1080))
+
+        // Detach external lease and fail move to phone + fallback to external -> notifyReturnRequired with error != null
+        fallbackCoordinator.release(extLease)
+        failLaunch = DesktopDisplayException("DISPLAY_NOT_ALLOWED", "Move and fallback denied")
+        fallbackCoordinator.moveToPhone {}
+        assertEquals("RECOVERY:Move and fallback denied", rendered.last())
+
+        // Unplug external monitor -> onDisplayRemoved launches recovery=true onto phone (error stays non-null on attach)
+        failLaunch = null
+        availableDisplays = listOf(phone)
+        fallbackCoordinator.onDisplayRemoved(external.id)
+        val recoveryLaunch = checkNotNull(lastLaunched)
+        val recoveryLease = (fallbackCoordinator.claim(phone.id) {} as RendererClaim.Accepted).lease
+        fallbackCoordinator.registerActivity(recoveryLease, recoveryLaunch.requestId, { phone.id }) {}
+        fallbackCoordinator.onAttached(recoveryLease, recoveryLaunch.requestId, PixelSize(1920, 1080))
+        assertTrue(fallbackCoordinator.snapshot()["error"] != null)
+        assertEquals("Linux desktop is running", rendered.last())
+
+        fallbackUnsubscribe()
+        fallbackStartup.close()
+        unsubscribe()
+        startupNotification.close()
     }
 
     @Test

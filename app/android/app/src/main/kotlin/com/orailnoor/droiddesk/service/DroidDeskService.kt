@@ -86,6 +86,7 @@ internal class ServiceNotificationTracker(private val sequence: AtomicLong = Ato
     @Synchronized fun onStartForeground(text: String) { foreground = true; recovery = false; lastText = text }
     @Synchronized fun onStopForeground() { sequence.incrementAndGet(); foreground = false; recovery = false; lastText = null }
     @Synchronized fun onRecoveryShown() { sequence.incrementAndGet(); recovery = true; lastText = null }
+    @Synchronized fun shouldReclaimRecovery(state: Map<String, Any?>): Boolean = recovery && state["phase"] == "attached"
     @Synchronized fun nextUpdate(provisioningText: String?, fallbackText: String, refreshSequence: Long? = null): String? {
         if (!foreground || (refreshSequence != null && (refreshSequence != sequence.get() || (recovery && provisioningText == null)))) return null
         val candidate = provisioningText ?: fallbackText
@@ -371,8 +372,9 @@ class DroidDeskService : Service() {
         AndroidAppBridge.start(this)
         createNotificationChannel()
         startupNotification = DesktopStartupNotification(DesktopDisplayCoordinator.shared, ::updateNotification)
-        unsubscribeCoordinator = DesktopDisplayCoordinator.shared.subscribe {
-            if (provisioningState.text != null) refreshNotification(notifications.currentSequence())
+        unsubscribeCoordinator = DesktopDisplayCoordinator.shared.subscribe { state ->
+            if (notifications.shouldReclaimRecovery(state)) startupNotification?.let { updateNotification(it.text) }
+            else if (provisioningState.text != null) refreshNotification(notifications.currentSequence())
         }
         acquireWakeLock()
     }
