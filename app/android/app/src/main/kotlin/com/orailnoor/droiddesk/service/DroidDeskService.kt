@@ -31,6 +31,7 @@ import com.orailnoor.droiddesk.runtime.RootShell
 import com.orailnoor.droiddesk.runtime.ProcessLinuxEnvironmentRegistry
 import java.util.concurrent.CancellationException
 import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicLong
 import java.lang.ref.WeakReference
 import java.io.IOException
 
@@ -80,6 +81,22 @@ internal class ProvisioningNotificationState(private val publish: (String?) -> U
     private fun evictStale(isSessionCurrent: (Long) -> Boolean) { epoch?.let { if (!isSessionCurrent(it)) clear() } }
     private fun set(message: String?) { text = message; emit() }
     private fun emit() { if (published != text) { published = text; publish(text) } }
+}
+
+internal class ServiceNotificationTracker(private val sequence: AtomicLong = AtomicLong()) {
+    private var foreground = false
+    private var recovery = false
+    private var lastText: String? = null
+    fun currentSequence(): Long = sequence.get()
+    @Synchronized fun onStartForeground(text: String) { foreground = true; recovery = false; lastText = text }
+    @Synchronized fun onStopForeground() { sequence.incrementAndGet(); foreground = false; recovery = false; lastText = null }
+    @Synchronized fun onRecoveryShown() { sequence.incrementAndGet(); recovery = true; lastText = null }
+    @Synchronized fun nextUpdate(provisioningText: String?, fallbackText: String, refreshSequence: Long? = null): String? {
+        if (!foreground || (refreshSequence != null && (refreshSequence != sequence.get() || (recovery && provisioningText == null)))) return null
+        val candidate = provisioningText ?: fallbackText
+        if (candidate == lastText) return null
+        recovery = false; lastText = candidate; return candidate
+    }
 }
 
 internal data class DesktopReturnNotificationSpec(
@@ -180,9 +197,11 @@ class DroidDeskService : Service() {
         private val sessionExecutor = Executors.newSingleThreadExecutor { task -> Thread(task, "DesktopSessionOperations") }
         private val mainHandler = Handler(Looper.getMainLooper())
         private val startGate = ServiceStartGate()
+        private val recoverySequence = AtomicLong()
         private var activeService: WeakReference<DroidDeskService>? = null
         private val provisioningState = ProvisioningNotificationState {
-            mainHandler.post { activeService?.get()?.refreshNotification() }
+            val seq = recoverySequence.get()
+            mainHandler.post { activeService?.get()?.refreshNotification(seq) }
         }
         @Volatile private var legacyIntentProcess: Process? = null
         @Volatile private var legacyIntentActive = false
@@ -243,7 +262,7 @@ class DroidDeskService : Service() {
                     coordinator.finishStopping(failure)
                     if (failure == null) {
                         activeService?.get()?.let {
-                            it.foregroundStarted = false; it.lastNotificationText = null
+                            it.notifications.onStopForeground()
                             ServiceCompat.stopForeground(it, ServiceCompat.STOP_FOREGROUND_REMOVE)
                         }
                         activeService = null; startGate.reset()
@@ -333,7 +352,7 @@ class DroidDeskService : Service() {
                 context, 1, Intent(context, DroidDeskService::class.java).setAction(ACTION_STOP),
                 PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
             )
-            activeService?.get()?.lastNotificationText = null
+            activeService?.get()?.notifications?.onRecoveryShown() ?: recoverySequence.incrementAndGet()
             manager.notify(NOTIFICATION_ID, NotificationCompat.Builder(context, CHANNEL_ID)
                 .setContentTitle(spec.contentTitle)
                 .setContentText(message)
@@ -350,8 +369,7 @@ class DroidDeskService : Service() {
     private var wakeLock: PowerManager.WakeLock? = null
     private var startupNotification: DesktopStartupNotification? = null
     private var unsubscribeCoordinator: (() -> Unit)? = null
-    @Volatile private var foregroundStarted = false
-    @Volatile private var lastNotificationText: String? = null
+    private val notifications = ServiceNotificationTracker(recoverySequence)
     @Volatile private var stopping = false
 
     override fun onCreate() {
@@ -363,7 +381,7 @@ class DroidDeskService : Service() {
         createNotificationChannel()
         startupNotification = DesktopStartupNotification(DesktopDisplayCoordinator.shared, ::updateNotification)
         unsubscribeCoordinator = DesktopDisplayCoordinator.shared.subscribe {
-            if (provisioningState.text != null) refreshNotification()
+            if (provisioningState.text != null) refreshNotification(notifications.currentSequence())
         }
         acquireWakeLock()
     }
@@ -388,8 +406,7 @@ class DroidDeskService : Service() {
                 0
             }
         )
-        lastNotificationText = contentText
-        foregroundStarted = true
+        notifications.onStartForeground(contentText)
 
         return START_STICKY
     }
@@ -399,7 +416,7 @@ class DroidDeskService : Service() {
     override fun onDestroy() {
         unsubscribeCoordinator?.invoke(); unsubscribeCoordinator = null
         startupNotification?.close(); startupNotification = null
-        foregroundStarted = false; lastNotificationText = null
+        notifications.onStopForeground()
         AndroidAppBridge.stop()
         releaseWakeLock()
         if (activeService?.get() === this) { activeService = null; startGate.reset(); provisioningState.clear() }
@@ -465,17 +482,12 @@ class DroidDeskService : Service() {
             .build()
     }
 
-    fun updateNotification(text: String) {
-        if (!foregroundStarted) return
-        val contentText = currentProvisioningText() ?: text
-        if (contentText == lastNotificationText) return
-        lastNotificationText = contentText
-        val notification = buildNotification(contentText)
-        val manager = getSystemService(NotificationManager::class.java)
-        manager.notify(NOTIFICATION_ID, notification)
+    fun updateNotification(text: String) = postNotification(text, null)
+    private fun refreshNotification(seq: Long) { startupNotification?.let { postNotification(it.text, seq) } }
+    private fun postNotification(fallbackText: String, refreshSequence: Long?) {
+        val contentText = notifications.nextUpdate(currentProvisioningText(), fallbackText, refreshSequence) ?: return
+        getSystemService(NotificationManager::class.java).notify(NOTIFICATION_ID, buildNotification(contentText))
     }
-
-    private fun refreshNotification() = startupNotification?.let { updateNotification(it.text) }
     private fun currentProvisioningText() = DesktopDisplayCoordinator.shared.let { provisioningState.activeText(it.sessionGeneration, it.isStopped) }
 
     // ── Wake Lock ──

@@ -403,6 +403,73 @@ class DroidDeskServiceTest {
     }
 
     @Test
+    fun queuedProvisioningRefreshDoesNotOverwriteRecoveryNotification() {
+        val tracker = ServiceNotificationTracker()
+        val queuedRefreshes = ArrayDeque<Long>()
+        val state = ProvisioningNotificationState {
+            queuedRefreshes.addLast(tracker.currentSequence())
+        }
+        val rendered = mutableListOf<String>()
+
+        fun drainQueuedRefreshes(fallbackText: String) {
+            while (queuedRefreshes.isNotEmpty()) {
+                val seq = queuedRefreshes.removeFirst()
+                tracker.nextUpdate(state.text, fallbackText, seq)?.let { rendered += it }
+            }
+        }
+
+        state.start(91, "Preparing Linux desktop")
+        tracker.onStartForeground(checkNotNull(state.text))
+        rendered += checkNotNull(state.text)
+        drainQueuedRefreshes("Linux desktop is starting")
+        assertEquals(listOf("Preparing Linux desktop"), rendered)
+
+        state.progress(91, "Installing XFCE")
+        drainQueuedRefreshes("Linux desktop is starting")
+        assertEquals(listOf("Preparing Linux desktop", "Installing XFCE"), rendered)
+
+        // completeProvisioning queues a refresh right before launchPreparedDesktop fails into recovery
+        state.complete(91)
+        assertEquals(1, queuedRefreshes.size)
+        tracker.onRecoveryShown()
+        rendered += "RECOVERY:Desktop placement needs attention"
+
+        drainQueuedRefreshes("Linux desktop is starting")
+        assertEquals(
+            listOf(
+                "Preparing Linux desktop",
+                "Installing XFCE",
+                "RECOVERY:Desktop placement needs attention",
+            ),
+            rendered,
+        )
+
+        // Even a refresh with the current sequence must not overwrite recovery while provisioning is idle
+        assertNull(tracker.nextUpdate(null, "Linux desktop is starting", tracker.currentSequence()))
+
+        // Direct coordinator transition or a new provisioning session takes back the notification
+        assertEquals(
+            "Linux desktop is starting",
+            tracker.nextUpdate(null, "Linux desktop is starting"),
+        )
+        assertNull(tracker.nextUpdate(null, "Linux desktop is starting"))
+
+        tracker.onRecoveryShown()
+        state.start(92, "Preparing Linux desktop")
+        drainQueuedRefreshes("Linux desktop is starting")
+        assertEquals("Preparing Linux desktop", rendered.last())
+
+        // Normal completion without recovery restores the coordinator notification once
+        state.complete(92)
+        drainQueuedRefreshes("Linux desktop is running")
+        assertEquals("Linux desktop is running", rendered.last())
+        assertNull(tracker.nextUpdate(null, "Linux desktop is running", tracker.currentSequence()))
+
+        tracker.onStopForeground()
+        assertNull(tracker.nextUpdate(null, "Linux desktop is stopped"))
+    }
+
+    @Test
     fun rejectedStopAdmissionDoesNotChangeCoordinatorState() {
         val calls = mutableListOf<String>()
         val rejection = IllegalStateException("Package operation is active")
