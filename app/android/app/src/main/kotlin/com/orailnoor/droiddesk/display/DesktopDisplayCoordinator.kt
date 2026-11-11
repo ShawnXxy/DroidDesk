@@ -41,6 +41,13 @@ data class DesktopPlacementDiagnostics(
     val shouldAutoLaunchCurrentDisplay: Boolean,
 )
 
+data class InFlightDesktopOpenSpec(
+    val mode: String,
+    val desktopEnv: String,
+    val startSession: Boolean,
+    val expectedEpoch: Long?,
+)
+
 interface DesktopDisplayHost {
     fun currentDisplay(): DesktopDisplay? = null
     fun currentDisplayId(): Int? = currentDisplay()?.id
@@ -108,14 +115,17 @@ class DesktopDisplayCoordinator(
         var actualDisplay: () -> Int = { lease.displayId },
         var launchIdentity: StartupIdentity? = null,
     )
-    private data class Move(
+    private class Move(
         val request: DesktopLaunchRequest,
-        val completion: (Result<Unit>) -> Unit,
+        completion: (Result<Unit>) -> Unit,
         val previous: Owner?,
         val previousTarget: DesktopDisplay?,
         val recovery: Boolean,
         var cancelTimeout: () -> Unit = {},
-    )
+    ) {
+        val completions = mutableListOf(completion)
+        fun complete(result: Result<Unit>) = completions.toList().also { completions.clear() }.forEach { it(result) }
+    }
     private data class MoveRetirement(val move: Move, val incoming: Owner?, val previous: Owner?)
     private data class Continuation(val startup: StartupSnapshot, val owner: Owner?, val move: Move?,
         val requestSequence: Long, val generation: Long)
@@ -123,9 +133,9 @@ class DesktopDisplayCoordinator(
         val displayId: Int?,
         val display: DesktopDisplay?,
     )
-    private data class OpenKey(val target: DesktopStartupTarget?, val request: DesktopOpenRequest)
+    private data class OpenKey(val target: DesktopStartupTarget?, val mode: String, val desktopEnv: String)
     private class OpenOperation(
-        val key: OpenKey,
+        val key: OpenKey, val startSession: Boolean, val admittedFromEpoch: Long?,
         completion: (Long?, Result<Unit>) -> Unit,
     ) {
         var epoch: Long? = null; var placementPending = true
@@ -134,7 +144,12 @@ class DesktopDisplayCoordinator(
             placementPending = false; completions.clear()
         }
     }
-    private class RestartRequest(val key: OpenKey, val startService: () -> Unit, val expectedEpoch: Long) {
+    private class RestartRequest(
+        val key: OpenKey,
+        var startSession: Boolean,
+        var startService: () -> Unit,
+        var expectedEpoch: Long,
+    ) {
         var resultEpoch: Long? = null; var failureReported = false
     }
     private var owner: Owner? = null
@@ -159,7 +174,7 @@ class DesktopDisplayCoordinator(
     private var openOperation: OpenOperation? = null
     private val restartRequests = mutableMapOf<OpenKey, RestartRequest>()
     private var startingRestart: RestartRequest? = null; private var sessionRestarting = false
-    private var restartStartService: () -> Unit = {}
+    private var latestRestart: RestartRequest? = null; private var restartStartService: () -> Unit = {}
     private val restartController = DisplayLocalSessionController(object : DisplayLocalSessionHost<RestartRequest> {
         override fun sessionEpoch() = publishedSessionGeneration
         override fun isSessionCurrent(epoch: Long) = this@DesktopDisplayCoordinator.isSessionCurrent(epoch)
@@ -167,9 +182,15 @@ class DesktopDisplayCoordinator(
             first.key == second.key
         override fun validateTarget(target: RestartRequest) {
             validateRestartTarget(checkNotNull(target.key.target))
+            latestRestart = target
         }
         override fun restartingChanged(restarting: Boolean) {
-            if (!restarting) { restartRequests.clear(); startingRestart = null }; sessionRestarting = restarting
+            if (!restarting) {
+                restartRequests.clear()
+                startingRestart = null
+                latestRestart = null
+            }
+            sessionRestarting = restarting
             publish()
         }
         override fun stopForEnvironmentChange(completion: (Result<Unit>) -> Unit) {
@@ -184,9 +205,17 @@ class DesktopDisplayCoordinator(
             }
         }
         override fun startOnTarget(target: RestartRequest, completion: (Result<Unit>) -> Unit) {
-            startingRestart = target; val request = target.key.request.copy(startSession = true, expectedEpoch = null)
-            prepareAndOpen(OpenKey(target.key.target, request), target.startService) { epoch, result ->
-                if (startingRestart === target) startingRestart = null; target.resultEpoch = epoch; completion(result)
+            startingRestart = target
+            val key = target.key
+            val request = DesktopOpenRequest(
+                checkNotNull(key.target).displayId, key.mode, key.desktopEnv,
+                startSession = true, expectedEpoch = null,
+            )
+            prepareAndOpen(key, target.startService, request) { epoch, result ->
+                if (startingRestart === target) startingRestart = null
+                if (restartRequests[key] === target) restartRequests.remove(key)
+                target.resultEpoch = epoch
+                completion(result)
             }
         }
     }, assertMainThread)
@@ -217,6 +246,8 @@ class DesktopDisplayCoordinator(
         private set
     @Volatile var isStopped = false
         private set
+    @Volatile var userStopGeneration: Long = 0L
+        private set
     private val observerSessionGeneration = ThreadLocal<Long?>()
     @Volatile private var publishedSessionGeneration = 1L
     var sessionGeneration: Long
@@ -226,6 +257,7 @@ class DesktopDisplayCoordinator(
     fun beginSession(): Long {
         assertMainThread()
         if (pendingStops > 0) throw DesktopDisplayException("SESSION_STOPPED", "Desktop teardown is still finishing")
+        stoppingTarget = null
         val replaced = startupFailure("The Linux startup was replaced")
         val retirement = reserveMoveRetirement()
         cancelAutomaticOpening()
@@ -262,6 +294,7 @@ class DesktopDisplayCoordinator(
             "Invalid Linux runtime"
         }
         if (pendingStops > 0) throw DesktopDisplayException("SESSION_STOPPED", "Desktop teardown is still finishing")
+        stoppingTarget = null
         val before = startupMachine.snapshot()
         val superseded = startupFailure("The Linux startup was replaced")
         val transition = try {
@@ -379,7 +412,7 @@ class DesktopDisplayCoordinator(
 
     fun startStopping(preserveRestart: Boolean = false) {
         assertMainThread()
-        if (pendingStops == 0) stoppingTarget = sessionTarget
+        if (pendingStops == 0) stoppingTarget = sessionTarget ?: stoppingTarget
         pendingStops++
         stop(preserveRestart)
     }
@@ -467,14 +500,18 @@ class DesktopDisplayCoordinator(
                 captured, null, pending, capturedRequestSequence, capturedGeneration)) publish()
     }
 
-    fun stop(preserveRestart: Boolean = false) {
+    fun stop(preserveRestart: Boolean = false) = stop(preserveRestart, countUserStop = !preserveRestart)
+
+    private fun stop(preserveRestart: Boolean, countUserStop: Boolean) {
         assertMainThread()
-        val wasStopped = isStopped
-        val beforeCancel = startupMachine.snapshot()
-        if (!preserveRestart) {
-            cancelPendingRestart()
-            if (wasStopped || isStopped || !sameAttemptContext(beforeCancel)) return
-        } else if (wasStopped) return
+        if (countUserStop) {
+            userStopGeneration++
+            if (pendingStops == 0) stoppingTarget = null
+        }
+        if (isStopped) {
+            if (!preserveRestart) restartController.cancelPendingRestart()
+            return
+        }
         val stopped = startupFailure("The Linux session was stopped")
         val retirement = reserveMoveRetirement()
         val transition = startupMachine.invalidate(stopped)
@@ -490,12 +527,15 @@ class DesktopDisplayCoordinator(
         sessionTarget = null
         acceptedRequest = null
         acceptedLaunchIdentity = null
+        openOperation = null
         phase = "stopped"
         error = null
         val continuation = captureContinuation()
         retirement?.let(::detachMoveRetirement)
         previous?.detach?.invoke()
-        if (isStopped && isCurrent(continuation)) publish()
+        val hadPendingRestart = !preserveRestart && restartController.hasPendingRestart
+        if (!preserveRestart && restartController.hasPendingRestart) restartController.cancelPendingRestart()
+        else if (!hadPendingRestart && isStopped && isCurrent(continuation)) publish()
         finishStartupResultDelivery(deliverResults) {
             previous?.finish?.invoke()
             retirement?.let { finishMoveRetirement(it, stopped) }
@@ -559,7 +599,30 @@ class DesktopDisplayCoordinator(
 
     fun cancelPendingRestart() {
         assertMainThread()
-        restartController.cancelPendingRestart()
+        if (startingRestart != null && !isStopped) {
+            if (pendingStops == 0) stoppingTarget = sessionTarget
+            stop(preserveRestart = false, countUserStop = false)
+        } else restartController.cancelPendingRestart()
+    }
+
+    private fun isRestartEpoch(key: OpenKey, epoch: Long) = sessionRestarting && (
+        epoch == publishedSessionGeneration || (latestRestart?.key == key &&
+            epoch in (latestRestart?.expectedEpoch ?: publishedSessionGeneration)..publishedSessionGeneration))
+
+    fun inFlightOpenSpec(): InFlightDesktopOpenSpec? {
+        assertMainThread()
+        val activeOpen = currentOpenOperation(); val snapshot = startupMachine.snapshot()
+        return when {
+            sessionRestarting -> (latestRestart ?: startingRestart)?.key.let {
+                InFlightDesktopOpenSpec(it?.mode ?: sessionMode, it?.desktopEnv ?: desktopEnv, false, publishedSessionGeneration) }
+            activeOpen?.startSession == true -> InFlightDesktopOpenSpec(activeOpen.key.mode, activeOpen.key.desktopEnv, true, null)
+            !isStopped && snapshot.baseIdentity != null && snapshot.terminalResult == null ->
+                InFlightDesktopOpenSpec(snapshot.baseIdentity.spec.mode, snapshot.baseIdentity.spec.desktopEnv, true, null)
+            !isStopped && phase == "moving" -> InFlightDesktopOpenSpec(
+                activeOpen?.key?.mode ?: move?.request?.mode ?: sessionMode,
+                activeOpen?.key?.desktopEnv ?: move?.request?.desktopEnv ?: desktopEnv, false, publishedSessionGeneration)
+            else -> null
+        }
     }
 
     fun restartForEnvironmentIfNeeded(
@@ -569,11 +632,13 @@ class DesktopDisplayCoordinator(
     ): Boolean {
         assertMainThread()
         if (!sessionRestarting && !placementStrategy.requiresSessionRestart(sessionTarget, target)) return false
-        val epoch = if (stopFailed && expectedEpoch == publishedSessionGeneration) beginSession() else expectedEpoch
-        val request = DesktopOpenRequest(
-            target.displayId, sessionMode, desktopEnv, startSession = true, expectedEpoch = null,
-        )
-        requestRestart(OpenKey(target, request), epoch, restartStartService, completion)
+        val spec = latestRestart?.key; val key = OpenKey(target, spec?.mode ?: sessionMode, spec?.desktopEnv ?: desktopEnv)
+        if (sessionRestarting && !isRestartEpoch(key, expectedEpoch)) {
+            completion(startupFailure("The environment change belongs to a stopped session")); return true
+        }
+        val epoch = if (sessionRestarting) publishedSessionGeneration
+        else if (pendingStops == 0 && isStopped && stopFailed && expectedEpoch == publishedSessionGeneration) beginSession() else expectedEpoch
+        requestRestart(key, epoch, minOf(expectedEpoch, epoch), true, restartStartService, completion)
         return true
     }
 
@@ -590,32 +655,40 @@ class DesktopDisplayCoordinator(
             completion(Result.failure(failure))
             return
         }
-        val requestedKey = OpenKey(target, request); val existingRestart = restartRequests[requestedKey]
-        val joinsOpen = currentOpenOperation()?.key == requestedKey || existingRestart != null; val expectedEpoch = request.expectedEpoch
+        val requestedKey = OpenKey(target, request.mode, request.desktopEnv); val expectedEpoch = request.expectedEpoch
+        val existingOpen = currentOpenOperation()
+        val joinsOpen = existingOpen?.let { it.key == requestedKey && (it.startSession || !request.startSession) } == true
+        val recoverFailedStop = pendingStops == 0 && isStopped && stopFailed && !joinsOpen && !sessionRestarting &&
+            (expectedEpoch == null || expectedEpoch == publishedSessionGeneration)
         if (expectedEpoch != null && !isSessionCurrent(expectedEpoch) &&
-            !joinsOpen && !sessionRestarting &&
-            !(stopFailed && expectedEpoch == publishedSessionGeneration)) {
+            !(joinsOpen && existingOpen?.admittedFromEpoch == expectedEpoch) &&
+            !isRestartEpoch(requestedKey, expectedEpoch) && !recoverFailedStop) {
             completion(startupFailure("The session was stopped before launch"))
             return
         }
-        val admittedEpoch = existingRestart?.expectedEpoch ?: if (stopFailed && !joinsOpen &&
-            (expectedEpoch == null || expectedEpoch == publishedSessionGeneration)) beginSession() else expectedEpoch
+        val wasStopped = isStopped; val before = publishedSessionGeneration
+        val admittedEpoch = if (recoverFailedStop) beginSession() else expectedEpoch
         val preparedRequest = if (admittedEpoch != expectedEpoch) request.copy(expectedEpoch = admittedEpoch) else request
         if (target != null &&
             (sessionRestarting || placementStrategy.requiresSessionRestart(sessionTarget, target))) {
-            requestRestart(requestedKey, admittedEpoch ?: publishedSessionGeneration,
-                startService, completion)
+            val epoch = if (sessionRestarting) publishedSessionGeneration else admittedEpoch ?: before
+            requestRestart(requestedKey, epoch, if (recoverFailedStop) expectedEpoch ?: before else epoch,
+                request.startSession, startService, completion)
             return
         }
-        prepareAndOpen(requestedKey, startService, preparedRequest) { _, result -> completion(result) }
+        prepareAndOpen(
+            requestedKey, startService, preparedRequest,
+            expectedEpoch ?: before.takeIf { !wasStopped || recoverFailedStop },
+        ) { _, result -> completion(result) }
     }
 
-    private fun requestRestart(key: OpenKey, expectedEpoch: Long, startService: () -> Unit,
-        completion: (Result<Unit>) -> Unit) {
+    private fun requestRestart(key: OpenKey, expectedEpoch: Long, minEpoch: Long,
+        startSession: Boolean, startService: () -> Unit, completion: (Result<Unit>) -> Unit) {
         val existing = restartRequests[key]
-        val request = existing ?: RestartRequest(key, startService, expectedEpoch).also { restartRequests[key] = it }
+        val wasLatest = latestRestart === existing
+        val request = existing ?: RestartRequest(key, startSession, startService, minEpoch).also { restartRequests[key] = it }
         var returned = false; var completedSynchronously = false
-        restartController.requestRestart(request, if (existing == null) request.expectedEpoch else publishedSessionGeneration) { result ->
+        restartController.requestRestart(request, if (existing == null) expectedEpoch else publishedSessionGeneration) { result ->
             completedSynchronously = !returned
             if (!restartController.hasPendingRestart) restartRequests.clear()
             val failure = result.exceptionOrNull()
@@ -624,24 +697,30 @@ class DesktopDisplayCoordinator(
                 (failure as? DesktopDisplayException)?.code != "SESSION_STOPPED" &&
                 !request.failureReported &&
                 (request.resultEpoch == null || isSessionCurrent(checkNotNull(request.resultEpoch)))) {
-                request.failureReported = true
+                if (existing == null || !completedSynchronously) request.failureReported = true
                 if (sessionFailure == null) reportError(
                     failure as? DesktopDisplayException ?: DesktopDisplayException(
                         "SESSION_RESTART_FAILED",
                         failure.message ?: "Linux could not restart on this display"))
             }
-            if (completedSynchronously && restartController.hasPendingRestart &&
+            if (completedSynchronously && existing == null && restartController.hasPendingRestart &&
                 restartRequests[key] === request) restartRequests.remove(key)
             completion(result)
+        }
+        if (!completedSynchronously) {
+            if (existing != null && !wasLatest) existing.expectedEpoch = minEpoch
+            if (startSession && !request.startSession && startingRestart !== request) {
+                request.startSession = true; request.startService = startService
+            }
         }
         returned = true
     }
 
     private fun prepareAndOpen(key: OpenKey, startService: () -> Unit,
-        request: DesktopOpenRequest = key.request,
+        request: DesktopOpenRequest, admittedFromEpoch: Long? = request.expectedEpoch,
         completion: (Long?, Result<Unit>) -> Unit) {
         val existing = currentOpenOperation()
-        if (existing != null) {
+        if (existing != null && (existing.startSession || !request.startSession)) {
             when {
                 existing.key != key -> completion(existing.epoch, openFailure(
                     "Linux startup is already opening a different desktop request"))
@@ -656,13 +735,15 @@ class DesktopDisplayCoordinator(
                 "Linux startup was prepared outside coordinator open orchestration"))
             return
         }
-        val operation = OpenOperation(key, completion)
+        val operation = OpenOperation(key, request.startSession, admittedFromEpoch, completion)
         openOperation = operation
         val epoch = try {
             prepareSession(request.mode, request.desktopEnv,
                 request.startSession, request.expectedEpoch)
         } catch (failure: DesktopDisplayException) {
-            if (openOperation === operation) openOperation = null
+            if (openOperation === operation) {
+                openOperation = existing?.takeIf { it.placementPending && it.epoch?.let(::isSessionCurrent) == true }
+            }
             val result = Result.failure<Unit>(failure)
             operation.takeCompletions().forEach { it(null, result) }
             return
@@ -695,7 +776,7 @@ class DesktopDisplayCoordinator(
             val result = Result.failure<Unit>(startFailure)
             val callbacks = operation.takeCompletions()
             if (primary && openOperation === operation) openOperation = null
-            if (primary && operation.key.request.startSession) sessionStarted(epoch, result)
+            if (primary && operation.startSession) sessionStarted(epoch, result)
             callbacks.forEach { it(epoch, result) }
             return
         }
@@ -721,7 +802,7 @@ class DesktopDisplayCoordinator(
         openActive(operation.key.target) {
             if (returned) placed(it) else deferred = it
         }
-        placementTransaction = requestSequence != requestSequenceBefore
+        placementTransaction = requestSequence != requestSequenceBefore || move != null
         returned = true
         deferred?.let(::placed)
     }
@@ -733,7 +814,7 @@ class DesktopDisplayCoordinator(
     }
 
     private fun rollbackOwnedOpen(operation: OpenOperation, epoch: Long, result: Result<Unit>) {
-        if (!operation.key.request.startSession || !isSessionCurrent(epoch) || move != null) return
+        if (!operation.startSession || !isSessionCurrent(epoch) || move != null) return
         val snapshot = startupMachine.snapshot()
         val selected = snapshot.selectedIdentity
         val retainedCompatible = selected != null && owner?.launchIdentity?.let {
@@ -746,10 +827,10 @@ class DesktopDisplayCoordinator(
     }
 
     private fun currentOpenOperation(): OpenOperation? {
-        val current = openOperation ?: return null
+        val current = openOperation?.takeUnless { isStopped } ?: run { openOperation = null; return null }
         val epoch = current.epoch ?: return current
         val snapshot = startupMachine.snapshot()
-        val valid = if (current.key.request.startSession) {
+        val valid = if (current.startSession) {
             snapshot.baseIdentity?.epoch == epoch &&
                 (current.placementPending || snapshot.terminalResult == null)
         } else current.placementPending && isSessionCurrent(epoch)
@@ -759,7 +840,7 @@ class DesktopDisplayCoordinator(
     private fun releaseOpenOperation(operation: OpenOperation) {
         if (openOperation !== operation || operation.placementPending) return
         val snapshot = startupMachine.snapshot()
-        if (!operation.key.request.startSession ||
+        if (!operation.startSession ||
             snapshot.baseIdentity?.epoch != operation.epoch ||
             snapshot.terminalResult != null) {
             openOperation = null
@@ -1094,8 +1175,12 @@ class DesktopDisplayCoordinator(
             }
             return
         }
+        val moving = move?.request?.display
         val actual = owner?.actualDisplay?.invoke() ?: host?.currentDisplayId()
-        val target = current.firstOrNull { it.id == actual }
+        val target = moving?.let { pending ->
+            current.firstOrNull { it.id == pending.id && it.key == pending.key && canLaunch(it) }
+        }
+            ?: current.firstOrNull { it.id == actual }
             ?: current.firstOrNull { it.key == lastTarget?.key }
             ?: current.firstOrNull { it.isDefault }
         if (target == null) {
@@ -1130,6 +1215,17 @@ class DesktopDisplayCoordinator(
 
     private fun openTarget(target: DesktopDisplay, completion: (Result<Unit>) -> Unit, recovery: Boolean) {
         val platform = checkNotNull(host)
+        val pendingMove = move
+        val snapshot = startupMachine.snapshot()
+        if (!isStopped && (isStarting || platform.sessionRunning()) && canLaunch(target) && !recovery &&
+            pendingMove?.request?.let {
+                it.display.id == target.id && it.display.key == target.key &&
+                    isSessionCurrent(it.sessionGeneration) && it.sessionGeneration == snapshot.epoch &&
+                    it.mode == snapshot.spec.mode && it.desktopEnv == snapshot.spec.desktopEnv
+            } == true) {
+            pendingMove.completions += completion
+            return
+        }
         val failure = when {
             isStopped || (!isStarting && !platform.sessionRunning()) ->
                 DesktopDisplayException("SESSION_STOPPED", "Start the Linux desktop before moving its view")
@@ -1144,7 +1240,6 @@ class DesktopDisplayCoordinator(
         }
         val selectedTarget =
             DesktopStartupTarget(target.id, target.key, placementStrategy.environmentFor(target))
-        val snapshot = startupMachine.snapshot()
         val launchIdentity = startupMachine.selectTarget(selectedTarget)
             ?: StartupIdentity(snapshot.epoch, snapshot.spec, selectedTarget)
         val selectedSnapshot = startupMachine.snapshot()
@@ -1263,7 +1358,7 @@ class DesktopDisplayCoordinator(
         pending.cancelTimeout()
         if (isCurrent(continuation)) publish()
         previous?.finish?.invoke()
-        pending.completion(Result.success(Unit))
+        pending.complete(Result.success(Unit))
         if (!isStopped && isCurrent(continuation)) refreshAutomaticOpening()
     }
 
@@ -1643,7 +1738,7 @@ class DesktopDisplayCoordinator(
     private fun finishMoveRetirement(retirement: MoveRetirement, result: Result<Unit>) {
         retirement.incoming?.finish?.invoke()
         retirement.previous?.finish?.invoke()
-        retirement.move.completion(result)
+        retirement.move.complete(result)
     }
 
     private fun queueStartupResult(

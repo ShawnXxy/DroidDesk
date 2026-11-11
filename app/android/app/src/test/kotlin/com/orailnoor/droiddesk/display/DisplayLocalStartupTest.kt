@@ -3150,6 +3150,1152 @@ class DisplayLocalStartupTest {
         assertEquals("starting", local.snapshot()["phase"])
     }
 
+    @Test
+    fun startupJoinersCoalesceAcrossExpectedEpochOriginDisplayAndStartSessionFlag() {
+        val genericHost = LocalStartupHost(listOf(phone, tnt)).apply {
+            currentDisplay = tnt.id
+            running = false
+        }
+        val generic = DesktopDisplayCoordinator(
+            host = genericHost,
+            placementStrategy = movableStrategy(),
+        )
+        val reservedEpoch = generic.beginSession()
+        val first = mutableListOf<Result<Unit>>()
+        val nullEpochJoiner = mutableListOf<Result<Unit>>()
+        val currentEpochJoiner = mutableListOf<Result<Unit>>()
+        val duplicateStartJoiner = mutableListOf<Result<Unit>>()
+        var serviceStarts = 0
+
+        generic.requestOpen(
+            openRequest(
+                phone,
+                startSession = true,
+                expectedEpoch = reservedEpoch,
+                mode = "proot",
+                desktopEnv = "plasma",
+            ),
+            {
+                serviceStarts++
+                genericHost.running = true
+            },
+            first::add,
+        )
+        generic.requestOpen(
+            openRequest(
+                tnt,
+                startSession = false,
+                expectedEpoch = null,
+                mode = "proot",
+                desktopEnv = "plasma",
+            ),
+            { serviceStarts++ },
+            nullEpochJoiner::add,
+        )
+        generic.requestOpen(
+            openRequest(
+                phone,
+                startSession = false,
+                expectedEpoch = generic.sessionGeneration,
+                mode = "proot",
+                desktopEnv = "plasma",
+            ),
+            { serviceStarts++ },
+            currentEpochJoiner::add,
+        )
+        generic.requestOpen(
+            openRequest(
+                tnt,
+                startSession = true,
+                expectedEpoch = null,
+                mode = "proot",
+                desktopEnv = "plasma",
+            ),
+            { serviceStarts++ },
+            duplicateStartJoiner::add,
+        )
+
+        assertEquals(1, serviceStarts)
+        assertEquals(1, genericHost.launches.size)
+        assertEquals(tnt, genericHost.launches.single().display)
+        assertTrue(first.isEmpty())
+        assertTrue(nullEpochJoiner.isEmpty())
+        assertTrue(currentEpochJoiner.isEmpty())
+        assertTrue(duplicateStartJoiner.isEmpty())
+
+        attach(generic, genericHost)
+        assertTrue(nullEpochJoiner.isEmpty())
+        val afterAttachJoiner = mutableListOf<Result<Unit>>()
+        generic.requestOpen(
+            openRequest(
+                phone,
+                startSession = false,
+                expectedEpoch = null,
+                mode = "proot",
+                desktopEnv = "plasma",
+            ),
+            {},
+            afterAttachJoiner::add,
+        )
+        assertTrue(afterAttachJoiner.isEmpty())
+
+        generic.sessionStarted(genericHost.launches.single().sessionGeneration, Result.success(Unit))
+
+        assertTrue(first.single().isSuccess)
+        assertTrue(nullEpochJoiner.single().isSuccess)
+        assertTrue(currentEpochJoiner.single().isSuccess)
+        assertTrue(duplicateStartJoiner.single().isSuccess)
+        assertTrue(afterAttachJoiner.single().isSuccess)
+    }
+
+    @Test
+    fun movableRunningMoveCoalescesJoinersAndYieldsToColdSessionStart() {
+        val genericHost = LocalStartupHost(listOf(phone, tnt)).apply {
+            currentDisplay = tnt.id
+        }
+        val generic = DesktopDisplayCoordinator(
+            host = genericHost,
+            placementStrategy = movableStrategy(),
+        )
+        val firstMove = mutableListOf<Result<Unit>>()
+        val joinedMove = mutableListOf<Result<Unit>>()
+        generic.requestOpen(
+            openRequest(phone, startSession = false, expectedEpoch = generic.sessionGeneration),
+            {},
+            firstMove::add,
+        )
+        generic.requestOpen(
+            openRequest(tnt, startSession = false, expectedEpoch = null),
+            {},
+            joinedMove::add,
+        )
+
+        assertEquals(1, genericHost.launches.size)
+        assertTrue(firstMove.isEmpty())
+        assertTrue(joinedMove.isEmpty())
+
+        val coldStart = mutableListOf<Result<Unit>>()
+        var coldServiceStarts = 0
+        generic.requestOpen(
+            openRequest(phone, startSession = true, expectedEpoch = null),
+            { coldServiceStarts++ },
+            coldStart::add,
+        )
+
+        assertEquals(
+            "SESSION_STOPPED",
+            (firstMove.single().exceptionOrNull() as DesktopDisplayException).code,
+        )
+        assertEquals(
+            "SESSION_STOPPED",
+            (joinedMove.single().exceptionOrNull() as DesktopDisplayException).code,
+        )
+        assertEquals(1, coldServiceStarts)
+        assertTrue(generic.isStarting)
+        assertEquals(2, genericHost.launches.size)
+        assertTrue(coldStart.isEmpty())
+
+        attach(generic, genericHost)
+        generic.sessionStarted(genericHost.launches.last().sessionGeneration, Result.success(Unit))
+        assertTrue(coldStart.single().isSuccess)
+    }
+
+    @Test
+    fun staleExpectedEpochCannotJoinMatchingActiveOpenOrRestart() {
+        val staleStartupEpoch = coordinator.beginSession()
+        coordinator.stop()
+        val activeStartup = mutableListOf<Result<Unit>>()
+        coordinator.requestOpen(
+            openRequest(tnt, startSession = true, mode = "proot", desktopEnv = "xfce4"),
+            {},
+            activeStartup::add,
+        )
+        val staleStartupJoin = mutableListOf<Result<Unit>>()
+        coordinator.requestOpen(
+            openRequest(
+                tnt,
+                startSession = false,
+                expectedEpoch = staleStartupEpoch,
+                mode = "proot",
+                desktopEnv = "xfce4",
+            ),
+            {},
+            staleStartupJoin::add,
+        )
+
+        assertEquals(
+            "SESSION_STOPPED",
+            (staleStartupJoin.single().exceptionOrNull() as DesktopDisplayException).code,
+        )
+        assertTrue(activeStartup.isEmpty())
+
+        val localHost = LocalStartupHost(listOf(phone, tnt)).apply {
+            currentDisplay = phone.id
+        }
+        var stopCompletion: ((Result<Unit>) -> Unit)? = null
+        lateinit var local: DesktopDisplayCoordinator
+        local = DesktopDisplayCoordinator(
+            host = localHost,
+            placementStrategy = displayLocalStrategy,
+            stopForEnvironmentChange = { completion ->
+                local.stop(preserveRestart = true)
+                localHost.running = false
+                stopCompletion = completion
+            },
+        )
+        val preStopEpoch = local.beginSession()
+        local.stop()
+        localHost.running = true
+        local.requestOpen(openRequest(phone, startSession = false), {}, {})
+        attach(local, localHost)
+        localHost.currentDisplay = tnt.id
+        val activeRestart = mutableListOf<Result<Unit>>()
+        local.requestOpen(
+            openRequest(tnt, startSession = true, mode = "proot", desktopEnv = "xfce4"),
+            { localHost.running = true },
+            activeRestart::add,
+        )
+
+        val staleTeardownJoin = mutableListOf<Result<Unit>>()
+        local.requestOpen(
+            openRequest(
+                tnt,
+                startSession = false,
+                expectedEpoch = preStopEpoch,
+                mode = "proot",
+                desktopEnv = "xfce4",
+            ),
+            {},
+            staleTeardownJoin::add,
+        )
+        assertEquals(
+            "SESSION_STOPPED",
+            (staleTeardownJoin.single().exceptionOrNull() as DesktopDisplayException).code,
+        )
+
+        stopCompletion!!.invoke(Result.success(Unit))
+        val staleStartingJoin = mutableListOf<Result<Unit>>()
+        local.requestOpen(
+            openRequest(
+                tnt,
+                startSession = false,
+                expectedEpoch = preStopEpoch,
+                mode = "proot",
+                desktopEnv = "xfce4",
+            ),
+            {},
+            staleStartingJoin::add,
+        )
+        assertEquals(
+            "SESSION_STOPPED",
+            (staleStartingJoin.single().exceptionOrNull() as DesktopDisplayException).code,
+        )
+        assertTrue(activeRestart.isEmpty())
+
+        attach(local, localHost)
+        local.sessionStarted(localHost.launches.last().sessionGeneration, Result.success(Unit))
+        assertTrue(activeRestart.single().isSuccess)
+    }
+
+    @Test
+    fun displayLocalRestartCoalescesJoinersAcrossTeardownAndStartingEpochs() {
+        val localHost = LocalStartupHost(listOf(phone, tnt)).apply {
+            currentDisplay = phone.id
+        }
+        var stopCalls = 0
+        var stopCompletion: ((Result<Unit>) -> Unit)? = null
+        lateinit var local: DesktopDisplayCoordinator
+        local = DesktopDisplayCoordinator(
+            host = localHost,
+            placementStrategy = displayLocalStrategy,
+            stopForEnvironmentChange = { completion ->
+                stopCalls++
+                local.stop(preserveRestart = true)
+                localHost.running = false
+                stopCompletion = completion
+            },
+        )
+        local.requestOpen(openRequest(phone, startSession = false), {}, {})
+        attach(local, localHost)
+        val initialEpoch = local.sessionGeneration
+        localHost.currentDisplay = tnt.id
+
+        val caller1 = mutableListOf<Result<Unit>>()
+        val teardownNullJoiner = mutableListOf<Result<Unit>>()
+        val teardownEpochJoiner = mutableListOf<Result<Unit>>()
+        val startingNullJoiner = mutableListOf<Result<Unit>>()
+        val startingTeardownEpochJoiner = mutableListOf<Result<Unit>>()
+        val startingCurrentEpochJoiner = mutableListOf<Result<Unit>>()
+        var serviceStarts = 0
+
+        local.requestOpen(
+            openRequest(
+                tnt,
+                startSession = true,
+                expectedEpoch = initialEpoch,
+                mode = "proot",
+                desktopEnv = "plasma",
+            ),
+            {
+                serviceStarts++
+                localHost.running = true
+            },
+            caller1::add,
+        )
+        val teardownEpoch = local.sessionGeneration
+        assertTrue(teardownEpoch > initialEpoch)
+
+        local.requestOpen(
+            openRequest(tnt, startSession = false, expectedEpoch = null, mode = "proot", desktopEnv = "plasma"),
+            { serviceStarts++ },
+            teardownNullJoiner::add,
+        )
+        local.requestOpen(
+            openRequest(tnt, startSession = false, expectedEpoch = teardownEpoch, mode = "proot", desktopEnv = "plasma"),
+            { serviceStarts++ },
+            teardownEpochJoiner::add,
+        )
+
+        assertTrue(caller1.isEmpty())
+        assertTrue(teardownNullJoiner.isEmpty())
+        assertTrue(teardownEpochJoiner.isEmpty())
+
+        stopCompletion!!.invoke(Result.success(Unit))
+        val startingEpoch = local.sessionGeneration
+        assertTrue(startingEpoch > teardownEpoch)
+
+        local.requestOpen(
+            openRequest(tnt, startSession = false, expectedEpoch = null, mode = "proot", desktopEnv = "plasma"),
+            { serviceStarts++ },
+            startingNullJoiner::add,
+        )
+        local.requestOpen(
+            openRequest(tnt, startSession = false, expectedEpoch = teardownEpoch, mode = "proot", desktopEnv = "plasma"),
+            { serviceStarts++ },
+            startingTeardownEpochJoiner::add,
+        )
+        local.requestOpen(
+            openRequest(tnt, startSession = true, expectedEpoch = startingEpoch, mode = "proot", desktopEnv = "plasma"),
+            { serviceStarts++ },
+            startingCurrentEpochJoiner::add,
+        )
+
+        assertEquals(1, stopCalls)
+        assertEquals(1, serviceStarts)
+        assertEquals(listOf(phone.id, tnt.id), localHost.launches.map { it.display.id })
+        val allOutcomes = listOf(
+            caller1,
+            teardownNullJoiner,
+            teardownEpochJoiner,
+            startingNullJoiner,
+            startingTeardownEpochJoiner,
+            startingCurrentEpochJoiner,
+        )
+        assertTrue(allOutcomes.all { it.isEmpty() })
+
+        attach(local, localHost)
+        local.sessionStarted(localHost.launches.last().sessionGeneration, Result.success(Unit))
+
+        assertFalse(local.isRestarting)
+        assertTrue(allOutcomes.all { it.size == 1 && it.single().isSuccess })
+    }
+
+    @Test
+    fun requestOpenJoinsInFlightManualAndAutomaticMovesWithoutPlacementConflict() {
+        val genericHost = LocalStartupHost(listOf(phone, tnt)).apply {
+            currentDisplay = phone.id
+        }
+        val generic = DesktopDisplayCoordinator(
+            host = genericHost,
+            placementStrategy = movableStrategy(),
+        )
+        generic.requestOpen(
+            openRequest(phone, startSession = true, mode = "proot", desktopEnv = "plasma"),
+            {},
+            {},
+        )
+        attach(generic, genericHost) { phone.id }
+        generic.sessionStarted(genericHost.launches.last().sessionGeneration, Result.success(Unit))
+        genericHost.launches.clear()
+
+        val manualOpen = mutableListOf<Result<Unit>>()
+        val joinedManualOpen = mutableListOf<Result<Unit>>()
+        val conflictingManualMove = mutableListOf<Result<Unit>>()
+        generic.open(tnt.id, tnt.key, manualOpen::add)
+        generic.moveToPhone(conflictingManualMove::add)
+        generic.requestOpen(
+            openRequest(
+                phone,
+                startSession = false,
+                expectedEpoch = generic.sessionGeneration,
+                mode = "proot",
+                desktopEnv = "plasma",
+            ),
+            {},
+            joinedManualOpen::add,
+        )
+
+        assertEquals(
+            "INVALID_ARGUMENT",
+            (conflictingManualMove.single().exceptionOrNull() as DesktopDisplayException).code,
+        )
+        assertEquals(listOf(tnt.id), genericHost.launches.map { it.display.id })
+        assertTrue(manualOpen.isEmpty())
+        assertTrue(joinedManualOpen.isEmpty())
+        attach(generic, genericHost) { tnt.id }
+        assertTrue(manualOpen.single().isSuccess)
+        assertTrue(joinedManualOpen.single().isSuccess)
+
+        genericHost.launches.clear()
+        val returnToPhone = mutableListOf<Result<Unit>>()
+        val joinedReturn = mutableListOf<Result<Unit>>()
+        generic.moveToPhone(returnToPhone::add)
+        generic.requestOpen(
+            openRequest(tnt, startSession = false, expectedEpoch = null, mode = "proot", desktopEnv = "plasma"),
+            {},
+            joinedReturn::add,
+        )
+
+        assertEquals(listOf(phone.id), genericHost.launches.map { it.display.id })
+        assertTrue(returnToPhone.isEmpty())
+        assertTrue(joinedReturn.isEmpty())
+        attach(generic, genericHost) { phone.id }
+        assertTrue(returnToPhone.single().isSuccess)
+        assertTrue(joinedReturn.single().isSuccess)
+
+        val autoHost = LocalStartupHost(listOf(phone)).apply {
+            currentDisplay = phone.id
+        }
+        val autoCoordinator = DesktopDisplayCoordinator(
+            host = autoHost,
+            placementStrategy = movableStrategy(allowAutomaticMoves = true),
+        )
+        autoCoordinator.requestOpen(
+            openRequest(phone, startSession = true, mode = "proot", desktopEnv = "plasma"),
+            {},
+            {},
+        )
+        attach(autoCoordinator, autoHost) { phone.id }
+        autoCoordinator.sessionStarted(autoHost.launches.last().sessionGeneration, Result.success(Unit))
+        autoHost.launches.clear()
+        autoHost.connected = listOf(phone, tnt)
+        autoCoordinator.onDisplaysChanged()
+        autoHost.fireTimers()
+        assertEquals(listOf(tnt.id), autoHost.launches.map { it.display.id })
+
+        val joinedAutoMove = mutableListOf<Result<Unit>>()
+        autoCoordinator.requestOpen(
+            openRequest(phone, startSession = false, expectedEpoch = null, mode = "proot", desktopEnv = "plasma"),
+            {},
+            joinedAutoMove::add,
+        )
+        assertEquals(listOf(tnt.id), autoHost.launches.map { it.display.id })
+        assertTrue(joinedAutoMove.isEmpty())
+        attach(autoCoordinator, autoHost) { tnt.id }
+        assertTrue(joinedAutoMove.single().isSuccess)
+    }
+
+    @Test
+    fun inFlightOpenSpecTracksRestartAtoBtoACollapseStartupAndMovingStates() {
+        val localHost = LocalStartupHost(listOf(phone, tnt)).apply {
+            currentDisplay = phone.id
+            running = false
+        }
+        var stopCompletion: ((Result<Unit>) -> Unit)? = null
+        lateinit var local: DesktopDisplayCoordinator
+        local = DesktopDisplayCoordinator(
+            host = localHost,
+            placementStrategy = displayLocalStrategy,
+            stopForEnvironmentChange = { completion ->
+                local.stop(preserveRestart = true)
+                localHost.running = false
+                stopCompletion = completion
+            },
+        )
+        assertNull(local.inFlightOpenSpec())
+
+        val initialOpen = mutableListOf<Result<Unit>>()
+        local.requestOpen(
+            openRequest(phone, startSession = true, mode = "proot", desktopEnv = "plasma"),
+            { localHost.running = true },
+            initialOpen::add,
+        )
+        assertEquals(
+            InFlightDesktopOpenSpec("proot", "plasma", startSession = true, expectedEpoch = null),
+            local.inFlightOpenSpec(),
+        )
+        attach(local, localHost)
+        assertEquals(
+            InFlightDesktopOpenSpec("proot", "plasma", startSession = true, expectedEpoch = null),
+            local.inFlightOpenSpec(),
+        )
+        local.sessionStarted(localHost.launches.last().sessionGeneration, Result.success(Unit))
+        assertNull(local.inFlightOpenSpec())
+
+        localHost.focusResult = false
+        val movingOpen = mutableListOf<Result<Unit>>()
+        local.requestOpen(
+            openRequest(phone, startSession = false, mode = "proot", desktopEnv = "plasma"),
+            {},
+            movingOpen::add,
+        )
+        assertEquals(
+            InFlightDesktopOpenSpec(
+                "proot",
+                "plasma",
+                startSession = false,
+                expectedEpoch = local.sessionGeneration,
+            ),
+            local.inFlightOpenSpec(),
+        )
+        attach(local, localHost)
+        assertTrue(movingOpen.single().isSuccess)
+        assertNull(local.inFlightOpenSpec())
+
+        // Synchronously rejected restart while not restarting must leave inFlightOpenSpec null.
+        local.requestOpen(openRequest(tnt, startSession = true, mode = "chroot", desktopEnv = "lxqt"), {}, {})
+        assertNull(local.inFlightOpenSpec())
+
+        localHost.currentDisplay = tnt.id
+        local.requestOpen(
+            openRequest(tnt, startSession = true, mode = "proot", desktopEnv = "xfce4"),
+            { localHost.running = true },
+            {},
+        )
+        assertEquals("plasma", local.desktopEnv)
+        assertEquals(
+            InFlightDesktopOpenSpec("proot", "xfce4", startSession = false, expectedEpoch = local.sessionGeneration),
+            local.inFlightOpenSpec(),
+        )
+        // Rejected wrong-display restart while restarting preserves the active spec.
+        local.requestOpen(openRequest(phone, startSession = true, mode = "termux", desktopEnv = "mate"), {}, {})
+        assertEquals(
+            InFlightDesktopOpenSpec("proot", "xfce4", startSession = false, expectedEpoch = local.sessionGeneration),
+            local.inFlightOpenSpec(),
+        )
+
+        local.requestOpen(
+            openRequest(tnt, startSession = true, mode = "chroot", desktopEnv = "lxqt"),
+            { localHost.running = true },
+            {},
+        )
+        assertEquals(
+            InFlightDesktopOpenSpec("chroot", "lxqt", startSession = false, expectedEpoch = local.sessionGeneration),
+            local.inFlightOpenSpec(),
+        )
+        local.requestOpen(
+            openRequest(tnt, startSession = true, mode = "proot", desktopEnv = "xfce4"),
+            { localHost.running = true },
+            {},
+        )
+        assertEquals(
+            InFlightDesktopOpenSpec("proot", "xfce4", startSession = false, expectedEpoch = local.sessionGeneration),
+            local.inFlightOpenSpec(),
+        )
+
+        stopCompletion!!.invoke(Result.success(Unit))
+        val startingEpoch = local.sessionGeneration
+        assertEquals(
+            InFlightDesktopOpenSpec("proot", "xfce4", startSession = false, expectedEpoch = startingEpoch),
+            local.inFlightOpenSpec(),
+        )
+        local.requestOpen(
+            openRequest(tnt, startSession = true, mode = "chroot", desktopEnv = "lxqt"),
+            { localHost.running = true },
+            {},
+        )
+        assertEquals(
+            InFlightDesktopOpenSpec("chroot", "lxqt", startSession = false, expectedEpoch = startingEpoch),
+            local.inFlightOpenSpec(),
+        )
+        local.requestOpen(
+            openRequest(tnt, startSession = true, mode = "termux", desktopEnv = "mate"),
+            { localHost.running = true },
+            {},
+        )
+        assertEquals(
+            InFlightDesktopOpenSpec("termux", "mate", startSession = false, expectedEpoch = startingEpoch),
+            local.inFlightOpenSpec(),
+        )
+        local.requestOpen(
+            openRequest(tnt, startSession = false, mode = "proot", desktopEnv = "xfce4"),
+            {},
+            {},
+        )
+        assertEquals(
+            InFlightDesktopOpenSpec("proot", "xfce4", startSession = false, expectedEpoch = startingEpoch),
+            local.inFlightOpenSpec(),
+        )
+
+        attach(local, localHost)
+        local.sessionStarted(startingEpoch, Result.success(Unit))
+        assertNull(local.inFlightOpenSpec())
+    }
+
+    @Test
+    fun userStopGenerationAdvancesOnlyOnUserStopAndNotPreserveRestartTeardown() {
+        val field = DesktopDisplayCoordinator::class.java.getDeclaredField("userStopGeneration")
+        assertTrue(java.lang.reflect.Modifier.isVolatile(field.modifiers))
+
+        val localHost = LocalStartupHost(listOf(phone, tnt)).apply {
+            currentDisplay = phone.id
+        }
+        lateinit var local: DesktopDisplayCoordinator
+        local = DesktopDisplayCoordinator(
+            host = localHost,
+            placementStrategy = displayLocalStrategy,
+            stopForEnvironmentChange = {
+                local.startStopping(preserveRestart = true)
+                localHost.running = false
+                local.finishStopping()
+            },
+        )
+        assertEquals(0L, local.userStopGeneration)
+
+        local.requestOpen(openRequest(phone, startSession = false), {}, {})
+        attach(local, localHost)
+        localHost.currentDisplay = tnt.id
+        var observedStopGenerationInCallback = -1L
+        local.requestOpen(openRequest(tnt, startSession = true), {}) {
+            observedStopGenerationInCallback = local.userStopGeneration
+        }
+        assertTrue(local.isRestarting)
+        assertTrue(local.isStopped)
+        assertEquals(0L, local.userStopGeneration)
+
+        local.stop()
+        assertEquals(1L, observedStopGenerationInCallback)
+        assertEquals(1L, local.userStopGeneration)
+
+        localHost.running = true
+        local.requestOpen(openRequest(tnt, startSession = false), {}, {})
+        attach(local, localHost)
+        local.startStopping()
+        local.finishStopping()
+        assertEquals(2L, local.userStopGeneration)
+    }
+
+    @Test
+    fun failedStopRecoveryDoesNotAbortSubsequentMovesAndAdmitsFailedStopEpochJoiners() {
+        val localHost = LocalStartupHost(listOf(phone, tnt)).apply {
+            currentDisplay = tnt.id
+        }
+        val local = DesktopDisplayCoordinator(
+            host = localHost,
+            placementStrategy = displayLocalStrategy,
+        )
+        local.requestOpen(openRequest(tnt, startSession = false), {}, {})
+        attach(local, localHost)
+        local.startStopping()
+        local.finishStopping(IllegalStateException("runtime refused to stop"))
+        val failedStopEpoch = local.sessionGeneration
+        localHost.launches.clear()
+
+        val recovered = mutableListOf<Result<Unit>>()
+        val failedEpochJoiner = mutableListOf<Result<Unit>>()
+        local.requestOpen(
+            openRequest(tnt, startSession = false, expectedEpoch = null),
+            {},
+            recovered::add,
+        )
+        local.requestOpen(
+            openRequest(tnt, startSession = false, expectedEpoch = failedStopEpoch),
+            {},
+            failedEpochJoiner::add,
+        )
+
+        assertEquals(1, localHost.launches.size)
+        assertTrue(recovered.isEmpty())
+        assertTrue(failedEpochJoiner.isEmpty())
+        attach(local, localHost) { tnt.id }
+        assertTrue(recovered.single().isSuccess)
+        assertTrue(failedEpochJoiner.single().isSuccess)
+
+        localHost.launches.clear()
+        localHost.focusResult = false
+        val inFlightMove = mutableListOf<Result<Unit>>()
+        val joinedMove = mutableListOf<Result<Unit>>()
+        local.openActive(target(tnt), inFlightMove::add)
+        local.requestOpen(
+            openRequest(tnt, startSession = false, expectedEpoch = null),
+            {},
+            joinedMove::add,
+        )
+
+        assertEquals(1, localHost.launches.size)
+        assertTrue(inFlightMove.isEmpty())
+        assertTrue(joinedMove.isEmpty())
+        attach(local, localHost) { tnt.id }
+        assertTrue(inFlightMove.single().isSuccess)
+        assertTrue(joinedMove.single().isSuccess)
+    }
+
+    @Test
+    fun supersededRestartEpochCannotCancelNewerRestart() {
+        val localHost = LocalStartupHost(listOf(phone, tnt)).apply {
+            currentDisplay = phone.id
+        }
+        var stopCompletion: ((Result<Unit>) -> Unit)? = null
+        lateinit var local: DesktopDisplayCoordinator
+        local = DesktopDisplayCoordinator(
+            host = localHost,
+            placementStrategy = displayLocalStrategy,
+            stopForEnvironmentChange = { completion ->
+                local.stop(preserveRestart = true)
+                localHost.running = false
+                stopCompletion = completion
+            },
+        )
+        local.requestOpen(openRequest(phone, startSession = false), {}, {})
+        attach(local, localHost)
+        val initialEpoch = local.sessionGeneration
+        localHost.currentDisplay = tnt.id
+
+        local.requestOpen(
+            openRequest(tnt, startSession = true, expectedEpoch = initialEpoch, mode = "proot", desktopEnv = "xfce4"),
+            { localHost.running = true },
+            {},
+        )
+        val teardownEpoch = local.sessionGeneration
+        val restartB = mutableListOf<Result<Unit>>()
+        local.requestOpen(
+            openRequest(tnt, startSession = true, mode = "chroot", desktopEnv = "plasma"),
+            { localHost.running = true },
+            restartB::add,
+        )
+
+        val staleA = mutableListOf<Result<Unit>>()
+        local.requestOpen(
+            openRequest(tnt, startSession = false, expectedEpoch = initialEpoch, mode = "proot", desktopEnv = "xfce4"),
+            {},
+            staleA::add,
+        )
+        assertEquals(
+            "SESSION_STOPPED",
+            (staleA.single().exceptionOrNull() as DesktopDisplayException).code,
+        )
+        assertTrue(restartB.isEmpty())
+        assertEquals("chroot", local.inFlightOpenSpec()?.mode)
+
+        stopCompletion!!.invoke(Result.success(Unit))
+        val restartC = mutableListOf<Result<Unit>>()
+        local.requestOpen(
+            openRequest(tnt, startSession = true, mode = "termux", desktopEnv = "mate"),
+            { localHost.running = true },
+            restartC::add,
+        )
+        val staleB = mutableListOf<Result<Unit>>()
+        local.requestOpen(
+            openRequest(tnt, startSession = false, expectedEpoch = teardownEpoch, mode = "chroot", desktopEnv = "plasma"),
+            {},
+            staleB::add,
+        )
+        assertEquals(
+            "SESSION_STOPPED",
+            (staleB.single().exceptionOrNull() as DesktopDisplayException).code,
+        )
+        assertTrue(restartC.isEmpty())
+        assertEquals("termux", local.inFlightOpenSpec()?.mode)
+    }
+
+    @Test
+    fun chainedRestartEvictsFinishedEntryAndUpgradesNoStartServiceStarter() {
+        val localHost = LocalStartupHost(listOf(phone, tnt)).apply {
+            currentDisplay = phone.id
+        }
+        val stopCompletions = ArrayDeque<(Result<Unit>) -> Unit>()
+        lateinit var local: DesktopDisplayCoordinator
+        local = DesktopDisplayCoordinator(
+            host = localHost,
+            placementStrategy = displayLocalStrategy,
+            stopForEnvironmentChange = { completion ->
+                local.stop(preserveRestart = true)
+                localHost.running = false
+                stopCompletions.addLast(completion)
+            },
+        )
+        local.requestOpen(openRequest(phone, startSession = false), {}, {})
+        attach(local, localHost)
+        localHost.currentDisplay = tnt.id
+
+        var noStartCalls = 0
+        var a1StartCalls = 0
+        local.requestOpen(
+            openRequest(tnt, startSession = false, mode = "proot", desktopEnv = "xfce4"),
+            { noStartCalls++ },
+            {},
+        )
+        local.requestOpen(
+            openRequest(tnt, startSession = true, mode = "proot", desktopEnv = "xfce4"),
+            {
+                a1StartCalls++
+                localHost.running = true
+            },
+            {},
+        )
+        stopCompletions.removeFirst().invoke(Result.success(Unit))
+        assertEquals(0, noStartCalls)
+        assertEquals(1, a1StartCalls)
+
+        val a1Epoch = localHost.launches.last().sessionGeneration
+        localHost.currentDisplay = phone.id
+        local.requestOpen(
+            openRequest(phone, startSession = true, mode = "chroot", desktopEnv = "plasma"),
+            { localHost.running = true },
+            {},
+        )
+        attach(local, localHost)
+        local.sessionStarted(a1Epoch, Result.success(Unit))
+        assertEquals(1, stopCompletions.size)
+
+        localHost.currentDisplay = tnt.id
+        var a2StartCalls = 0
+        val a2Outcomes = mutableListOf<Result<Unit>>()
+        local.requestOpen(
+            openRequest(tnt, startSession = true, mode = "proot", desktopEnv = "xfce4"),
+            {
+                a2StartCalls++
+                localHost.running = true
+            },
+            a2Outcomes::add,
+        )
+        stopCompletions.removeFirst().invoke(Result.failure(IllegalStateException("teardown boom")))
+
+        assertEquals(1, a1StartCalls)
+        assertEquals(0, a2StartCalls)
+        assertTrue(a2Outcomes.single().isFailure)
+        assertEquals("SESSION_RESTART_FAILED", local.sessionFailure?.code)
+    }
+
+    @Test
+    fun reentrantStopDuringPrepareSessionClearsPendingOpenOperation() {
+        val first = mutableListOf<Result<Unit>>()
+        val second = mutableListOf<Result<Unit>>()
+        val third = mutableListOf<Result<Unit>>()
+        var specAfterStop: InFlightDesktopOpenSpec? = InFlightDesktopOpenSpec("x", "y", false, null)
+
+        coordinator.requestOpen(
+            openRequest(tnt, startSession = false, mode = "termux", desktopEnv = "xfce4"),
+            {},
+        ) { result ->
+            first += result
+            coordinator.stop()
+            host.running = false
+            specAfterStop = coordinator.inFlightOpenSpec()
+            coordinator.requestOpen(
+                openRequest(tnt, startSession = true, mode = "termux", desktopEnv = "mate"),
+                { host.running = true },
+                third::add,
+            )
+        }
+
+        coordinator.requestOpen(
+            openRequest(tnt, startSession = true, mode = "chroot", desktopEnv = "plasma"),
+            { host.running = true },
+            second::add,
+        )
+
+        assertNull(specAfterStop)
+        assertEquals(
+            "SESSION_STOPPED",
+            (first.single().exceptionOrNull() as DesktopDisplayException).code,
+        )
+        assertEquals(
+            "SESSION_STOPPED",
+            (second.single().exceptionOrNull() as DesktopDisplayException).code,
+        )
+        assertTrue(third.isEmpty())
+        assertEquals("termux", host.launches.last().mode)
+        assertEquals("mate", host.launches.last().desktopEnv)
+        attach()
+        coordinator.sessionStarted(host.launches.last().sessionGeneration, Result.success(Unit))
+        assertTrue(third.single().isSuccess)
+    }
+
+    @Test
+    fun reservedEpochJoinerCoalescesWhenNullEpochStartupArrivesFirstAndRejectsDifferentSpec() {
+        val genericHost = LocalStartupHost(listOf(phone, tnt)).apply {
+            currentDisplay = tnt.id
+            running = false
+        }
+        val generic = DesktopDisplayCoordinator(
+            host = genericHost,
+            placementStrategy = movableStrategy(),
+        )
+        val reservedEpoch = generic.beginSession()
+        val nullEpochCaller = mutableListOf<Result<Unit>>()
+        val reservedJoiner = mutableListOf<Result<Unit>>()
+        val mismatchedReserved = mutableListOf<Result<Unit>>()
+
+        generic.requestOpen(
+            openRequest(phone, startSession = true, expectedEpoch = null, mode = "proot", desktopEnv = "plasma"),
+            { genericHost.running = true },
+            nullEpochCaller::add,
+        )
+        generic.requestOpen(
+            openRequest(tnt, startSession = true, expectedEpoch = reservedEpoch, mode = "proot", desktopEnv = "plasma"),
+            {},
+            reservedJoiner::add,
+        )
+        generic.requestOpen(
+            openRequest(tnt, startSession = true, expectedEpoch = reservedEpoch, mode = "chroot", desktopEnv = "lxqt"),
+            {},
+            mismatchedReserved::add,
+        )
+
+        assertEquals(
+            "SESSION_STOPPED",
+            (mismatchedReserved.single().exceptionOrNull() as DesktopDisplayException).code,
+        )
+        assertEquals(1, genericHost.launches.size)
+        assertTrue(nullEpochCaller.isEmpty())
+        assertTrue(reservedJoiner.isEmpty())
+
+        attach(generic, genericHost) { tnt.id }
+        generic.sessionStarted(genericHost.launches.single().sessionGeneration, Result.success(Unit))
+        assertTrue(nullEpochCaller.single().isSuccess)
+        assertTrue(reservedJoiner.single().isSuccess)
+    }
+
+    @Test
+    fun collapsedStartingRestartAdvancesAdmissionFloorAndPreservesActiveEntryAcrossRejectedJoiner() {
+        val localHost = LocalStartupHost(listOf(phone, tnt)).apply {
+            currentDisplay = phone.id
+        }
+        var stopCompletion: ((Result<Unit>) -> Unit)? = null
+        lateinit var local: DesktopDisplayCoordinator
+        local = DesktopDisplayCoordinator(
+            host = localHost,
+            placementStrategy = displayLocalStrategy,
+            stopForEnvironmentChange = { completion ->
+                local.stop(preserveRestart = true)
+                localHost.running = false
+                stopCompletion = completion
+            },
+        )
+        local.requestOpen(openRequest(phone, startSession = false), {}, {})
+        attach(local, localHost) { phone.id }
+        val initialEpoch = local.sessionGeneration
+        localHost.currentDisplay = tnt.id
+
+        var upgradedStarts = 0
+        local.requestOpen(
+            openRequest(tnt, startSession = false, expectedEpoch = initialEpoch, mode = "proot", desktopEnv = "xfce4"),
+            {},
+            {},
+        )
+        // Synchronous DISPLAY_UNAVAILABLE joiner while target stays eligible must not evict the active entry.
+        localHost.currentDisplay = phone.id
+        val rejectedJoiner = mutableListOf<Result<Unit>>()
+        local.requestOpen(
+            openRequest(tnt, startSession = false, mode = "proot", desktopEnv = "xfce4"),
+            {},
+            rejectedJoiner::add,
+        )
+        assertEquals(
+            "DISPLAY_UNAVAILABLE",
+            (rejectedJoiner.single().exceptionOrNull() as DesktopDisplayException).code,
+        )
+        localHost.currentDisplay = tnt.id
+        local.requestOpen(
+            openRequest(tnt, startSession = true, mode = "proot", desktopEnv = "xfce4"),
+            {
+                upgradedStarts++
+                localHost.running = true
+            },
+            {},
+        )
+
+        stopCompletion!!.invoke(Result.success(Unit))
+        assertEquals(1, upgradedStarts)
+
+        local.requestOpen(
+            openRequest(tnt, startSession = true, mode = "chroot", desktopEnv = "plasma"),
+            { localHost.running = true },
+            {},
+        )
+        val collapsedA = mutableListOf<Result<Unit>>()
+        local.requestOpen(
+            openRequest(tnt, startSession = false, mode = "proot", desktopEnv = "xfce4"),
+            {},
+            collapsedA::add,
+        )
+        val staleFromFirstA = mutableListOf<Result<Unit>>()
+        local.requestOpen(
+            openRequest(tnt, startSession = false, expectedEpoch = initialEpoch, mode = "proot", desktopEnv = "xfce4"),
+            {},
+            staleFromFirstA::add,
+        )
+
+        assertEquals(
+            "SESSION_STOPPED",
+            (staleFromFirstA.single().exceptionOrNull() as DesktopDisplayException).code,
+        )
+        assertTrue(collapsedA.isEmpty())
+        attach(local, localHost) { tnt.id }
+        local.sessionStarted(localHost.launches.last().sessionGeneration, Result.success(Unit))
+        assertTrue(collapsedA.single().isSuccess)
+    }
+
+    @Test
+    fun retryTeardownAfterFailedStopDeliversTypedCompletionFailureWithoutThrowing() {
+        val localHost = LocalStartupHost(listOf(phone, tnt)).apply {
+            currentDisplay = tnt.id
+        }
+        val local = DesktopDisplayCoordinator(
+            host = localHost,
+            placementStrategy = displayLocalStrategy,
+        )
+        local.requestOpen(openRequest(tnt, startSession = false), {}, {})
+        attach(local, localHost) { tnt.id }
+        local.startStopping()
+        local.finishStopping(IllegalStateException("runtime refused to stop"))
+        val failedStopEpoch = local.sessionGeneration
+        local.startStopping()
+
+        val openOutcomes = mutableListOf<Result<Unit>>()
+        local.requestOpen(
+            openRequest(tnt, startSession = false, expectedEpoch = null),
+            {},
+            openOutcomes::add,
+        )
+        val epochOpenOutcomes = mutableListOf<Result<Unit>>()
+        local.requestOpen(
+            openRequest(tnt, startSession = false, expectedEpoch = failedStopEpoch),
+            {},
+            epochOpenOutcomes::add,
+        )
+
+        assertEquals(
+            "SESSION_STOPPED",
+            (openOutcomes.single().exceptionOrNull() as DesktopDisplayException).code,
+        )
+        assertEquals(
+            "SESSION_STOPPED",
+            (epochOpenOutcomes.single().exceptionOrNull() as DesktopDisplayException).code,
+        )
+    }
+
+    @Test
+    fun stopDuringStartingRestartClearsInFlightSpecAndAllowsCallbackReplacement() {
+        val localHost = LocalStartupHost(listOf(phone, tnt)).apply {
+            currentDisplay = phone.id
+        }
+        var stopCompletion: ((Result<Unit>) -> Unit)? = null
+        lateinit var local: DesktopDisplayCoordinator
+        local = DesktopDisplayCoordinator(
+            host = localHost,
+            placementStrategy = displayLocalStrategy,
+            stopForEnvironmentChange = { completion ->
+                local.stop(preserveRestart = true)
+                localHost.running = false
+                stopCompletion = completion
+            },
+        )
+        local.requestOpen(openRequest(phone, startSession = false), {}, {})
+        attach(local, localHost) { phone.id }
+        localHost.currentDisplay = tnt.id
+
+        val observedPhases = mutableListOf<String>()
+        var specInListenerOnStop: InFlightDesktopOpenSpec? = InFlightDesktopOpenSpec("x", "y", false, null)
+        var specInCallback: InFlightDesktopOpenSpec? = InFlightDesktopOpenSpec("x", "y", false, null)
+        val cancelledOutcomes = mutableListOf<Result<Unit>>()
+        val replacementOutcomes = mutableListOf<Result<Unit>>()
+
+        local.requestOpen(
+            openRequest(tnt, startSession = true, mode = "proot", desktopEnv = "xfce4"),
+            { localHost.running = true },
+        ) { result ->
+            cancelledOutcomes += result
+            specInCallback = local.inFlightOpenSpec()
+            localHost.running = false
+            local.requestOpen(
+                openRequest(tnt, startSession = true, mode = "chroot", desktopEnv = "plasma"),
+                { localHost.running = true },
+                replacementOutcomes::add,
+            )
+        }
+        stopCompletion!!.invoke(Result.success(Unit))
+        local.subscribe { state ->
+            observedPhases += state["phase"] as String
+            if (specInListenerOnStop != null) specInListenerOnStop = local.inFlightOpenSpec()
+        }
+
+        local.stop()
+
+        assertNull(specInListenerOnStop)
+        assertNull(specInCallback)
+        assertFalse(observedPhases.first() == "starting")
+        assertEquals(
+            "SESSION_STOPPED",
+            (cancelledOutcomes.single().exceptionOrNull() as DesktopDisplayException).code,
+        )
+        assertTrue(replacementOutcomes.isEmpty())
+        assertEquals("chroot", localHost.launches.last().mode)
+        assertEquals("plasma", localHost.launches.last().desktopEnv)
+        attach(local, localHost) { tnt.id }
+        local.sessionStarted(localHost.launches.last().sessionGeneration, Result.success(Unit))
+        assertTrue(replacementOutcomes.single().isSuccess)
+    }
+
+    @Test
+    fun cancelPendingRestartDuringStartingRestartTearsDownChildStartupWithoutTransientStarting() {
+        val localHost = LocalStartupHost(listOf(phone, tnt)).apply {
+            currentDisplay = phone.id
+        }
+        var stopCompletion: ((Result<Unit>) -> Unit)? = null
+        lateinit var local: DesktopDisplayCoordinator
+        local = DesktopDisplayCoordinator(
+            host = localHost,
+            placementStrategy = displayLocalStrategy,
+            stopForEnvironmentChange = { completion ->
+                local.stop(preserveRestart = true)
+                localHost.running = false
+                stopCompletion = completion
+            },
+        )
+        local.requestOpen(openRequest(phone, startSession = false), {}, {})
+        attach(local, localHost) { phone.id }
+        localHost.currentDisplay = tnt.id
+
+        val observedPhases = mutableListOf<String>()
+        var specInCallback: InFlightDesktopOpenSpec? = InFlightDesktopOpenSpec("x", "y", false, null)
+        val cancelledOutcomes = mutableListOf<Result<Unit>>()
+        local.requestOpen(
+            openRequest(tnt, startSession = true, mode = "proot", desktopEnv = "xfce4"),
+            { localHost.running = true },
+        ) { result ->
+            cancelledOutcomes += result
+            specInCallback = local.inFlightOpenSpec()
+        }
+        stopCompletion!!.invoke(Result.success(Unit))
+        val launchedRequestId = localHost.launches.last().requestId
+        local.subscribe { state -> observedPhases += state["phase"] as String }
+
+        local.cancelPendingRestart()
+
+        assertEquals(0L, local.userStopGeneration)
+        assertTrue(local.isStopped)
+        assertFalse(local.isStarting)
+        assertNull(specInCallback)
+        assertNull(local.inFlightOpenSpec())
+        assertEquals(listOf("stopped"), observedPhases)
+        assertEquals(listOf(launchedRequestId), localHost.cancelledRequests.takeLast(1))
+        assertEquals(
+            "SESSION_STOPPED",
+            (cancelledOutcomes.single().exceptionOrNull() as DesktopDisplayException).code,
+        )
+
+        local.startStopping()
+        local.finishStopping(IllegalStateException("teardown refused"))
+        assertEquals(1L, local.userStopGeneration)
+        assertEquals("tnt", local.snapshot()["sessionEnvironment"])
+
+        localHost.currentDisplay = phone.id
+        local.requestOpen(openRequest(phone, startSession = false), {}, {})
+        assertTrue(local.isRestarting)
+    }
+
     private fun target(display: DesktopDisplay) = DesktopStartupTarget(
         display.id, display.key, displayLocalStrategy.environmentFor(display),
     )
