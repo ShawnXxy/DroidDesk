@@ -4296,6 +4296,238 @@ class DisplayLocalStartupTest {
         assertTrue(local.isRestarting)
     }
 
+    @Test
+    fun inFlightMoveSurvivesUnavailableDisplayErrorAndCollapseAdvancesFloorBeforeSupersededCallback() {
+        val genericHost = LocalStartupHost(listOf(phone, tnt)).apply {
+            currentDisplay = phone.id
+        }
+        val generic = DesktopDisplayCoordinator(
+            host = genericHost,
+            placementStrategy = movableStrategy(),
+        )
+        generic.requestOpen(
+            openRequest(phone, startSession = true, mode = "proot", desktopEnv = "plasma"),
+            {},
+            {},
+        )
+        attach(generic, genericHost) { phone.id }
+        // Before sessionStarted settles, re-entrant requestOpen inside a failing manual move callback
+        // must start a new placement round instead of joining the retiring tnt move.
+        val startupRetryAfterDisconnect = mutableListOf<Result<Unit>>()
+        val startupRetiredJoinedOpen = mutableListOf<Result<Unit>>()
+        generic.open(tnt.id, tnt.key) { outcome ->
+            if (outcome.isFailure) {
+                generic.requestOpen(
+                    openRequest(phone, startSession = false, mode = "proot", desktopEnv = "plasma"),
+                    {},
+                    startupRetryAfterDisconnect::add,
+                )
+            }
+        }
+        generic.requestOpen(
+            openRequest(phone, startSession = false, mode = "proot", desktopEnv = "plasma"),
+            {},
+            startupRetiredJoinedOpen::add,
+        )
+        genericHost.connected = listOf(phone)
+        generic.onDisplayRemoved(tnt.id)
+        assertEquals(
+            "DISPLAY_UNAVAILABLE",
+            (startupRetiredJoinedOpen.single().exceptionOrNull() as DesktopDisplayException).code,
+        )
+        assertTrue(startupRetryAfterDisconnect.isEmpty())
+        genericHost.connected = listOf(phone, tnt)
+        generic.sessionStarted(genericHost.launches.first().sessionGeneration, Result.success(Unit))
+        assertTrue(startupRetryAfterDisconnect.single().isSuccess)
+        genericHost.launches.clear()
+
+        val pendingMove = mutableListOf<Result<Unit>>()
+        generic.open(tnt.id, tnt.key, pendingMove::add)
+        val unavailableOpen = mutableListOf<Result<Unit>>()
+        generic.open(999999, "missing", unavailableOpen::add)
+        assertEquals("error", generic.snapshot()["phase"])
+        assertEquals(
+            InFlightDesktopOpenSpec(
+                "proot",
+                "plasma",
+                startSession = false,
+                expectedEpoch = generic.sessionGeneration,
+            ),
+            generic.inFlightOpenSpec(),
+        )
+        val joinedMove = mutableListOf<Result<Unit>>()
+        generic.requestOpen(
+            openRequest(phone, startSession = false, mode = "proot", desktopEnv = "plasma"),
+            {},
+            joinedMove::add,
+        )
+        var specOnAttachedPublish: InFlightDesktopOpenSpec? = InFlightDesktopOpenSpec("x", "y", false, null)
+        val unsub = generic.subscribe { state ->
+            if (state["phase"] == "attached") specOnAttachedPublish = generic.inFlightOpenSpec()
+        }
+        attach(generic, genericHost) { tnt.id }
+        unsub()
+        assertNull(specOnAttachedPublish)
+        assertTrue(pendingMove.single().isSuccess)
+        assertTrue(joinedMove.single().isSuccess)
+        assertNull(generic.inFlightOpenSpec())
+
+        // Re-entrant requestOpen inside a failing manual move callback must not join the retired OpenOperation.
+        generic.moveToPhone {}
+        attach(generic, genericHost) { phone.id }
+        genericHost.launches.clear()
+        val retryAfterDisconnect = mutableListOf<Result<Unit>>()
+        val retiredJoinedOpen = mutableListOf<Result<Unit>>()
+        generic.open(tnt.id, tnt.key) { outcome ->
+            if (outcome.isFailure) {
+                generic.requestOpen(
+                    openRequest(phone, startSession = false, mode = "proot", desktopEnv = "plasma"),
+                    {},
+                    retryAfterDisconnect::add,
+                )
+            }
+        }
+        generic.requestOpen(
+            openRequest(phone, startSession = false, mode = "proot", desktopEnv = "plasma"),
+            {},
+            retiredJoinedOpen::add,
+        )
+        genericHost.focusResult = false
+        genericHost.connected = listOf(phone)
+        generic.onDisplayRemoved(tnt.id)
+        assertEquals(
+            "DISPLAY_UNAVAILABLE",
+            (retiredJoinedOpen.single().exceptionOrNull() as DesktopDisplayException).code,
+        )
+        assertTrue(retryAfterDisconnect.isEmpty())
+        attach(generic, genericHost) { phone.id }
+        assertTrue(retryAfterDisconnect.single().isSuccess)
+
+        val localHost = LocalStartupHost(listOf(phone, tnt)).apply {
+            currentDisplay = phone.id
+        }
+        var stopCompletion: ((Result<Unit>) -> Unit)? = null
+        lateinit var local: DesktopDisplayCoordinator
+        local = DesktopDisplayCoordinator(
+            host = localHost,
+            placementStrategy = displayLocalStrategy,
+            stopForEnvironmentChange = { completion ->
+                local.stop(preserveRestart = true)
+                localHost.running = false
+                stopCompletion = completion
+            },
+        )
+        local.requestOpen(openRequest(phone, startSession = false), {}, {})
+        attach(local, localHost) { phone.id }
+        val initialEpoch = local.sessionGeneration
+        localHost.currentDisplay = tnt.id
+        local.requestOpen(
+            openRequest(tnt, startSession = true, expectedEpoch = initialEpoch, mode = "proot", desktopEnv = "xfce4"),
+            { localHost.running = true },
+            {},
+        )
+        stopCompletion!!.invoke(Result.success(Unit))
+
+        val reentrantStaleRetry = mutableListOf<Result<Unit>>()
+        local.requestOpen(
+            openRequest(tnt, startSession = true, mode = "chroot", desktopEnv = "plasma"),
+            { localHost.running = true },
+        ) { bOutcome ->
+            if (bOutcome.isFailure) {
+                local.requestOpen(
+                    openRequest(tnt, startSession = false, expectedEpoch = initialEpoch, mode = "proot", desktopEnv = "xfce4"),
+                    {},
+                    reentrantStaleRetry::add,
+                )
+            }
+        }
+        // Rejected collapse while display moved away must not advance A's floor prematurely.
+        attach(local, localHost) { tnt.id }
+        localHost.currentDisplay = phone.id
+        val rejectedCollapse = mutableListOf<Result<Unit>>()
+        local.requestOpen(
+            openRequest(tnt, startSession = false, mode = "proot", desktopEnv = "xfce4"),
+            {},
+            rejectedCollapse::add,
+        )
+        assertEquals(
+            "DISPLAY_UNAVAILABLE",
+            (rejectedCollapse.single().exceptionOrNull() as DesktopDisplayException).code,
+        )
+        assertNull(local.sessionFailure)
+
+        localHost.currentDisplay = tnt.id
+        val collapsedA = mutableListOf<Result<Unit>>()
+        local.requestOpen(
+            openRequest(tnt, startSession = false, mode = "proot", desktopEnv = "xfce4"),
+            {},
+            collapsedA::add,
+        )
+
+        assertEquals(
+            "SESSION_STOPPED",
+            (reentrantStaleRetry.single().exceptionOrNull() as DesktopDisplayException).code,
+        )
+        assertTrue(collapsedA.isEmpty())
+        local.sessionStarted(localHost.launches.last().sessionGeneration, Result.success(Unit))
+        assertTrue(collapsedA.single().isSuccess)
+        assertEquals("attached", local.snapshot()["phase"])
+        assertNull(local.sessionFailure)
+    }
+
+    @Test
+    fun synchronousLaunchAndUnattachedStartupFailuresClearOpenSpecForReplacement() {
+        host.running = false
+        host.oneShotLaunchFailure = DesktopDisplayException("DISPLAY_NOT_ALLOWED", "denied")
+        var specInObserver: InFlightDesktopOpenSpec? = InFlightDesktopOpenSpec("x", "y", false, null)
+        val syncReplacement = mutableListOf<Result<Unit>>()
+        val unsub = coordinator.subscribeSessionStart { outcome ->
+            if (outcome.isFailure && syncReplacement.isEmpty()) {
+                specInObserver = coordinator.inFlightOpenSpec()
+                coordinator.requestOpen(
+                    openRequest(tnt, startSession = true, mode = "chroot", desktopEnv = "plasma"),
+                    { host.running = true },
+                    syncReplacement::add,
+                )
+            }
+        }
+        val deniedInitial = mutableListOf<Result<Unit>>()
+        coordinator.requestOpen(
+            openRequest(tnt, startSession = true, mode = "proot", desktopEnv = "xfce4"),
+            {},
+            deniedInitial::add,
+        )
+        unsub()
+
+        assertNull(specInObserver)
+        assertEquals(
+            "DISPLAY_NOT_ALLOWED",
+            (deniedInitial.single().exceptionOrNull() as DesktopDisplayException).code,
+        )
+        assertEquals("chroot", host.launches.last().mode)
+        assertTrue(syncReplacement.isEmpty())
+
+        // Settled startup failure while Move is still unattached must clear inFlightOpenSpec and allow replacement.
+        val unattachedEpoch = host.launches.last().sessionGeneration
+        coordinator.sessionStarted(unattachedEpoch, Result.failure(IllegalStateException("boot failed")))
+        assertNull(coordinator.inFlightOpenSpec())
+
+        val afterFailedStartup = mutableListOf<Result<Unit>>()
+        coordinator.requestOpen(
+            openRequest(tnt, startSession = true, mode = "termux", desktopEnv = "mate"),
+            { host.running = true },
+            afterFailedStartup::add,
+        )
+        assertEquals(
+            "SESSION_STOPPED",
+            (syncReplacement.single().exceptionOrNull() as DesktopDisplayException).code,
+        )
+        assertEquals("termux", host.launches.last().mode)
+        attach()
+        coordinator.sessionStarted(host.launches.last().sessionGeneration, Result.success(Unit))
+        assertTrue(afterFailedStartup.single().isSuccess)
+    }
+
     private fun target(display: DesktopDisplay) = DesktopStartupTarget(
         display.id, display.key, displayLocalStrategy.environmentFor(display),
     )
