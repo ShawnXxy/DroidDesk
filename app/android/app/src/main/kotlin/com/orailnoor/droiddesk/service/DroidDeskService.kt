@@ -33,6 +33,45 @@ import java.io.IOException
 
 enum class DesktopStopReason { USER, ENVIRONMENT_CHANGE }
 
+internal data class DesktopReturnNotificationSpec(
+    val contentTitle: String,
+    val actionLabel: String,
+    val action: String,
+)
+
+internal fun desktopReturnNotificationSpec(
+    snapshot: Map<String, Any?>,
+    runtimeRunning: Boolean,
+): DesktopReturnNotificationSpec {
+    val canReturnToPhone =
+        snapshot["crossDisplayMovesAllowed"] == true &&
+            (snapshot["sessionRunning"] == true || runtimeRunning)
+    return if (canReturnToPhone) {
+        DesktopReturnNotificationSpec(
+            "Linux session preserved",
+            "Return to phone",
+            MainActivity.ACTION_RETURN_TO_PHONE,
+        )
+    } else {
+        DesktopReturnNotificationSpec(
+            "Desktop placement needs attention",
+            "Open",
+            MainActivity.ACTION_OPEN_DESKTOP,
+        )
+    }
+}
+
+internal fun notificationRuntimeRunning(
+    snapshot: Map<String, Any?>,
+    readRuntimeRunning: () -> Boolean,
+    onFailure: (Exception) -> Unit,
+): Boolean = try {
+    readRuntimeRunning()
+} catch (error: Exception) {
+    onFailure(error)
+    snapshot["sessionRunning"] == true
+}
+
 internal fun performDesktopTeardown(
     stopEnvironment: () -> Unit,
     stopLegacyBridge: () -> Unit,
@@ -202,13 +241,24 @@ class DroidDeskService : Service() {
 
         fun notifyReturnRequired(context: Context, message: String) {
             val manager = context.getSystemService(NotificationManager::class.java)
-            val displayLocal = DesktopDisplayCoordinator.shared.isDisplayLocal
+            val coordinator = DesktopDisplayCoordinator.shared
             manager.createNotificationChannel(NotificationChannel(
                 CHANNEL_ID, "DroidDesk Linux Service", NotificationManager.IMPORTANCE_LOW,
             ))
+            val snapshot = coordinator.snapshot()
+            val running = notificationRuntimeRunning(
+                snapshot = snapshot,
+                readRuntimeRunning = {
+                    ProcessLinuxEnvironmentRegistry.get(context).environmentManager.status().running
+                },
+                onFailure = {
+                    Log.e(TAG, "Could not read Linux runtime status for recovery notification", it)
+                },
+            )
+            val spec = desktopReturnNotificationSpec(snapshot, running)
             val returnIntent = PendingIntent.getActivity(
                 context, 2, Intent(context, MainActivity::class.java)
-                    .setAction(if (displayLocal) MainActivity.ACTION_OPEN_DESKTOP else MainActivity.ACTION_RETURN_TO_PHONE)
+                    .setAction(spec.action)
                     .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP),
                 PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
             )
@@ -216,15 +266,12 @@ class DroidDeskService : Service() {
                 context, 1, Intent(context, DroidDeskService::class.java).setAction(ACTION_STOP),
                 PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
             )
-            val running = runCatching {
-                ProcessLinuxEnvironmentRegistry.get(context).environmentManager.status().running
-            }.getOrDefault(false)
             manager.notify(NOTIFICATION_ID, NotificationCompat.Builder(context, CHANNEL_ID)
-                .setContentTitle(if (running && !displayLocal) "Linux session preserved" else "Desktop placement needs attention")
+                .setContentTitle(spec.contentTitle)
                 .setContentText(message)
                 .setSmallIcon(android.R.drawable.ic_menu_compass)
                 .setContentIntent(returnIntent)
-                .addAction(0, if (displayLocal) "Open" else "Return to phone", returnIntent)
+                .addAction(0, spec.actionLabel, returnIntent)
                 .addAction(0, "Stop", stopIntent)
                 .setOngoing(true)
                 .setOnlyAlertOnce(true)
