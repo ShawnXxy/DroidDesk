@@ -38,6 +38,7 @@ import com.orailnoor.droiddesk.display.DesktopDisplayCoordinator
 import com.orailnoor.droiddesk.display.DesktopDisplayException
 import com.orailnoor.droiddesk.display.DesktopItemReadinessGate
 import com.orailnoor.droiddesk.display.DesktopLaunchReply
+import com.orailnoor.droiddesk.display.DesktopPlacementDiagnostics
 import com.orailnoor.droiddesk.display.placement.DesktopOpenRequest
 import com.orailnoor.droiddesk.display.input.shouldCaptureRelayedPointer
 import com.orailnoor.droiddesk.packages.PackageStoreException
@@ -86,6 +87,37 @@ internal fun shouldDeferResolvedDesktopOpen(
     isAttached: Boolean,
     allowsManualMoves: Boolean,
 ): Boolean = !isAttached && (displayId == null || !allowsManualMoves)
+
+internal class AsyncDesktopAdmission(
+    val expectedEpoch: Long,
+    private val isCurrent: (Long) -> Boolean,
+) {
+    fun current(): Result<Unit> =
+        if (isCurrent(expectedEpoch)) Result.success(Unit) else Result.failure(stopped())
+    fun <T> cross(operation: () -> T): Result<T> {
+        current().exceptionOrNull()?.let { return Result.failure(it) }
+        val value = try { operation() } catch (error: Exception) {
+            return Result.failure(current().exceptionOrNull() ?: error)
+        }
+        return current().map { value }
+    }
+    private fun stopped() = DesktopDisplayException(
+        "SESSION_STOPPED", "The session was stopped before the asynchronous desktop action completed")
+}
+
+internal fun <S> readDesktopRuntimeStatus(
+    readStatus: () -> S, onFailure: (Exception) -> Unit,
+): S? = try { readStatus() } catch (error: Exception) { onFailure(error); null }
+
+internal fun <S> readEligibleExternalAutoStartStatus(
+    diagnostics: DesktopPlacementDiagnostics,
+    readStatus: () -> S,
+    shouldAutoLaunch: (S) -> Boolean,
+    onFailure: (Exception) -> Unit,
+): S? {
+    if (!diagnostics.allowsManualMoves || !diagnostics.shouldAutoLaunchCurrentDisplay) return null
+    return readDesktopRuntimeStatus(readStatus, onFailure)?.takeIf(shouldAutoLaunch)
+}
 
 internal object MainActivityLaunchPolicy {
     fun shouldHandleInitialIntent(restored: Boolean, firstActivityInProcess: Boolean): Boolean =
@@ -264,9 +296,12 @@ class MainActivity : FlutterActivity() {
         } else {
             window.decorView.display?.displayId
         } ?: return
-        if (!coordinator.placementDiagnostics(displayId).allowsManualMoves) return
-        val status = environmentManager.status()
-        if (!coordinator.shouldAutoLaunchCurrentDisplay(displayId, status.installed)) return
+        val status = readEligibleExternalAutoStartStatus(
+            coordinator.placementDiagnostics(displayId, installed = true),
+            environmentManager::status,
+            { coordinator.shouldAutoLaunchCurrentDisplay(displayId, it.installed) },
+            ::displayFailure,
+        ) ?: return
         requestResolvedDesktopOpen(
             status.kind.sessionMode,
             status.desktop,
@@ -284,7 +319,7 @@ class MainActivity : FlutterActivity() {
         if (!DesktopDisplayCoordinator.shared.placementDiagnostics().allowsManualMoves) return
         val autoStart = prefs.getBoolean("flutter.autoStartDesktop", false)
         if (autoStart) {
-            val status = environmentManager.status()
+            val status = readDesktopRuntimeStatus(environmentManager::status, ::displayFailure) ?: return
             if (status.installed && status.desktop.isNotEmpty()) requestResolvedDesktopOpen(
                 status.kind.sessionMode,
                 status.desktop,
@@ -396,7 +431,7 @@ class MainActivity : FlutterActivity() {
             launchPreparedDesktop(coordinator.sessionGeneration, null)
             return
         }
-        if (environmentManager.status().running) {
+        if (readDesktopRuntimeStatus(environmentManager::status, ::displayFailure)?.running ?: return) {
             requestResolvedDesktopOpen(
                 coordinator.sessionMode,
                 coordinator.desktopEnv,
@@ -411,15 +446,19 @@ class MainActivity : FlutterActivity() {
             displayFailure(error)
             return
         }
+        val admission = AsyncDesktopAdmission(epoch, coordinator::isSessionCurrent)
 
         thread(name = "home-launch") {
-            val status = environmentManager.status()
+            val status = admission.cross(environmentManager::status).getOrElse { failure ->
+                runOnUiThread { displayFailure(admission.current().exceptionOrNull() ?: failure) }; return@thread
+            }
             if (!status.installed || status.desktop.isEmpty()) {
                 Log.i(TAG, "Home launch opened setup because Linux is not ready")
                 return@thread
             }
 
             runOnUiThread {
+                admission.current().exceptionOrNull()?.let { displayFailure(it); return@runOnUiThread }
                 requestDesktop(
                     status.kind.sessionMode,
                     status.desktop,
@@ -441,19 +480,21 @@ class MainActivity : FlutterActivity() {
             displayFailure(error)
             return
         }
+        val admission = AsyncDesktopAdmission(epoch, DesktopDisplayCoordinator.shared::isSessionCurrent)
         thread(name = "auto-chroot-setup") {
             try {
                 Log.i(TAG, "Auto-setup: checking root...")
-                if (!chrootRuntime.hasRoot()) {
+                if (!admission.cross(chrootRuntime::hasRoot).getOrThrow()) {
                     runOnUiThread {
-                        android.widget.Toast.makeText(this, "Auto-setup requires root", android.widget.Toast.LENGTH_LONG).show()
+                        if (admission.current().isSuccess)
+                            Toast.makeText(this, "Auto-setup requires root", Toast.LENGTH_LONG).show()
                     }
                     return@thread
                 }
 
-                startForegroundService()
+                admission.cross(::startForegroundService).getOrThrow()
 
-                if (!chrootRuntime.isRootfsReady()) {
+                if (!admission.cross(chrootRuntime::isRootfsReady).getOrThrow()) {
                     Log.i(TAG, "Auto-setup: downloading rootfs...")
                     val dlLatch = java.util.concurrent.CountDownLatch(1)
                     var dlOk = false
@@ -464,7 +505,7 @@ class MainActivity : FlutterActivity() {
                         }
                     }
                     dlLatch.await()
-                    if (!dlOk) throw RuntimeException("Rootfs download failed")
+                    admission.current().getOrThrow(); check(dlOk) { "Rootfs download failed" }
 
                     Log.i(TAG, "Auto-setup: extracting rootfs...")
                     val exLatch = java.util.concurrent.CountDownLatch(1)
@@ -476,10 +517,10 @@ class MainActivity : FlutterActivity() {
                         }
                     }
                     exLatch.await()
-                    if (!exOk) throw RuntimeException("Rootfs extraction failed")
+                    admission.current().getOrThrow(); check(exOk) { "Rootfs extraction failed" }
                 }
 
-                if (!chrootRuntime.isDesktopInstalled()) {
+                if (!admission.cross(chrootRuntime::isDesktopInstalled).getOrThrow()) {
                     Log.i(TAG, "Auto-setup: installing desktop environment...")
                     val inLatch = java.util.concurrent.CountDownLatch(1)
                     var inOk = false
@@ -494,17 +535,21 @@ class MainActivity : FlutterActivity() {
                         onLog = {}
                     )
                     inLatch.await()
-                    if (!inOk) throw RuntimeException("Desktop installation failed")
+                    admission.current().getOrThrow(); check(inOk) { "Desktop installation failed" }
                 }
 
                 Log.i(TAG, "Auto-setup: launching desktop...")
+                val startSession = !admission.cross(chrootRuntime::isRunning).getOrThrow()
                 runOnUiThread {
-                    requestDesktop("chroot", "xfce4", !chrootRuntime.isRunning(), expectedEpoch = epoch)
+                    if (admission.current().isSuccess)
+                        requestDesktop("chroot", "xfce4", startSession, expectedEpoch = epoch)
                 }
             } catch (e: Exception) {
-                Log.e(TAG, "Auto-setup failed", e)
+                val reported = admission.current().exceptionOrNull() ?: e
+                Log.e(TAG, "Auto-setup failed", reported)
                 runOnUiThread {
-                    android.widget.Toast.makeText(this, "Auto-setup failed: ${e.message}", android.widget.Toast.LENGTH_LONG).show()
+                    if (admission.current().isSuccess && (reported as? DesktopDisplayException)?.code != "SESSION_STOPPED")
+                        Toast.makeText(this, "Auto-setup failed: ${reported.message}", Toast.LENGTH_LONG).show()
                 }
             }
         }
@@ -590,7 +635,9 @@ class MainActivity : FlutterActivity() {
 
                 // ── Runtime Status ──
                 "getRuntimeStatus" -> {
-                    result.success(environmentManager.status().toLegacyMap())
+                    readDesktopRuntimeStatus(environmentManager::status) {
+                        displayFailure(it, result)
+                    }?.let { result.success(it.toLegacyMap()) }
                 }
 
                 // ── Device Info ──
@@ -1045,7 +1092,9 @@ class MainActivity : FlutterActivity() {
                 "startLinux" -> {
                     val startReply = DesktopLaunchReply(result, displays)
                     val desktopEnv = call.argument<String>("de") ?: "xfce4"
-                    val status = environmentManager.status()
+                    val status = readDesktopRuntimeStatus(environmentManager::status) {
+                        displayFailure(it, startReply)
+                    } ?: return@setMethodCallHandler
                     val environmentKind = status.kind
                     val ready = status.installed && status.desktop == desktopEnv
                     if (ready) {
@@ -1067,15 +1116,16 @@ class MainActivity : FlutterActivity() {
                         displayFailure(error, startReply)
                         return@setMethodCallHandler
                     }
+                    val admission = AsyncDesktopAdmission(epoch, displays::isSessionCurrent)
                     startForegroundService()
                     installThread("prepare-linux-environment") {
                         try {
-                            if (!ready) {
+                            admission.cross {
                                 environmentManager.provision(
                                     ProvisionRequest(environmentKind, desktopEnv),
                                     onProgress = { progress, message ->
                                         runOnUiThread {
-                                            MethodChannel(
+                                            if (admission.current().isSuccess) MethodChannel(
                                                 flutterEngine.dartExecutor.binaryMessenger,
                                                 CHANNEL,
                                             ).invokeMethod(
@@ -1086,20 +1136,32 @@ class MainActivity : FlutterActivity() {
                                     },
                                     onLog = ::appendTerminalOutput,
                                 ).getOrThrow()
+                            }.getOrThrow()
+                            runOnUiThread {
+                                admission.current()
+                                    .onSuccess { launchPreparedDesktop(epoch, startReply) }
+                                    .onFailure { displayFailure(it, startReply) }
                             }
-                            runOnUiThread { launchPreparedDesktop(epoch, startReply) }
                         } catch (error: Exception) {
                             Log.e(TAG, "Linux environment preparation failed", error)
                             runOnUiThread {
-                                displays.sessionStarted(epoch, Result.failure(error))
-                                startReply.error("SESSION_STOPPED", error.message, null)
+                                val stale = admission.current().exceptionOrNull()
+                                if (stale == null) displays.sessionStarted(epoch, Result.failure(error))
+                                val reported = stale ?: error
+                                startReply.error(
+                                    (reported as? DesktopDisplayException)?.code ?: "SESSION_STOPPED",
+                                    reported.message,
+                                    null,
+                                )
                             }
                         }
                     }
                 }
 
                 "launchDesktopActivity" -> {
-                    val status = environmentManager.status()
+                    val status = readDesktopRuntimeStatus(environmentManager::status) {
+                        displayFailure(it, result)
+                    } ?: return@setMethodCallHandler
                     requestResolvedDesktopOpen(
                         status.kind.sessionMode,
                         status.desktop,
