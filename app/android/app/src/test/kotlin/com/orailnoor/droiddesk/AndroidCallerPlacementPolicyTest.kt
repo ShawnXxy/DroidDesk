@@ -739,6 +739,16 @@ class AndroidCallerPlacementPolicyTest {
         ).forEach { api ->
             assertTrue("DroidDeskService must expose $api", serviceSource.contains(api))
         }
+        val serviceOnCreate = functionBody(serviceSource, "override fun onCreate()")
+        val serviceOnStartCommand = functionBody(serviceSource, "override fun onStartCommand(")
+        assertFalse(
+            "DroidDeskService.onCreate must not latch startGate during stop-only creation",
+            serviceOnCreate.contains("startGate.start"),
+        )
+        assertTrue(
+            "DroidDeskService.onStartCommand must latch startGate only after the ACTION_STOP branch",
+            serviceOnStartCommand.indexOf("ACTION_STOP") < serviceOnStartCommand.indexOf("startGate.start"),
+        )
         forbiddenPlacement.forEach { pattern ->
             assertFalse(
                 "DroidDeskService must not contain ${pattern.pattern}",

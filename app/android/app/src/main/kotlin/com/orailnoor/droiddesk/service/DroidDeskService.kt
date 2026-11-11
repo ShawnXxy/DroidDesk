@@ -44,37 +44,33 @@ internal class ServiceStartGate {
 }
 
 internal class ProvisioningNotificationState(private val publish: (String?) -> Unit) {
-    private var epoch: Long? = null
-    private var published: String? = null
+    private var epoch: Long? = null; private var failed = false; private var published: String? = null
     @Volatile var text: String? = null; private set
 
     fun start(epoch: Long, message: String, isSessionCurrent: (Long) -> Boolean = { true }, startService: () -> Unit = {}) {
-        synchronized(this) { requireCurrent(epoch, isSessionCurrent); this.epoch = epoch; text = message }
+        synchronized(this) { requireCurrent(epoch, isSessionCurrent); this.epoch = epoch; failed = false; text = message }
         try { startService() } catch (error: RuntimeException) {
             val failure = if (error is DesktopDisplayException || error is SecurityException || error.message != null) error
             else IllegalStateException("Android could not start the Linux service", error)
             fail(epoch, failure, isSessionCurrent); throw error
         }
-        synchronized(this) { requireCurrent(epoch, isSessionCurrent); if (this.epoch == epoch) emit() }
+        synchronized(this) { requireCurrent(epoch, isSessionCurrent); if (this.epoch == epoch && !failed) emit() }
     }
     @Synchronized fun progress(epoch: Long, message: String, isSessionCurrent: (Long) -> Boolean = { true }) {
-        evictStale(isSessionCurrent); if (this.epoch == epoch && message.isNotBlank()) set(message)
+        evictStale(isSessionCurrent); if (this.epoch == epoch && !failed && message.isNotBlank()) set(message)
     }
     @Synchronized fun complete(epoch: Long, isSessionCurrent: (Long) -> Boolean = { true }) {
-        evictStale(isSessionCurrent); if (this.epoch == epoch) clear()
+        evictStale(isSessionCurrent); if (this.epoch == epoch && !failed) clear()
     }
     @Synchronized fun fail(epoch: Long, failure: Throwable, isSessionCurrent: (Long) -> Boolean = { true }) {
         evictStale(isSessionCurrent); if (this.epoch != epoch) return
         if ((failure as? DesktopDisplayException)?.code == "SESSION_STOPPED" || failure is CancellationException) clear()
-        else set("Linux desktop failed to start: " +
-            if (failure is SecurityException) "Android denied starting the Linux service"
-            else failure.message ?: "Check the session log")
+        else if (!failed) { failed = true; set("Linux desktop failed to start: " + if (failure is SecurityException) "Android denied starting the Linux service" else failure.message ?: "Check the session log") }
     }
     @Synchronized fun activeText(currentEpoch: Long, isStopped: Boolean): String? {
-        if (epoch != null && (isStopped || epoch != currentEpoch)) clear()
-        return text
+        if (epoch != null && (isStopped || epoch != currentEpoch)) clear(); return text
     }
-    @Synchronized fun clear() { epoch = null; set(null) }
+    @Synchronized fun clear() { epoch = null; failed = false; set(null) }
     private fun requireCurrent(epoch: Long, isSessionCurrent: (Long) -> Boolean) {
         if (!isSessionCurrent(epoch)) { evictStale(isSessionCurrent); throw DesktopDisplayException("SESSION_STOPPED", "The session was stopped before provisioning started") }
     }
@@ -84,10 +80,9 @@ internal class ProvisioningNotificationState(private val publish: (String?) -> U
 }
 
 internal class ServiceNotificationTracker(private val sequence: AtomicLong = AtomicLong()) {
-    private var foreground = false
-    private var recovery = false
-    private var lastText: String? = null
+    private var foreground = false; private var recovery = false; private var lastText: String? = null
     fun currentSequence(): Long = sequence.get()
+    @Synchronized fun isForeground(): Boolean = foreground
     @Synchronized fun onStartForeground(text: String) { foreground = true; recovery = false; lastText = text }
     @Synchronized fun onStopForeground() { sequence.incrementAndGet(); foreground = false; recovery = false; lastText = null }
     @Synchronized fun onRecoveryShown() { sequence.incrementAndGet(); recovery = true; lastText = null }
@@ -199,10 +194,7 @@ class DroidDeskService : Service() {
         private val startGate = ServiceStartGate()
         private val recoverySequence = AtomicLong()
         private var activeService: WeakReference<DroidDeskService>? = null
-        private val provisioningState = ProvisioningNotificationState {
-            val seq = recoverySequence.get()
-            mainHandler.post { activeService?.get()?.refreshNotification(seq) }
-        }
+        private val provisioningState = ProvisioningNotificationState { val seq = recoverySequence.get(); mainHandler.post { activeService?.get()?.refreshNotification(seq) } }
         @Volatile private var legacyIntentProcess: Process? = null
         @Volatile private var legacyIntentActive = false
 
@@ -264,7 +256,8 @@ class DroidDeskService : Service() {
                         activeService?.get()?.let {
                             it.notifications.onStopForeground()
                             ServiceCompat.stopForeground(it, ServiceCompat.STOP_FOREGROUND_REMOVE)
-                        }
+                        } ?: recoverySequence.incrementAndGet()
+                        app.getSystemService(NotificationManager::class.java)?.cancel(NOTIFICATION_ID)
                         activeService = null; startGate.reset()
                         app.stopService(Intent(app, DroidDeskService::class.java))
                         completion(Result.success(Unit))
@@ -374,8 +367,6 @@ class DroidDeskService : Service() {
 
     override fun onCreate() {
         super.onCreate()
-        startGate.start {}
-        activeService = WeakReference(this)
         DesktopDisplayCoordinator.shared.initialize(applicationContext)
         AndroidAppBridge.start(this)
         createNotificationChannel()
@@ -428,7 +419,7 @@ class DroidDeskService : Service() {
         if (stopping) return
         stopping = true
         stopDesktop(applicationContext) { outcome ->
-            if (outcome.isFailure) stopping = false
+            if (outcome.isFailure) { stopping = false; if (!notifications.isForeground()) stopSelf() }
         }
     }
 

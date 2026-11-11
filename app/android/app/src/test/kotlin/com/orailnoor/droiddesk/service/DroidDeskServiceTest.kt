@@ -282,12 +282,19 @@ class DroidDeskServiceTest {
 
         val genericFailureEpoch = coordinator.prepareSession("proot", "xfce4", start = true)
         val bareRuntimeFailure = IllegalStateException()
+        val countBeforeGeneric = published.size
         val genericThrown = runCatching {
             state.start(genericFailureEpoch, "Preparing Linux desktop", coordinator::isSessionCurrent) {
                 throw bareRuntimeFailure
             }
         }.exceptionOrNull()
         assertSame(bareRuntimeFailure, genericThrown)
+        state.fail(genericFailureEpoch, bareRuntimeFailure, coordinator::isSessionCurrent)
+        state.fail(genericFailureEpoch, IOException("secondary error"), coordinator::isSessionCurrent)
+        assertEquals(
+            listOf("Linux desktop failed to start: Android could not start the Linux service"),
+            published.drop(countBeforeGeneric),
+        )
         assertEquals(
             "Linux desktop failed to start: Android could not start the Linux service",
             state.activeText(coordinator.sessionGeneration, coordinator.isStopped),
@@ -311,6 +318,8 @@ class DroidDeskServiceTest {
         state.fail(70, IllegalStateException("stale"))
         state.fail(71, failure)
         state.fail(71, failure)
+        state.progress(71, "Late worker progress after timeout")
+        state.complete(71)
 
         assertEquals(
             listOf(
@@ -321,6 +330,10 @@ class DroidDeskServiceTest {
             published,
         )
         assertEquals("Linux desktop failed to start: rootfs download failed", state.text)
+
+        state.start(71, "Retrying Linux desktop")
+        state.progress(71, "Extracting rootfs")
+        assertEquals("Extracting rootfs", state.text)
     }
 
     @Test
@@ -419,7 +432,9 @@ class DroidDeskServiceTest {
         }
 
         state.start(91, "Preparing Linux desktop")
+        assertEquals(false, tracker.isForeground())
         tracker.onStartForeground(checkNotNull(state.text))
+        assertTrue(tracker.isForeground())
         rendered += checkNotNull(state.text)
         drainQueuedRefreshes("Linux desktop is starting")
         assertEquals(listOf("Preparing Linux desktop"), rendered)
@@ -466,6 +481,7 @@ class DroidDeskServiceTest {
         assertNull(tracker.nextUpdate(null, "Linux desktop is running", tracker.currentSequence()))
 
         tracker.onStopForeground()
+        assertEquals(false, tracker.isForeground())
         assertNull(tracker.nextUpdate(null, "Linux desktop is stopped"))
     }
 
