@@ -1,9 +1,22 @@
 package com.orailnoor.droiddesk
 
+import com.orailnoor.droiddesk.display.DesktopDisplay
+import com.orailnoor.droiddesk.display.DesktopDisplayCoordinator
+import com.orailnoor.droiddesk.display.DesktopDisplayException
+import com.orailnoor.droiddesk.display.DesktopDisplayHost
+import com.orailnoor.droiddesk.display.DesktopLaunchRequest
+import com.orailnoor.droiddesk.display.ProfileKind
+import com.orailnoor.droiddesk.display.capability.PlacementMode
 import com.orailnoor.droiddesk.display.placement.DesktopOpenRequest
+import com.orailnoor.droiddesk.display.placement.DisplayLocalRestartAdapter
+import com.orailnoor.droiddesk.display.placement.MovableSecondaryDisplayAdapter
+import com.orailnoor.droiddesk.display.placement.PlacementSelection
+import com.orailnoor.droiddesk.display.placement.PlacementSelectionSource
 import java.io.File
+import java.io.IOException
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -225,14 +238,263 @@ class AndroidCallerPlacementPolicyTest {
     }
 
     @Test
+    fun asyncAdmissionCarriesEpochAndRejectsBeforeDuringAndAfterStopOrReplacement() {
+        var currentEpoch = 47L
+        var stopped = false
+        val admission = AsyncDesktopAdmission(47) { !stopped && it == currentEpoch }
+
+        assertEquals(47L, admission.expectedEpoch)
+        assertTrue(admission.current().isSuccess)
+
+        val stoppedDuringCross = admission.cross {
+            stopped = true
+            "running"
+        }
+        assertEquals(
+            "SESSION_STOPPED",
+            (stoppedDuringCross.exceptionOrNull() as DesktopDisplayException).code,
+        )
+
+        var callsWhenAlreadyStopped = 0
+        val alreadyStopped = admission.cross {
+            callsWhenAlreadyStopped++
+            "running"
+        }
+        assertEquals(0, callsWhenAlreadyStopped)
+        assertEquals(
+            "SESSION_STOPPED",
+            (alreadyStopped.exceptionOrNull() as DesktopDisplayException).code,
+        )
+
+        stopped = false
+        val abortedWithTeardownIo = admission.cross<String> {
+            stopped = true
+            throw IOException("broken pipe during stop")
+        }
+        assertEquals(
+            "SESSION_STOPPED",
+            (abortedWithTeardownIo.exceptionOrNull() as DesktopDisplayException).code,
+        )
+
+        stopped = false
+        val replacedDuringCross = admission.cross {
+            currentEpoch = 48L
+            "running"
+        }
+        assertEquals(
+            "SESSION_STOPPED",
+            (replacedDuringCross.exceptionOrNull() as DesktopDisplayException).code,
+        )
+
+        var callsWhenReplaced = 0
+        val alreadyReplaced = admission.cross {
+            callsWhenReplaced++
+            "running"
+        }
+        assertEquals(0, callsWhenReplaced)
+        assertEquals(
+            "SESSION_STOPPED",
+            (alreadyReplaced.exceptionOrNull() as DesktopDisplayException).code,
+        )
+
+        currentEpoch = 47L
+        val crossed = admission.cross { "installed" }
+        assertEquals("installed", crossed.getOrThrow())
+        currentEpoch = 49L
+        assertEquals(
+            "SESSION_STOPPED",
+            (admission.current().exceptionOrNull() as DesktopDisplayException).code,
+        )
+    }
+
+    @Test
+    fun runtimeStatusReadDeliversFailureOnceWithoutFallback() {
+        val ioFailure = IOException("runtime status unavailable")
+        var asyncReads = 0
+        val admission = AsyncDesktopAdmission(53) { it == 53L }
+
+        val asyncOutcome = admission.cross<String> {
+            asyncReads++
+            throw ioFailure
+        }
+
+        assertEquals(1, asyncReads)
+        assertSame(ioFailure, asyncOutcome.exceptionOrNull())
+
+        val syncFailures = mutableListOf<Exception>()
+        var syncReads = 0
+        assertNull(
+            readDesktopRuntimeStatus<String>(
+                readStatus = {
+                    syncReads++
+                    throw ioFailure
+                },
+                onFailure = syncFailures::add,
+            ),
+        )
+        val runtimeFailure = IllegalStateException("corrupt environment selection")
+        assertNull(
+            readDesktopRuntimeStatus<String>(
+                readStatus = {
+                    syncReads++
+                    throw runtimeFailure
+                },
+                onFailure = syncFailures::add,
+            ),
+        )
+        val healthy = readDesktopRuntimeStatus(
+            readStatus = {
+                syncReads++
+                "ready"
+            },
+            onFailure = syncFailures::add,
+        )
+
+        assertEquals("ready", healthy)
+        assertEquals(3, syncReads)
+        assertEquals(2, syncFailures.size)
+        assertSame(ioFailure, syncFailures[0])
+        assertSame(runtimeFailure, syncFailures[1])
+    }
+
+    @Test
+    fun displayLocalExternalAutoLaunchShortCircuitsBeforeRuntimeStatus() {
+        val phone = DesktopDisplay(0, "phone", "Phone", isDefault = true, eligible = true, null)
+        val presentationExternal = DesktopDisplay(
+            2,
+            "hdmi:2",
+            "Presentation External",
+            isDefault = false,
+            eligible = true,
+            null,
+        )
+        val tnt = DesktopDisplay(100003, "tnt", "TNT", isDefault = false, eligible = true, null)
+        val host = object : DesktopDisplayHost {
+            override fun currentDisplay() = presentationExternal
+            override fun displays() = listOf(phone, tnt)
+            override fun defaultProfileKind() = ProfileKind.PHONE
+            override fun sessionRunning() = false
+            override fun launch(request: DesktopLaunchRequest) = Unit
+            override fun focus(requestId: Long) = false
+            override fun cancelLaunch(requestId: Long) = Unit
+            override fun scheduleTimeout(delayMillis: Long, action: () -> Unit): () -> Unit = {}
+            override fun notifyReturnRequired(error: DesktopDisplayException) = Unit
+        }
+        val localCoordinator = DesktopDisplayCoordinator(
+            host = host,
+            placementStrategy = DisplayLocalRestartAdapter(
+                PlacementSelection(
+                    mode = PlacementMode.DISPLAY_LOCAL,
+                    source = PlacementSelectionSource.DEVICE_QUIRK,
+                    allowAutomaticMoves = false,
+                    reason = "display-local test",
+                    tntDisplayIds = setOf(100003),
+                ),
+            ),
+        )
+        var statusReads = 0
+
+        listOf(0, 2, 100003).forEach { displayId ->
+            assertNull(
+                readEligibleExternalAutoStartStatus(
+                    diagnostics = localCoordinator.placementDiagnostics(displayId, installed = true),
+                    readStatus = {
+                        statusReads++
+                        error("display-local auto-launch must short-circuit before status")
+                    },
+                    shouldAutoLaunch = { true },
+                    onFailure = { error("unexpected failure: $it") },
+                ),
+            )
+        }
+        assertEquals(0, statusReads)
+
+        val movableCoordinator = DesktopDisplayCoordinator(
+            host = host,
+            placementStrategy = MovableSecondaryDisplayAdapter(
+                PlacementSelection(
+                    mode = PlacementMode.MOVABLE,
+                    source = PlacementSelectionSource.RUNTIME_EVIDENCE,
+                    allowAutomaticMoves = true,
+                    reason = "movable test",
+                    tntDisplayIds = setOf(100003),
+                ),
+            ),
+        )
+        listOf(0, 100003).forEach { ineligibleDisplayId ->
+            assertNull(
+                readEligibleExternalAutoStartStatus(
+                    diagnostics = movableCoordinator.placementDiagnostics(
+                        ineligibleDisplayId,
+                        installed = true,
+                    ),
+                    readStatus = {
+                        statusReads++
+                        error("ineligible display $ineligibleDisplayId must short-circuit before status")
+                    },
+                    shouldAutoLaunch = { true },
+                    onFailure = { error("unexpected failure: $it") },
+                ),
+            )
+        }
+        assertEquals(0, statusReads)
+
+        val failures = mutableListOf<Exception>()
+        val statusFailure = IOException("marker read failed")
+        assertNull(
+            readEligibleExternalAutoStartStatus<Boolean>(
+                diagnostics = movableCoordinator.placementDiagnostics(2, installed = true),
+                readStatus = {
+                    statusReads++
+                    throw statusFailure
+                },
+                shouldAutoLaunch = { it },
+                onFailure = failures::add,
+            ),
+        )
+        assertEquals(1, statusReads)
+        assertEquals(listOf(statusFailure), failures)
+
+        assertNull(
+            readEligibleExternalAutoStartStatus(
+                diagnostics = movableCoordinator.placementDiagnostics(2, installed = true),
+                readStatus = {
+                    statusReads++
+                    false
+                },
+                shouldAutoLaunch = { movableCoordinator.shouldAutoLaunchCurrentDisplay(2, it) },
+                onFailure = { error("unexpected failure: $it") },
+            ),
+        )
+        assertEquals(2, statusReads)
+
+        val eligibleStatus = readEligibleExternalAutoStartStatus(
+            diagnostics = movableCoordinator.placementDiagnostics(2, installed = true),
+            readStatus = {
+                statusReads++
+                true
+            },
+            shouldAutoLaunch = { movableCoordinator.shouldAutoLaunchCurrentDisplay(2, it) },
+            onFailure = { error("unexpected failure: $it") },
+        )
+        assertEquals(3, statusReads)
+        assertEquals(true, eligibleStatus)
+    }
+
+    @Test
     fun migratedSynchronousCallersDelegatePlacementAndOpeningToCoordinator() {
         val source = readSource(MAIN_ACTIVITY)
+        val runtimeStatusScope = sourceBetween(
+            source,
+            "\"getRuntimeStatus\" -> {",
+            "// ── Device Info ──",
+        )
         val scopes = mapOf(
             "external auto-open" to functionBody(source, "private fun maybeAutoStartExternalDesktop()"),
             "preference auto-open" to functionBody(source, "private fun maybeAutoStartDesktop(launchIntent: Intent)"),
             "running phone and notification open" to sourceBetween(
                 source,
-                "if (environmentManager.status().running) {",
+                "if (readDesktopRuntimeStatus(",
                 "val epoch = try",
             ),
             "resolved open adapter" to functionBody(source, "private fun requestResolvedDesktopOpen("),
@@ -263,9 +525,10 @@ class AndroidCallerPlacementPolicyTest {
             Regex("""\brestartForEnvironmentIfNeeded\s*\("""),
             Regex("""\bopenActive\s*\("""),
             Regex("""\bstartupTarget\s*\("""),
+            Regex("""\benvironmentManager\.status\s*\("""),
         )
 
-        scopes.forEach { (name, body) ->
+        (scopes + ("runtime status query" to runtimeStatusScope)).forEach { (name, body) ->
             forbidden.forEach { pattern ->
                 assertFalse("$name must not contain ${pattern.pattern}", pattern.containsMatchIn(body))
             }
@@ -273,6 +536,15 @@ class AndroidCallerPlacementPolicyTest {
         scopes.filterKeys { it != "resolved open adapter" }.forEach { (name, body) ->
             assertTrue("$name must use the resolved requestOpen path", body.contains("requestResolvedDesktopOpen("))
         }
+        assertTrue(
+            "external auto-open must short-circuit through merged placement diagnostics before status",
+            scopes.getValue("external auto-open").indexOf("placementDiagnostics(displayId") <
+                scopes.getValue("external auto-open").indexOf("environmentManager::status"),
+        )
+        assertTrue(
+            "runtime status query must guard status reads",
+            runtimeStatusScope.contains("readDesktopRuntimeStatus("),
+        )
         assertTrue(
             "resolved open adapter must delegate to coordinator requestOpen",
             scopes.getValue("resolved open adapter").contains("coordinator::requestOpen"),
@@ -285,8 +557,101 @@ class AndroidCallerPlacementPolicyTest {
         assertTrue(
             "coordinator transitions must retain the legacy recovery path before runtime-running opens",
             homeLaunch.indexOf("if (coordinator.isStarting || coordinator.isRestarting)") <
-                homeLaunch.indexOf("if (environmentManager.status().running)"),
+                homeLaunch.indexOf("if (readDesktopRuntimeStatus("),
         )
+    }
+
+    @Test
+    fun asyncAdmissionCallersGuardEveryBoundaryAndRepostWithoutPlacementBranching() {
+        val mainSource = readSource(MAIN_ACTIVITY)
+        val serviceSource = readSource(DROID_DESK_SERVICE)
+        val homeAsyncScope = functionBody(mainSource, "private fun handleHomeLaunch(homeIntent: Intent)")
+            .let { body -> body.substring(body.indexOf("val epoch = try")) }
+        val autoSetupScope = functionBody(mainSource, "private fun runAutoChrootSetup()")
+        val runtimeProvisionScope = sourceBetween(
+            mainSource,
+            "\"startLinux\" -> {",
+            "\"launchDesktopActivity\" -> {",
+        ).let { body -> body.substring(body.indexOf("val epoch = try")) }
+        val mainScopes = mapOf(
+            "home async status" to homeAsyncScope,
+            "auto provisioning" to autoSetupScope,
+            "runtime provisioning" to runtimeProvisionScope,
+            "foreground service gate" to functionBody(mainSource, "private fun startForegroundService()"),
+        )
+        val forbiddenPlacement = listOf(
+            Regex("""\bBuild\.DEVICE\b"""),
+            Regex("""\b100003\b"""),
+            Regex("""\bdisplayLocalMode\b"""),
+            Regex("""\.isDisplayLocal\b"""),
+            Regex("""\bDisplayEnvironmentPolicy\b"""),
+            Regex("""\bPlacementMode\b"""),
+            Regex("""\bplacementSelection\b"""),
+        )
+
+        mainScopes.forEach { (name, body) ->
+            forbiddenPlacement.forEach { pattern ->
+                assertFalse("$name must not contain ${pattern.pattern}", pattern.containsMatchIn(body))
+            }
+        }
+        listOf("home async status", "auto provisioning", "runtime provisioning").forEach { name ->
+            val scope = mainScopes.getValue(name)
+            assertTrue(
+                "$name must construct AsyncDesktopAdmission with reserved epoch",
+                scope.contains("AsyncDesktopAdmission(epoch,"),
+            )
+            assertTrue(
+                "$name must cross async runtime/provision boundaries through admission.cross",
+                scope.contains("admission.cross"),
+            )
+            val uiReposts = callBodies(scope, "runOnUiThread")
+            assertTrue("$name must contain UI reposts", uiReposts.isNotEmpty())
+            uiReposts.forEachIndexed { index, repost ->
+                assertTrue(
+                    "$name runOnUiThread[$index] must validate admission.current()",
+                    repost.contains("admission.current()"),
+                )
+            }
+        }
+        assertFalse(
+            "home async status must not call environmentManager.status() directly",
+            Regex("""\benvironmentManager\.status\s*\(""").containsMatchIn(homeAsyncScope),
+        )
+        listOf("hasRoot", "isRootfsReady", "isDesktopInstalled", "isRunning").forEach { probe ->
+            assertFalse(
+                "auto provisioning must not call chrootRuntime.$probe() directly",
+                Regex("""\bchrootRuntime\.$probe\s*\(""").containsMatchIn(autoSetupScope),
+            )
+        }
+        listOf("dlLatch", "exLatch", "inLatch").forEach { latch ->
+            val afterAwait = autoSetupScope.substringAfter("$latch.await()").lineSequence().take(2).joinToString("\n")
+            assertTrue(
+                "auto provisioning must validate admission immediately after $latch.await()",
+                afterAwait.contains("admission.current().getOrThrow()"),
+            )
+        }
+        assertTrue(
+            "home async status must preserve requestDesktop handoff for P11b2b",
+            homeAsyncScope.contains("requestDesktop("),
+        )
+        assertTrue(
+            "auto provisioning must preserve requestDesktop handoff for P11b2b",
+            autoSetupScope.contains("requestDesktop("),
+        )
+        assertTrue(
+            "runtime provisioning must preserve launchPreparedDesktop handoff for P11b2b",
+            runtimeProvisionScope.contains("launchPreparedDesktop(epoch, startReply)"),
+        )
+        assertTrue(
+            "foreground service helper must preserve direct platform start for P11b2a2",
+            mainScopes.getValue("foreground service gate").contains("startForegroundService(intent)"),
+        )
+        forbiddenPlacement.forEach { pattern ->
+            assertFalse(
+                "DroidDeskService must not contain ${pattern.pattern}",
+                pattern.containsMatchIn(serviceSource),
+            )
+        }
     }
 
     @Test
@@ -311,6 +676,34 @@ class AndroidCallerPlacementPolicyTest {
         assertTrue(spec.contains("\"sessionRunning\""))
         assertTrue(notification.contains("coordinator.snapshot()"))
         assertTrue(notification.contains("desktopReturnNotificationSpec("))
+    }
+
+    private fun callBodies(source: String, callName: String): List<String> {
+        val bodies = mutableListOf<String>()
+        val pattern = Regex("""\b${Regex.escape(callName)}\s*\{""")
+        var searchFrom = 0
+        while (true) {
+            val match = pattern.find(source, searchFrom) ?: break
+            val openingBrace = match.range.last
+            var depth = 0
+            var end = -1
+            for (index in openingBrace until source.length) {
+                when (source[index]) {
+                    '{' -> depth++
+                    '}' -> {
+                        depth--
+                        if (depth == 0) {
+                            end = index
+                            break
+                        }
+                    }
+                }
+            }
+            require(end >= openingBrace) { "Unterminated $callName block" }
+            bodies += source.substring(openingBrace, end + 1)
+            searchFrom = end + 1
+        }
+        return bodies
     }
 
     private fun functionBody(source: String, signature: String): String {
