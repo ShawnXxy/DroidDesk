@@ -4,6 +4,7 @@ import com.orailnoor.droiddesk.display.DesktopDisplay
 import com.orailnoor.droiddesk.display.DesktopDisplayCoordinator
 import com.orailnoor.droiddesk.display.DesktopDisplayException
 import com.orailnoor.droiddesk.display.DesktopDisplayHost
+import com.orailnoor.droiddesk.display.DesktopLaunchReply
 import com.orailnoor.droiddesk.display.DesktopLaunchRequest
 import com.orailnoor.droiddesk.display.ProfileKind
 import com.orailnoor.droiddesk.display.capability.PlacementMode
@@ -12,6 +13,7 @@ import com.orailnoor.droiddesk.display.placement.DisplayLocalRestartAdapter
 import com.orailnoor.droiddesk.display.placement.MovableSecondaryDisplayAdapter
 import com.orailnoor.droiddesk.display.placement.PlacementSelection
 import com.orailnoor.droiddesk.display.placement.PlacementSelectionSource
+import io.flutter.plugin.common.MethodChannel
 import java.io.File
 import java.io.IOException
 import org.junit.Assert.assertEquals
@@ -235,6 +237,65 @@ class AndroidCallerPlacementPolicyTest {
 
         assertEquals(1, outcomes.size)
         assertSame(failure, outcomes.single().exceptionOrNull())
+    }
+
+    @Test
+    fun provisioningBeginFailureSettlesCoordinatorAndLaunchReplyOnce() {
+        val phone = DesktopDisplay(0, "phone", "Phone", isDefault = true, eligible = true, null)
+        val coordinator = DesktopDisplayCoordinator(
+            host = object : DesktopDisplayHost {
+                override fun currentDisplay() = phone
+                override fun displays() = listOf(phone)
+                override fun defaultProfileKind() = ProfileKind.PHONE
+                override fun sessionRunning() = false
+                override fun launch(request: DesktopLaunchRequest) = Unit
+                override fun focus(requestId: Long) = false
+                override fun cancelLaunch(requestId: Long) = Unit
+                override fun scheduleTimeout(delayMillis: Long, action: () -> Unit): () -> Unit = {}
+                override fun notifyReturnRequired(error: DesktopDisplayException) = Unit
+            },
+        )
+        val errors = mutableListOf<Pair<String, String?>>()
+        val result = object : MethodChannel.Result {
+            override fun success(result: Any?) = error("unexpected success: $result")
+            override fun error(errorCode: String, errorMessage: String?, errorDetails: Any?) {
+                errors += errorCode to errorMessage
+            }
+            override fun notImplemented() = error("unexpected notImplemented")
+        }
+        val reply = DesktopLaunchReply(result, coordinator)
+        val epoch = coordinator.prepareSession("proot", "xfce4", start = true)
+        var settlements = 0
+
+        settleProvisioningStartFailure(
+            epoch = epoch,
+            error = SecurityException("background start denied"),
+            isSessionCurrent = coordinator::isSessionCurrent,
+            settleSession = { targetEpoch, outcome ->
+                settlements++
+                coordinator.sessionStarted(targetEpoch, outcome)
+            },
+            reportFailure = { failure -> reply.error(failure.code, failure.message, null) },
+        )
+        coordinator.stop()
+
+        assertEquals(1, settlements)
+        assertEquals(
+            listOf("DISPLAY_NOT_ALLOWED" to "Android denied starting the Linux service"),
+            errors,
+        )
+
+        val staleErrors = mutableListOf<String>()
+        var staleSettlements = 0
+        settleProvisioningStartFailure(
+            epoch = epoch,
+            error = DesktopDisplayException("SESSION_STOPPED", "session stopped"),
+            isSessionCurrent = coordinator::isSessionCurrent,
+            settleSession = { _, _ -> staleSettlements++ },
+            reportFailure = { staleErrors += it.code },
+        )
+        assertEquals(0, staleSettlements)
+        assertEquals(listOf("SESSION_STOPPED"), staleErrors)
     }
 
     @Test
@@ -643,9 +704,41 @@ class AndroidCallerPlacementPolicyTest {
             runtimeProvisionScope.contains("launchPreparedDesktop(epoch, startReply)"),
         )
         assertTrue(
-            "foreground service helper must preserve direct platform start for P11b2a2",
-            mainScopes.getValue("foreground service gate").contains("startForegroundService(intent)"),
+            "foreground service helper must delegate to DroidDeskService.ensureStarted",
+            mainScopes.getValue("foreground service gate").contains("DroidDeskService.ensureStarted(this)"),
         )
+        assertFalse(
+            "MainActivity must not call platform startForegroundService(intent) directly",
+            Regex("""\bstartForegroundService\s*\(\s*intent\s*\)""").containsMatchIn(mainSource),
+        )
+        assertFalse(
+            "MainActivity must not call platform startService(intent) directly",
+            Regex("""\bstartService\s*\(\s*intent\s*\)""").containsMatchIn(mainSource),
+        )
+        listOf("auto provisioning", "runtime provisioning").forEach { name ->
+            val scope = mainScopes.getValue(name)
+            listOf(
+                "DroidDeskService.beginProvisioning(",
+                "DroidDeskService.updateProvisioning(",
+                "DroidDeskService.completeProvisioning(",
+                "DroidDeskService.failProvisioning(",
+            ).forEach { call ->
+                assertTrue("$name must delegate provisioning lifecycle via $call", scope.contains(call))
+            }
+        }
+        assertTrue(
+            "runtime provisioning must settle coordinator and reply if beginProvisioning throws",
+            runtimeProvisionScope.contains("settleProvisioningStartFailure("),
+        )
+        listOf(
+            "fun ensureStarted(",
+            "fun beginProvisioning(",
+            "fun updateProvisioning(",
+            "fun completeProvisioning(",
+            "fun failProvisioning(",
+        ).forEach { api ->
+            assertTrue("DroidDeskService must expose $api", serviceSource.contains(api))
+        }
         forbiddenPlacement.forEach { pattern ->
             assertFalse(
                 "DroidDeskService must not contain ${pattern.pattern}",

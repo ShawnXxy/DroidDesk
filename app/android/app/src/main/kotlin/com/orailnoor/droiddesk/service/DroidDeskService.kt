@@ -16,6 +16,7 @@ import android.os.Looper
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
+import androidx.core.content.ContextCompat
 import com.orailnoor.droiddesk.MainActivity
 import com.orailnoor.droiddesk.runtime.AndroidAppBridge
 import com.orailnoor.droiddesk.runtime.ChrootRuntime
@@ -24,14 +25,62 @@ import com.orailnoor.droiddesk.view.DesktopActivity
 import com.orailnoor.droiddesk.x11.X11ServerService
 import kotlin.concurrent.thread
 import com.orailnoor.droiddesk.display.DesktopDisplayCoordinator
+import com.orailnoor.droiddesk.display.DesktopDisplayException
 import com.orailnoor.droiddesk.runtime.AndroidAppSync
 import com.orailnoor.droiddesk.runtime.RootShell
 import com.orailnoor.droiddesk.runtime.ProcessLinuxEnvironmentRegistry
+import java.util.concurrent.CancellationException
 import java.util.concurrent.Executors
 import java.lang.ref.WeakReference
 import java.io.IOException
 
 enum class DesktopStopReason { USER, ENVIRONMENT_CHANGE }
+
+internal class ServiceStartGate {
+    private var started = false
+    @Synchronized fun start(operation: () -> Unit) { if (!started) { operation(); started = true } }
+    @Synchronized fun reset() { started = false }
+}
+
+internal class ProvisioningNotificationState(private val publish: (String?) -> Unit) {
+    private var epoch: Long? = null
+    private var published: String? = null
+    @Volatile var text: String? = null; private set
+
+    fun start(epoch: Long, message: String, isSessionCurrent: (Long) -> Boolean = { true }, startService: () -> Unit = {}) {
+        synchronized(this) { requireCurrent(epoch, isSessionCurrent); this.epoch = epoch; text = message }
+        try { startService() } catch (error: RuntimeException) {
+            val failure = if (error is DesktopDisplayException || error is SecurityException || error.message != null) error
+            else IllegalStateException("Android could not start the Linux service", error)
+            fail(epoch, failure, isSessionCurrent); throw error
+        }
+        synchronized(this) { requireCurrent(epoch, isSessionCurrent); if (this.epoch == epoch) emit() }
+    }
+    @Synchronized fun progress(epoch: Long, message: String, isSessionCurrent: (Long) -> Boolean = { true }) {
+        evictStale(isSessionCurrent); if (this.epoch == epoch && message.isNotBlank()) set(message)
+    }
+    @Synchronized fun complete(epoch: Long, isSessionCurrent: (Long) -> Boolean = { true }) {
+        evictStale(isSessionCurrent); if (this.epoch == epoch) clear()
+    }
+    @Synchronized fun fail(epoch: Long, failure: Throwable, isSessionCurrent: (Long) -> Boolean = { true }) {
+        evictStale(isSessionCurrent); if (this.epoch != epoch) return
+        if ((failure as? DesktopDisplayException)?.code == "SESSION_STOPPED" || failure is CancellationException) clear()
+        else set("Linux desktop failed to start: " +
+            if (failure is SecurityException) "Android denied starting the Linux service"
+            else failure.message ?: "Check the session log")
+    }
+    @Synchronized fun activeText(currentEpoch: Long, isStopped: Boolean): String? {
+        if (epoch != null && (isStopped || epoch != currentEpoch)) clear()
+        return text
+    }
+    @Synchronized fun clear() { epoch = null; set(null) }
+    private fun requireCurrent(epoch: Long, isSessionCurrent: (Long) -> Boolean) {
+        if (!isSessionCurrent(epoch)) { evictStale(isSessionCurrent); throw DesktopDisplayException("SESSION_STOPPED", "The session was stopped before provisioning started") }
+    }
+    private fun evictStale(isSessionCurrent: (Long) -> Boolean) { epoch?.let { if (!isSessionCurrent(it)) clear() } }
+    private fun set(message: String?) { text = message; emit() }
+    private fun emit() { if (published != text) { published = text; publish(text) } }
+}
 
 internal data class DesktopReturnNotificationSpec(
     val contentTitle: String,
@@ -130,13 +179,28 @@ class DroidDeskService : Service() {
         private const val ACTION_STOP = "com.orailnoor.droiddesk.action.STOP_DESKTOP"
         private val sessionExecutor = Executors.newSingleThreadExecutor { task -> Thread(task, "DesktopSessionOperations") }
         private val mainHandler = Handler(Looper.getMainLooper())
+        private val startGate = ServiceStartGate()
         private var activeService: WeakReference<DroidDeskService>? = null
+        private val provisioningState = ProvisioningNotificationState {
+            mainHandler.post { activeService?.get()?.refreshNotification() }
+        }
         @Volatile private var legacyIntentProcess: Process? = null
         @Volatile private var legacyIntentActive = false
 
         fun executeSession(operation: () -> Unit) {
             sessionExecutor.execute(operation)
         }
+
+        fun ensureStarted(context: Context) = startGate.start {
+            val app = context.applicationContext
+            ContextCompat.startForegroundService(app, Intent(app, DroidDeskService::class.java))
+        }
+        private fun isCurrent(epoch: Long) = DesktopDisplayCoordinator.shared.isSessionCurrent(epoch)
+        fun beginProvisioning(context: Context, epoch: Long, message: String) =
+            provisioningState.start(epoch, message, ::isCurrent) { ensureStarted(context) }
+        fun updateProvisioning(epoch: Long, message: String) = provisioningState.progress(epoch, message, ::isCurrent)
+        fun completeProvisioning(epoch: Long) = provisioningState.complete(epoch, ::isCurrent)
+        fun failProvisioning(epoch: Long, failure: Throwable) = provisioningState.fail(epoch, failure, ::isCurrent)
 
         fun stopDesktop(
             context: Context,
@@ -153,6 +217,7 @@ class DroidDeskService : Service() {
                     coordinator.startStopping(
                         preserveRestart = reason == DesktopStopReason.ENVIRONMENT_CHANGE,
                     )
+                    provisioningState.clear()
                 },
             ).getOrElse { failure ->
                 completion(Result.failure(failure))
@@ -178,8 +243,10 @@ class DroidDeskService : Service() {
                     coordinator.finishStopping(failure)
                     if (failure == null) {
                         activeService?.get()?.let {
+                            it.foregroundStarted = false; it.lastNotificationText = null
                             ServiceCompat.stopForeground(it, ServiceCompat.STOP_FOREGROUND_REMOVE)
                         }
+                        activeService = null; startGate.reset()
                         app.stopService(Intent(app, DroidDeskService::class.java))
                         completion(Result.success(Unit))
                     } else {
@@ -266,6 +333,7 @@ class DroidDeskService : Service() {
                 context, 1, Intent(context, DroidDeskService::class.java).setAction(ACTION_STOP),
                 PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
             )
+            activeService?.get()?.lastNotificationText = null
             manager.notify(NOTIFICATION_ID, NotificationCompat.Builder(context, CHANNEL_ID)
                 .setContentTitle(spec.contentTitle)
                 .setContentText(message)
@@ -281,15 +349,22 @@ class DroidDeskService : Service() {
 
     private var wakeLock: PowerManager.WakeLock? = null
     private var startupNotification: DesktopStartupNotification? = null
+    private var unsubscribeCoordinator: (() -> Unit)? = null
+    @Volatile private var foregroundStarted = false
+    @Volatile private var lastNotificationText: String? = null
     @Volatile private var stopping = false
 
     override fun onCreate() {
         super.onCreate()
+        startGate.start {}
         activeService = WeakReference(this)
         DesktopDisplayCoordinator.shared.initialize(applicationContext)
         AndroidAppBridge.start(this)
         createNotificationChannel()
         startupNotification = DesktopStartupNotification(DesktopDisplayCoordinator.shared, ::updateNotification)
+        unsubscribeCoordinator = DesktopDisplayCoordinator.shared.subscribe {
+            if (provisioningState.text != null) refreshNotification()
+        }
         acquireWakeLock()
     }
 
@@ -298,7 +373,10 @@ class DroidDeskService : Service() {
             stopDesktop()
             return START_NOT_STICKY
         }
-        val notification = buildNotification(checkNotNull(startupNotification).text)
+        startGate.start {}
+        activeService = WeakReference(this)
+        val contentText = currentProvisioningText() ?: checkNotNull(startupNotification).text
+        val notification = buildNotification(contentText)
 
         ServiceCompat.startForeground(
             this,
@@ -310,6 +388,8 @@ class DroidDeskService : Service() {
                 0
             }
         )
+        lastNotificationText = contentText
+        foregroundStarted = true
 
         return START_STICKY
     }
@@ -317,11 +397,12 @@ class DroidDeskService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onDestroy() {
-        startupNotification?.close()
-        startupNotification = null
+        unsubscribeCoordinator?.invoke(); unsubscribeCoordinator = null
+        startupNotification?.close(); startupNotification = null
+        foregroundStarted = false; lastNotificationText = null
         AndroidAppBridge.stop()
         releaseWakeLock()
-        if (activeService?.get() === this) activeService = null
+        if (activeService?.get() === this) { activeService = null; startGate.reset(); provisioningState.clear() }
         super.onDestroy()
     }
 
@@ -385,10 +466,17 @@ class DroidDeskService : Service() {
     }
 
     fun updateNotification(text: String) {
-        val notification = buildNotification(text)
+        if (!foregroundStarted) return
+        val contentText = currentProvisioningText() ?: text
+        if (contentText == lastNotificationText) return
+        lastNotificationText = contentText
+        val notification = buildNotification(contentText)
         val manager = getSystemService(NotificationManager::class.java)
         manager.notify(NOTIFICATION_ID, notification)
     }
+
+    private fun refreshNotification() = startupNotification?.let { updateNotification(it.text) }
+    private fun currentProvisioningText() = DesktopDisplayCoordinator.shared.let { provisioningState.activeText(it.sessionGeneration, it.isStopped) }
 
     // ── Wake Lock ──
 
