@@ -105,6 +105,17 @@ internal class AsyncDesktopAdmission(
         "SESSION_STOPPED", "The session was stopped before the asynchronous desktop action completed")
 }
 
+internal fun settleProvisioningStartFailure(
+    epoch: Long, error: RuntimeException, isSessionCurrent: (Long) -> Boolean,
+    settleSession: (Long, Result<Unit>) -> Unit, reportFailure: (DesktopDisplayException) -> Unit,
+) {
+    val failure = error as? DesktopDisplayException ?: DesktopDisplayException("DISPLAY_NOT_ALLOWED",
+        if (error is SecurityException) "Android denied starting the Linux service"
+        else error.message ?: "Android could not start the Linux service")
+    if (isSessionCurrent(epoch)) settleSession(epoch, Result.failure(failure))
+    reportFailure(failure)
+}
+
 internal fun <S> readDesktopRuntimeStatus(
     readStatus: () -> S, onFailure: (Exception) -> Unit,
 ): S? = try { readStatus() } catch (error: Exception) { onFailure(error); null }
@@ -492,13 +503,14 @@ class MainActivity : FlutterActivity() {
                     return@thread
                 }
 
-                admission.cross(::startForegroundService).getOrThrow()
+                admission.cross { DroidDeskService.beginProvisioning(this, epoch, "Preparing Linux desktop") }.getOrThrow()
 
                 if (!admission.cross(chrootRuntime::isRootfsReady).getOrThrow()) {
                     Log.i(TAG, "Auto-setup: downloading rootfs...")
                     val dlLatch = java.util.concurrent.CountDownLatch(1)
                     var dlOk = false
-                    chrootRuntime.downloadRootfs { progress, _ ->
+                    chrootRuntime.downloadRootfs { progress, status ->
+                        if (progress >= 0.0) DroidDeskService.updateProvisioning(epoch, status)
                         if (progress >= 1.0 || progress < 0) {
                             dlOk = progress >= 1.0
                             dlLatch.countDown()
@@ -510,7 +522,8 @@ class MainActivity : FlutterActivity() {
                     Log.i(TAG, "Auto-setup: extracting rootfs...")
                     val exLatch = java.util.concurrent.CountDownLatch(1)
                     var exOk = false
-                    chrootRuntime.extractRootfs { progress, _ ->
+                    chrootRuntime.extractRootfs { progress, status ->
+                        if (progress >= 0.0) DroidDeskService.updateProvisioning(epoch, status)
                         if (progress >= 1.0 || progress < 0) {
                             exOk = progress >= 1.0
                             exLatch.countDown()
@@ -526,7 +539,8 @@ class MainActivity : FlutterActivity() {
                     var inOk = false
                     chrootRuntime.installDesktopEnvironment(
                         desktopEnv = "xfce4",
-                        onProgress = { progress, _ ->
+                        onProgress = { progress, status ->
+                            if (progress >= 0.0) DroidDeskService.updateProvisioning(epoch, status)
                             if (progress >= 1.0 || progress < 0) {
                                 inOk = progress >= 1.0
                                 inLatch.countDown()
@@ -541,12 +555,15 @@ class MainActivity : FlutterActivity() {
                 Log.i(TAG, "Auto-setup: launching desktop...")
                 val startSession = !admission.cross(chrootRuntime::isRunning).getOrThrow()
                 runOnUiThread {
-                    if (admission.current().isSuccess)
+                    admission.current().onSuccess {
+                        DroidDeskService.completeProvisioning(epoch)
                         requestDesktop("chroot", "xfce4", startSession, expectedEpoch = epoch)
+                    }.onFailure { DroidDeskService.failProvisioning(epoch, it) }
                 }
             } catch (e: Exception) {
                 val reported = admission.current().exceptionOrNull() ?: e
                 Log.e(TAG, "Auto-setup failed", reported)
+                DroidDeskService.failProvisioning(epoch, reported)
                 runOnUiThread {
                     if (admission.current().isSuccess && (reported as? DesktopDisplayException)?.code != "SESSION_STOPPED")
                         Toast.makeText(this, "Auto-setup failed: ${reported.message}", Toast.LENGTH_LONG).show()
@@ -1117,13 +1134,17 @@ class MainActivity : FlutterActivity() {
                         return@setMethodCallHandler
                     }
                     val admission = AsyncDesktopAdmission(epoch, displays::isSessionCurrent)
-                    startForegroundService()
+                    try { DroidDeskService.beginProvisioning(this, epoch, "Preparing Linux desktop") } catch (error: RuntimeException) {
+                        settleProvisioningStartFailure(epoch, error, displays::isSessionCurrent, displays::sessionStarted) { displayFailure(it, startReply) }
+                        return@setMethodCallHandler
+                    }
                     installThread("prepare-linux-environment") {
                         try {
                             admission.cross {
                                 environmentManager.provision(
                                     ProvisionRequest(environmentKind, desktopEnv),
                                     onProgress = { progress, message ->
+                                        if (progress >= 0.0) DroidDeskService.updateProvisioning(epoch, message)
                                         runOnUiThread {
                                             if (admission.current().isSuccess) MethodChannel(
                                                 flutterEngine.dartExecutor.binaryMessenger,
@@ -1139,15 +1160,17 @@ class MainActivity : FlutterActivity() {
                             }.getOrThrow()
                             runOnUiThread {
                                 admission.current()
-                                    .onSuccess { launchPreparedDesktop(epoch, startReply) }
-                                    .onFailure { displayFailure(it, startReply) }
+                                    .onSuccess { DroidDeskService.completeProvisioning(epoch); launchPreparedDesktop(epoch, startReply) }
+                                    .onFailure { DroidDeskService.failProvisioning(epoch, it); displayFailure(it, startReply) }
                             }
                         } catch (error: Exception) {
-                            Log.e(TAG, "Linux environment preparation failed", error)
+                            val currentError = admission.current().exceptionOrNull() ?: error
+                            Log.e(TAG, "Linux environment preparation failed", currentError)
+                            DroidDeskService.failProvisioning(epoch, currentError)
                             runOnUiThread {
                                 val stale = admission.current().exceptionOrNull()
                                 if (stale == null) displays.sessionStarted(epoch, Result.failure(error))
-                                val reported = stale ?: error
+                                val reported = stale ?: currentError
                                 startReply.error(
                                     (reported as? DesktopDisplayException)?.code ?: "SESSION_STOPPED",
                                     reported.message,
@@ -1607,12 +1630,7 @@ class MainActivity : FlutterActivity() {
     // ── Foreground Service ──
 
     private fun startForegroundService() {
-        val intent = Intent(this, DroidDeskService::class.java)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            startForegroundService(intent)
-        } else {
-            startService(intent)
-        }
+        DroidDeskService.ensureStarted(this)
     }
 
     private fun stopForegroundService() {
