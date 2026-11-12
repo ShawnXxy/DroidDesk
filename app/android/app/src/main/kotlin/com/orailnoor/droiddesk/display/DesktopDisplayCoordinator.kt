@@ -947,7 +947,8 @@ class DesktopDisplayCoordinator(
             allowsManualMoves = placementStrategy.allowsManualMoves,
             allowsAutomaticMoves = placementStrategy.allowsAutomaticMoves,
             environmentRestartWarning = placementStrategy.environmentRestartWarning,
-            environment = display?.let(placementStrategy::environmentFor),
+            environment = (display ?: boundActivities.values.firstNotNullOfOrNull { it.display?.takeIf { d -> platform != null && d.id == targetId } }
+                ?: listOfNotNull(move?.request?.display, lastTarget).firstOrNull { platform != null && it.id == targetId })?.let(placementStrategy::environmentFor),
             shouldAutoLaunchCurrentDisplay = display?.let {
                 placementStrategy.shouldAutoLaunchCurrentDisplay(it, installed)
             } ?: false,
@@ -1764,10 +1765,11 @@ class DesktopDisplayCoordinator(
         } finally { deliveringStartupResults = false }
     }
 
+    internal var latestPublishedSnapshot: Map<String, Any?>? = null; private set
     private fun publish() {
         if (host == null || listeners.isEmpty()) return
         val state = snapshot()
-        listeners.toList().forEach { it(state) }
+        latestPublishedSnapshot = state; try { listeners.toList().forEach { it(state) } } finally { if (latestPublishedSnapshot === state) latestPublishedSnapshot = null }
     }
 
     companion object {

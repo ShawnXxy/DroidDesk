@@ -49,7 +49,6 @@ import com.orailnoor.droiddesk.x11.X11ServiceClient
 import com.orailnoor.droiddesk.x11.X11InputController
 import com.orailnoor.droiddesk.x11.ExternalDesktopInputBridge
 import com.orailnoor.droiddesk.display.DesktopDisplayCoordinator
-import com.orailnoor.droiddesk.display.DisplayEnvironmentPolicy
 import com.orailnoor.droiddesk.display.input.ExternalInputRoute
 import com.orailnoor.droiddesk.display.input.externalInputRoute
 import com.orailnoor.droiddesk.display.input.shouldFinishInputRelay
@@ -380,7 +379,7 @@ class DesktopActivity : Activity() {
         displayCoordinator.registerActivity(
             lease, displayRequestId,
             actualDisplay = { lorieView?.display?.displayId ?: windowManager.defaultDisplay.displayId },
-        ) { if (displayCoordinator.isDisplayLocal) finish() else finishAndRemoveTask() }
+        ) { if (displayCoordinator.allowsManualMoves) finishAndRemoveTask() else finish() }
         displayCoordinator.setProfileRefresher(lease) { completion ->
             failedUiProfile = null
             explicitProfileRetry = true
@@ -477,8 +476,7 @@ class DesktopActivity : Activity() {
         val lease = rendererLease ?: return
         if (!isCurrentRenderer()) return
         updateInputDeviceListener(lease.displayId)
-        val environment = DisplayEnvironmentPolicy.forDevice(Build.DEVICE)
-            .environmentFor(lease.displayId)
+        val environment = displayCoordinator.environmentForDisplay(lease.displayId) ?: return
         val profileKind = currentProfileKind()
         val settings = displayCoordinator.loadSettings(profileKind, lease.displayId)
             ?: DisplayProfilePolicy.defaults(profileKind)
@@ -648,11 +646,8 @@ class DesktopActivity : Activity() {
         val lease = rendererLease ?: return
         val actualDisplay = view.display?.displayId ?: return
         if (actualDisplay != lease.displayId) {
-            if (displayCoordinator.isDisplayLocal) {
-                displayCoordinator.observeActivityEnvironment(this, sessionEpoch)
-            } else {
-                displayCoordinator.onActivityMoved(lease, actualDisplay)
-            }
+            displayCoordinator.observeActivityEnvironment(this, sessionEpoch)
+            displayCoordinator.onActivityMoved(lease, actualDisplay)
             return
         }
         val remaining = remainingWindowInsets(view) ?: return
