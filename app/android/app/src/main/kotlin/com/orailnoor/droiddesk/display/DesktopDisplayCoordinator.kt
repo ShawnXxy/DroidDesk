@@ -941,13 +941,15 @@ class DesktopDisplayCoordinator(
             null
         } else {
             displays().firstOrNull { it.id == targetId }
+                ?: boundActivities.values.firstNotNullOfOrNull { it.display?.takeIf { d -> d.id == targetId } }
         }
         return DesktopPlacementDiagnostics(
             selection = placementStrategy.selection,
             allowsManualMoves = placementStrategy.allowsManualMoves,
             allowsAutomaticMoves = placementStrategy.allowsAutomaticMoves,
             environmentRestartWarning = placementStrategy.environmentRestartWarning,
-            environment = display?.let(placementStrategy::environmentFor),
+            environment = (display ?: if (platform == null) null else listOfNotNull(
+                move?.request?.display, lastTarget).firstOrNull { it.id == targetId })?.let(placementStrategy::environmentFor),
             shouldAutoLaunchCurrentDisplay = display?.let {
                 placementStrategy.shouldAutoLaunchCurrentDisplay(it, installed)
             } ?: false,

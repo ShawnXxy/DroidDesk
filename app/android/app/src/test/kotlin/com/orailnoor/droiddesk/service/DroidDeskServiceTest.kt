@@ -10,6 +10,7 @@ import com.orailnoor.droiddesk.display.PixelSize
 import com.orailnoor.droiddesk.display.ProfileKind
 import com.orailnoor.droiddesk.display.RendererClaim
 import com.orailnoor.droiddesk.display.capability.PlacementMode
+import com.orailnoor.droiddesk.display.placement.DisplayLocalRestartAdapter
 import com.orailnoor.droiddesk.display.placement.DesktopOpenRequest
 import com.orailnoor.droiddesk.display.placement.MovableSecondaryDisplayAdapter
 import com.orailnoor.droiddesk.display.placement.PlacementSelection
@@ -667,6 +668,272 @@ class DroidDeskServiceTest {
         fallbackStartup.close()
         unsubscribe()
         startupNotification.close()
+    }
+
+    @Test
+    fun nonMovableStartupNotificationUsesCoordinatorDiagnosticsAcrossLifecycle() {
+        val phone = DesktopDisplay(0, "phone", "Phone", isDefault = true, eligible = true, null)
+        val tnt = DesktopDisplay(100003, "tnt:100003", "TNT", isDefault = false, eligible = true, null)
+        var current = tnt
+        var running = false
+        var lastLaunched: DesktopLaunchRequest? = null
+        var pendingEnvStop: ((Result<Unit>) -> Unit)? = null
+        val host = object : DesktopDisplayHost {
+            override fun currentDisplay() = current
+            override fun displays() = listOf(phone, tnt)
+            override fun defaultProfileKind() = ProfileKind.PHONE
+            override fun sessionRunning() = running
+            override fun launch(request: DesktopLaunchRequest) {
+                lastLaunched = request
+            }
+            override fun focus(requestId: Long) = false
+            override fun cancelLaunch(requestId: Long) = Unit
+            override fun scheduleTimeout(delayMillis: Long, action: () -> Unit): () -> Unit = {}
+            override fun notifyReturnRequired(error: DesktopDisplayException) = Unit
+        }
+        val selection = PlacementSelection(
+            mode = PlacementMode.DISPLAY_LOCAL,
+            source = PlacementSelectionSource.DEVICE_QUIRK,
+            allowAutomaticMoves = false,
+            reason = "display-local notification test",
+            tntDisplayIds = setOf(100003),
+        )
+        val coordinator = DesktopDisplayCoordinator(
+            host = host,
+            placementStrategy = DisplayLocalRestartAdapter(selection),
+            stopForEnvironmentChange = { completion -> pendingEnvStop = completion },
+        )
+        val messages = mutableListOf<String>()
+        val notification = DesktopStartupNotification(coordinator, messages::add)
+
+        assertEquals("Linux desktop is not running", notification.text)
+
+        // Cold-start service failure reports attention once on non-movable placement
+        coordinator.requestOpen(
+            request = DesktopOpenRequest(tnt.id, "proot", "xfce4", startSession = true, expectedEpoch = null),
+            startService = { throw SecurityException("background start denied") },
+            completion = {},
+        )
+        assertEquals(
+            "Linux desktop needs attention: Android denied starting the Linux service",
+            notification.text,
+        )
+        assertEquals(1, messages.count { it.contains("Android denied starting the Linux service") })
+
+        // Start and attach on TNT: while attached, text must be "Linux desktop is running", not restart warning
+        coordinator.requestOpen(
+            request = DesktopOpenRequest(tnt.id, "proot", "xfce4", startSession = true, expectedEpoch = null),
+            startService = {},
+            completion = {},
+        )
+        assertEquals("Linux desktop is starting", notification.text)
+        val launch = checkNotNull(lastLaunched)
+        val lease = (coordinator.claim(tnt.id) {} as RendererClaim.Accepted).lease
+        coordinator.registerActivity(lease, launch.requestId, { tnt.id }) {}
+        coordinator.onAttached(lease, launch.requestId, PixelSize(1920, 1080))
+        assertTrue(coordinator.consumeSessionStart(lease))
+        val startEpoch = checkNotNull(coordinator.beginSessionStart(lease))
+        running = true
+        coordinator.sessionStarted(startEpoch, Result.success(Unit))
+        assertEquals("Linux desktop is running", notification.text)
+
+        // Detach renderer while Linux stays running in background -> emits coordinator restart warning
+        coordinator.release(lease)
+        assertEquals(coordinator.environmentRestartWarning, notification.text)
+
+        // Switching to phone triggers environment restart -> "Restarting Linux/XFCE on this display"
+        current = phone
+        coordinator.requestOpen(
+            request = DesktopOpenRequest(phone.id, "proot", "xfce4", startSession = true, expectedEpoch = null),
+            startService = {},
+            completion = {},
+        )
+        assertEquals("Restarting Linux/XFCE on this display", notification.text)
+        coordinator.startStopping(preserveRestart = true)
+        running = false
+        assertEquals("Restarting Linux/XFCE on this display", notification.text)
+        coordinator.finishStopping(null)
+        checkNotNull(pendingEnvStop).invoke(Result.success(Unit))
+        assertEquals("Restarting Linux/XFCE on this display", notification.text)
+
+        val restartLaunch = checkNotNull(lastLaunched)
+        val phoneLease = (coordinator.claim(phone.id) {} as RendererClaim.Accepted).lease
+        coordinator.registerActivity(phoneLease, restartLaunch.requestId, { phone.id }) {}
+        coordinator.onAttached(phoneLease, restartLaunch.requestId, PixelSize(1080, 2400))
+        assertTrue(coordinator.consumeSessionStart(phoneLease))
+        val restartEpoch = checkNotNull(coordinator.beginSessionStart(phoneLease))
+        running = true
+        coordinator.sessionStarted(restartEpoch, Result.success(Unit))
+        assertEquals("Linux desktop is running", notification.text)
+
+        // Explicit user stop -> "Linux desktop is stopped"
+        coordinator.stop()
+        assertEquals("Linux desktop is stopped", notification.text)
+        notification.close()
+    }
+
+    @Test
+    fun startupNotificationTextReflectsNonMovableAndMovableLifecycleStates() {
+        // Non-movable states
+        assertEquals(
+            "Restarting Linux/XFCE on this display",
+            desktopStartupNotificationText(
+                snapshot = mapOf(
+                    "phase" to "restarting",
+                    "crossDisplayMovesAllowed" to false,
+                    "sessionRunning" to false,
+                ),
+                stopped = true,
+            ),
+        )
+        assertEquals(
+            "Linux desktop needs attention: Monitor unplugged",
+            desktopStartupNotificationText(
+                snapshot = mapOf(
+                    "phase" to "error",
+                    "crossDisplayMovesAllowed" to false,
+                    "sessionRunning" to false,
+                    "error" to mapOf("code" to "DISPLAY_UNAVAILABLE", "message" to "Monitor unplugged"),
+                ),
+            ),
+        )
+        assertEquals(
+            "Linux desktop is starting",
+            desktopStartupNotificationText(
+                snapshot = mapOf(
+                    "phase" to "starting",
+                    "crossDisplayMovesAllowed" to false,
+                    "sessionRunning" to false,
+                ),
+            ),
+        )
+        assertEquals(
+            "Linux desktop is stopped",
+            desktopStartupNotificationText(
+                snapshot = mapOf(
+                    "phase" to "stopped",
+                    "crossDisplayMovesAllowed" to false,
+                    "sessionRunning" to false,
+                ),
+            ),
+        )
+        assertEquals(
+            "Linux desktop is running",
+            desktopStartupNotificationText(
+                snapshot = mapOf(
+                    "phase" to "attached",
+                    "crossDisplayMovesAllowed" to false,
+                    "sessionRunning" to true,
+                ),
+                restartWarning = "Save unsaved work first.",
+            ),
+        )
+        assertEquals(
+            "Linux desktop is not running",
+            desktopStartupNotificationText(
+                snapshot = mapOf(
+                    "phase" to "attached",
+                    "crossDisplayMovesAllowed" to false,
+                    "sessionRunning" to false,
+                ),
+                restartWarning = "Save unsaved work first.",
+            ),
+        )
+        assertEquals(
+            "Save unsaved work first.",
+            desktopStartupNotificationText(
+                snapshot = mapOf(
+                    "phase" to "hidden",
+                    "crossDisplayMovesAllowed" to false,
+                    "sessionRunning" to true,
+                ),
+                restartWarning = "Save unsaved work first.",
+            ),
+        )
+        assertEquals(
+            "Linux desktop is running in the background",
+            desktopStartupNotificationText(
+                snapshot = mapOf(
+                    "phase" to "hidden",
+                    "crossDisplayMovesAllowed" to false,
+                    "sessionRunning" to true,
+                ),
+                restartWarning = null,
+            ),
+        )
+        assertEquals(
+            "Linux desktop failed to start: Android denied starting the Linux service",
+            desktopStartupNotificationText(
+                snapshot = mapOf(
+                    "phase" to "hidden",
+                    "crossDisplayMovesAllowed" to false,
+                    "sessionRunning" to false,
+                ),
+                lastMessage = "Linux desktop failed to start: Android denied starting the Linux service",
+                messageEpoch = 5L,
+                sessionGeneration = 5L,
+            ),
+        )
+        assertEquals(
+            "Linux desktop is not running",
+            desktopStartupNotificationText(
+                snapshot = mapOf(
+                    "phase" to "hidden",
+                    "crossDisplayMovesAllowed" to false,
+                    "sessionRunning" to false,
+                ),
+                lastMessage = "Linux desktop is running",
+                messageEpoch = 5L,
+                sessionGeneration = 5L,
+            ),
+        )
+        assertEquals(
+            "Linux desktop is not running",
+            desktopStartupNotificationText(
+                snapshot = mapOf(
+                    "phase" to "hidden",
+                    "crossDisplayMovesAllowed" to false,
+                    "sessionRunning" to false,
+                ),
+            ),
+        )
+
+        // Movable states: move-failure error stays owned by DroidDeskService recovery notification
+        assertEquals(
+            "Linux desktop is running",
+            desktopStartupNotificationText(
+                snapshot = mapOf(
+                    "phase" to "error",
+                    "crossDisplayMovesAllowed" to true,
+                    "sessionRunning" to true,
+                    "error" to mapOf("code" to "DISPLAY_NOT_ALLOWED", "message" to "Android denied placement"),
+                ),
+            ),
+        )
+        assertEquals(
+            "Linux desktop is starting",
+            desktopStartupNotificationText(
+                snapshot = mapOf(
+                    "phase" to "hidden",
+                    "crossDisplayMovesAllowed" to true,
+                    "sessionRunning" to false,
+                ),
+                starting = true,
+            ),
+        )
+        assertEquals(
+            "Linux desktop failed to start: Android denied starting the Linux service",
+            desktopStartupNotificationText(
+                snapshot = mapOf(
+                    "phase" to "hidden",
+                    "crossDisplayMovesAllowed" to true,
+                    "sessionRunning" to false,
+                ),
+                lastMessage = "Linux desktop failed to start: Android denied starting the Linux service",
+                messageEpoch = 9L,
+                sessionGeneration = 9L,
+            ),
+        )
     }
 
     @Test

@@ -1,36 +1,66 @@
 package com.orailnoor.droiddesk.service
 
 import com.orailnoor.droiddesk.display.DesktopDisplayCoordinator
-import com.orailnoor.droiddesk.display.DisplayEnvironmentPolicy
+
+internal fun desktopStartupNotificationText(
+    snapshot: Map<String, Any?>,
+    allowsManualMoves: Boolean = snapshot["crossDisplayMovesAllowed"] == true,
+    starting: Boolean = snapshot["phase"] == "starting",
+    stopped: Boolean = snapshot["phase"] == "stopped",
+    restartWarning: String? = null,
+    lastMessage: String? = null,
+    messageEpoch: Long = 0L,
+    sessionGeneration: Long = -1L,
+): String {
+    val phase = snapshot["phase"] as? String
+    val running = snapshot["sessionRunning"] == true
+    val errorMessage = (snapshot["error"] as? Map<*, *>)?.get("message") as? String
+    return when {
+        phase == "restarting" -> "Restarting Linux/XFCE on this display"
+        !allowsManualMoves && errorMessage != null ->
+            "Linux desktop needs attention: $errorMessage"
+        starting || phase == "starting" -> "Linux desktop is starting"
+        stopped || phase == "stopped" -> "Linux desktop is stopped"
+        !allowsManualMoves && running && phase == "attached" -> "Linux desktop is running"
+        !allowsManualMoves && running ->
+            restartWarning ?: "Linux desktop is running in the background"
+        messageEpoch == sessionGeneration && lastMessage != null &&
+            (allowsManualMoves || running || lastMessage != "Linux desktop is running") ->
+            lastMessage
+        !allowsManualMoves -> "Linux desktop is not running"
+        else -> "Linux desktop is running"
+    }
+}
 
 internal class DesktopStartupNotification(
     private val coordinator: DesktopDisplayCoordinator,
-    notify: (String) -> Unit,
+    private val notify: (String) -> Unit,
 ) {
     private var lastMessage: String? = null
     private var messageEpoch = 0L
+    private fun textFor(snapshot: Map<String, Any?>): String = desktopStartupNotificationText(
+        snapshot = snapshot,
+        allowsManualMoves = coordinator.allowsManualMoves,
+        starting = coordinator.isStarting,
+        stopped = coordinator.isStopped,
+        restartWarning = coordinator.environmentRestartWarning,
+        lastMessage = lastMessage,
+        messageEpoch = messageEpoch,
+        sessionGeneration = coordinator.sessionGeneration,
+    )
+
     val text: String
-        get() = when {
-            coordinator.isRestarting -> "Restarting Linux/XFCE on this display"
-            coordinator.isDisplayLocal && coordinator.sessionFailure != null ->
-                "Linux desktop needs attention: ${coordinator.sessionFailure?.message}"
-            coordinator.isStarting -> "Linux desktop is starting"
-            coordinator.isStopped -> "Linux desktop is stopped"
-            coordinator.isDisplayLocal && coordinator.hasRunningSession -> DisplayEnvironmentPolicy.RESTART_WARNING
-            coordinator.isDisplayLocal -> "Linux desktop is not running"
-            messageEpoch == coordinator.sessionGeneration -> checkNotNull(lastMessage)
-            else -> "Linux desktop is running"
-        }
+        get() = textFor(coordinator.snapshot())
 
     private var lastNotified: String? = null
-    private val emit = {
-        val message = text
+    private fun emit(snapshot: Map<String, Any?> = coordinator.snapshot()) {
+        val message = textFor(snapshot)
         if (message != lastNotified) {
             lastNotified = message
             notify(message)
         }
     }
-    private val unsubscribeState = coordinator.subscribe { emit() }
+    private val unsubscribeState = coordinator.subscribe(::emit)
     private val unsubscribe = coordinator.subscribeSessionStart { result ->
         lastMessage = result.fold(
             onSuccess = { "Linux desktop is running" },

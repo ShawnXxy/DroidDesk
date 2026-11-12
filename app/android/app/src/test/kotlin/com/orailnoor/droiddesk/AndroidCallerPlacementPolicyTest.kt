@@ -2924,8 +2924,15 @@ class AndroidCallerPlacementPolicyTest {
     @Test
     fun productionSourcesEliminateAllLegacyPlacementAndOpenHelpersAndStayStateless() {
         val mainSource = readSource(MAIN_ACTIVITY)
+        val desktopSource = readSource(DESKTOP_ACTIVITY)
         val serviceSource = readSource(DROID_DESK_SERVICE)
-        val forbidden = listOf(
+        val notificationSource = readSource(DESKTOP_STARTUP_NOTIFICATION)
+        assertFalse(
+            "DisplayEnvironmentPolicy.kt must be deleted",
+            locateOptionalFile(LEGACY_DISPLAY_ENVIRONMENT_POLICY)?.exists() == true,
+        )
+        val forbiddenAcrossAllCallers = listOf(
+            Regex("""\bDisplayEnvironmentPolicy\b"""),
             Regex("""\bBuild\.DEVICE\b"""),
             Regex("""\b100003\b"""),
             Regex("""\bdisplayLocalMode\b"""),
@@ -2938,6 +2945,8 @@ class AndroidCallerPlacementPolicyTest {
             Regex("""\brequestDesktop\s*\("""),
             Regex("""\blaunchPreparedDesktop\s*\("""),
             Regex("""\blaunchLocalDesktopItem\s*\("""),
+        )
+        val forbiddenStatelessLauncher = listOf(
             Regex("""\bsessionStarted\b"""),
             Regex("""\bActiveDesktopOpenTracker\b"""),
             Regex("""\bopenTracker\b"""),
@@ -2946,15 +2955,53 @@ class AndroidCallerPlacementPolicyTest {
 
         mapOf(
             "MainActivity.kt" to mainSource,
+            "DesktopActivity.kt" to desktopSource,
             "DroidDeskService.kt" to serviceSource,
+            "DesktopStartupNotification.kt" to notificationSource,
         ).forEach { (fileName, source) ->
-            forbidden.forEach { pattern ->
+            forbiddenAcrossAllCallers.forEach { pattern ->
                 assertFalse(
                     "$fileName must not contain ${pattern.pattern}",
                     pattern.containsMatchIn(source),
                 )
             }
         }
+
+        mapOf(
+            "MainActivity.kt" to mainSource,
+            "DroidDeskService.kt" to serviceSource,
+        ).forEach { (fileName, source) ->
+            forbiddenStatelessLauncher.forEach { pattern ->
+                assertFalse(
+                    "$fileName must not contain ${pattern.pattern}",
+                    pattern.containsMatchIn(source),
+                )
+            }
+        }
+
+        val setupLorieBody = functionBody(desktopSource, "private fun setupLorieView()")
+        val attachInputBody = functionBody(desktopSource, "private fun attachDesktopInput()")
+        val applyGeometryBody = functionBody(desktopSource, "private fun applyWindowGeometry()")
+        assertTrue(
+            "DesktopActivity.setupLorieView must select task removal through coordinator.allowsManualMoves",
+            setupLorieBody.contains("if (displayCoordinator.allowsManualMoves) finishAndRemoveTask() else finish()"),
+        )
+        assertTrue(
+            "DesktopActivity.attachDesktopInput must resolve display environment through coordinator",
+            attachInputBody.contains("displayCoordinator.environmentForDisplay(lease.displayId)"),
+        )
+        assertTrue(
+            "DesktopActivity.applyWindowGeometry must delegate moved-display observation unconditionally to coordinator",
+            applyGeometryBody.contains("displayCoordinator.observeActivityEnvironment(this, sessionEpoch)") &&
+                applyGeometryBody.contains("displayCoordinator.onActivityMoved(lease, actualDisplay)"),
+        )
+        assertTrue(
+            "DesktopStartupNotification must derive text from coordinator snapshot and capability diagnostics",
+            notificationSource.contains("desktopStartupNotificationText(") &&
+                notificationSource.contains("coordinator.snapshot()") &&
+                notificationSource.contains("coordinator.allowsManualMoves") &&
+                notificationSource.contains("coordinator.environmentRestartWarning"),
+        )
 
         val onCreateBody = functionBody(mainSource, "override fun onCreate(savedInstanceState: Bundle?)")
         val externalAutoBody = functionBody(mainSource, "private fun maybeAutoStartExternalDesktop()")
@@ -3116,18 +3163,22 @@ class AndroidCallerPlacementPolicyTest {
         return source.substring(start, end)
     }
 
-    private fun readSource(relativePath: String): String {
+    private fun locateOptionalFile(relativePath: String): File? {
         val userDirectory = System.getProperty("user.dir") ?: error("user.dir is unavailable")
         var root: File? = File(userDirectory).canonicalFile
         while (root != null) {
             listOf(
                 File(root, relativePath),
                 File(root, "app/android/app/$relativePath"),
-            ).firstOrNull(File::isFile)?.let { return it.readText() }
+            ).firstOrNull(File::exists)?.let { return it }
             root = root.parentFile
         }
-        error("Could not locate $relativePath")
+        return null
     }
+
+    private fun readSource(relativePath: String): String =
+        locateOptionalFile(relativePath)?.takeIf(File::isFile)?.readText()
+            ?: error("Could not locate $relativePath")
 
     private data class OpenScenario(
         val name: String,
@@ -3146,7 +3197,13 @@ class AndroidCallerPlacementPolicyTest {
 
     private companion object {
         const val MAIN_ACTIVITY = "src/main/kotlin/com/orailnoor/droiddesk/MainActivity.kt"
+        const val DESKTOP_ACTIVITY =
+            "src/main/kotlin/com/orailnoor/droiddesk/view/DesktopActivity.kt"
         const val DROID_DESK_SERVICE =
             "src/main/kotlin/com/orailnoor/droiddesk/service/DroidDeskService.kt"
+        const val DESKTOP_STARTUP_NOTIFICATION =
+            "src/main/kotlin/com/orailnoor/droiddesk/service/DesktopStartupNotification.kt"
+        const val LEGACY_DISPLAY_ENVIRONMENT_POLICY =
+            "src/main/kotlin/com/orailnoor/droiddesk/display/DisplayEnvironmentPolicy.kt"
     }
 }
