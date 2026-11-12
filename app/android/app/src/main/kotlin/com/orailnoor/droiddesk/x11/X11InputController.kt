@@ -28,7 +28,7 @@ class X11InputController(
     private val onModeChanged: (Int) -> Unit,
     onThreeFingerTap: () -> Unit = {},
     private val onViewportChanged: (Int, Int, Matrix) -> Unit = { _, _, _ -> },
-    private val onDirectTouchObserved: () -> Unit = {},
+    private val onDirectTouchObserved: (Int) -> Unit = {},
 ) : ExternalDesktopInputTarget {
     private fun isCurrent() = MainActivity.getInstance().isLorieViewOwner(generation)
     private val sender = InputEventSender(object : InputStub {
@@ -122,7 +122,7 @@ class X11InputController(
 
     private fun handleMotionEvent(view: View, event: MotionEvent): Boolean {
         if (!isCurrent()) return false
-        if (!allowDirectTouch && isDirectTouchEvent(event.source, event.getToolType(event.actionIndex), view === lorieView)) onDirectTouchObserved()
+        if (isDirectTouchEvent(event.source, event.getToolType(event.actionIndex), view === lorieView)) onDirectTouchObserved(event.deviceId)
         return inputHandler.handleTouchEvent(lorieView, view, event)
     }
 

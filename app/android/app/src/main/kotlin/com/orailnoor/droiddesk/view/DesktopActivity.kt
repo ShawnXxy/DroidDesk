@@ -112,7 +112,7 @@ internal fun resolvePresentationClass(isDefaultDisplay: Boolean, profileKind: Pr
 
 internal data class DesktopInputContext(
     val displayId: Int, val environment: DisplayEnvironment, val profileKind: ProfileKind, val desktopUiMode: Boolean, val savedSettings: DisplaySettings?,
-    val rawInput: InputCapabilities, val hasInternalTouchscreen: Boolean, val hasExternalTouchscreen: Boolean, val horizontalScrollFactor: Float, val verticalScrollFactor: Float,
+    val rawInput: InputCapabilities, val hasInternalTouchscreen: Boolean, val touchscreenDeviceIds: Set<Int>, val horizontalScrollFactor: Float, val verticalScrollFactor: Float,
 )
 
 internal class DesktopInputRouter(
@@ -120,17 +120,23 @@ internal class DesktopInputRouter(
     private val openRelay: () -> Unit, private val closeRelay: () -> Unit,
 ) {
     private var promotedTouchDisplayId: Int? = null
-    fun refresh(clearUnbackedTouch: Boolean = false): InputPolicyDecision? {
+    private val promotedTouchDevices = mutableSetOf<Int>()
+    fun refresh(): InputPolicyDecision? {
         val ctx = readContext() ?: return null
         val isDefault = ctx.displayId == android.view.Display.DEFAULT_DISPLAY
-        if (promotedTouchDisplayId != ctx.displayId || (clearUnbackedTouch && (ctx.rawInput.touch == TouchEvidence.NONE || (!isDefault && !ctx.hasExternalTouchscreen && ctx.rawInput.touch != TouchEvidence.CURRENT_DISPLAY)))) promotedTouchDisplayId = null
+        if (promotedTouchDisplayId != ctx.displayId) { promotedTouchDisplayId = null; promotedTouchDevices.clear() }
+        else promotedTouchDevices.retainAll { it <= 0 || it in ctx.touchscreenDeviceIds }
+        if (promotedTouchDevices.isEmpty()) promotedTouchDisplayId = null
         val caps = effectiveInputCapabilities(isDefault, ctx.hasInternalTouchscreen, promotedTouchDisplayId == ctx.displayId, ctx.rawInput)
         val decision = DesktopInputPolicy.resolve(resolvePresentationClass(isDefault, ctx.profileKind, caps.touch), ctx.environment, caps, ctx.savedSettings?.inputMode, ctx.savedSettings?.inputRoute ?: ExternalInputRoutePreference.AUTOMATIC, ctx.desktopUiMode, sanitizeScrollFactor(ctx.horizontalScrollFactor), sanitizeScrollFactor(ctx.verticalScrollFactor))
         applyRenderer(decision)?.let { if (decision.externalInputRoute == ExternalInputRoute.PHONE_RELAY) { ExternalDesktopInputBridge.attach(it, decision.relayPointerCapture); openRelay() } else { ExternalDesktopInputBridge.detach(it); closeRelay() } }
         return decision
     }
-    fun promoteDirectTouch(displayId: Int): Boolean = (promotedTouchDisplayId != displayId).also { if (it) promotedTouchDisplayId = displayId }
-    fun release(target: ExternalDesktopInputTarget?, finishRelay: Boolean = false) { promotedTouchDisplayId = null; if ((target != null && ExternalDesktopInputBridge.detach(target)) || finishRelay) closeRelay() }
+    fun promoteDirectTouch(displayId: Int, deviceId: Int): Boolean {
+        if (promotedTouchDisplayId != displayId) { promotedTouchDisplayId = displayId; promotedTouchDevices.clear() }
+        return promotedTouchDevices.isEmpty().also { promotedTouchDevices.add(deviceId) }
+    }
+    fun release(target: ExternalDesktopInputTarget?, finishRelay: Boolean = false) { promotedTouchDisplayId = null; promotedTouchDevices.clear(); if ((target != null && ExternalDesktopInputBridge.detach(target)) || finishRelay) closeRelay() }
 }
 
 internal fun continueAfterActivityBinding(
@@ -180,11 +186,10 @@ class DesktopActivity : Activity() {
     private var rendererLease: RendererLease? = null
     private val rendererCleanup = RendererCleanup()
     private var inputDeviceListenerRegistered = false
-    private var pendingDeviceRemoved = false
     private val inputDeviceHandler = Handler(Looper.getMainLooper())
     private val inputDeviceListener = object : InputManager.InputDeviceListener {
         override fun onInputDeviceAdded(deviceId: Int) = scheduleDesktopInputRefresh()
-        override fun onInputDeviceRemoved(deviceId: Int) = scheduleDesktopInputRefresh(true)
+        override fun onInputDeviceRemoved(deviceId: Int) = scheduleDesktopInputRefresh()
         override fun onInputDeviceChanged(deviceId: Int) = scheduleDesktopInputRefresh()
     }
     private val refreshDesktopInput = Runnable {
@@ -396,7 +401,7 @@ class DesktopActivity : Activity() {
     override fun onConfigurationChanged(newConfig: Configuration) {
         super.onConfigurationChanged(newConfig)
         scheduleGeometry()
-        if (inputController != null && isCurrentRenderer()) scheduleDesktopInputRefresh(false)
+        if (inputController != null && isCurrentRenderer()) scheduleDesktopInputRefresh()
     }
 
     override fun onPause() {
@@ -555,7 +560,6 @@ class DesktopActivity : Activity() {
         if (!isCurrentRenderer()) return
         lorieView?.display?.displayId?.takeIf { it != lease.displayId }?.let { displayCoordinator.observeActivityEnvironment(this, sessionEpoch); displayCoordinator.onActivityMoved(lease, it); return }
         val policyOnly = policyOnlyRefresh
-        val clearUnbackedTouch = pendingDeviceRemoved.also { pendingDeviceRemoved = false }
         if (!policyOnly) { updateInputDeviceListener(); attachingDesktopInput = true; try { applyWindowGeometry() } finally { attachingDesktopInput = false } }
         val environment = displayCoordinator.environmentForDisplay(lease.displayId) ?: return
         val profileKind = currentProfileKind()
@@ -564,7 +568,8 @@ class DesktopActivity : Activity() {
             fallbackInputCapabilities(devs.any { it.supportsSource(android.view.InputDevice.SOURCE_TOUCHSCREEN) }, devs.any { it.isExternal && (it.supportsSource(android.view.InputDevice.SOURCE_MOUSE) || it.supportsSource(android.view.InputDevice.SOURCE_TOUCHPAD)) }, devs.any { it.supportsSource(android.view.InputDevice.SOURCE_MOUSE) }, devs.any { it.supportsSource(android.view.InputDevice.SOURCE_TOUCHPAD) }, devs.any { !it.isVirtual && it.supportsSource(android.view.InputDevice.SOURCE_KEYBOARD) && it.keyboardType == android.view.InputDevice.KEYBOARD_TYPE_ALPHABETIC }, devs.any { it.supportsSource(android.view.InputDevice.SOURCE_STYLUS) })
         }
         val vc = android.view.ViewConfiguration.get(this); val fb = sanitizeScrollFactor(64f * resources.displayMetrics.density)
-        currentInputContext = DesktopInputContext(lease.displayId, environment, profileKind, resources.configuration.uiMode and Configuration.UI_MODE_TYPE_MASK == Configuration.UI_MODE_TYPE_DESK, displayCoordinator.loadSettings(profileKind, lease.displayId), rawInput, devs.any { !it.isExternal && it.supportsSource(android.view.InputDevice.SOURCE_TOUCHSCREEN) }, devs.any { it.isExternal && it.supportsSource(android.view.InputDevice.SOURCE_TOUCHSCREEN) }, sanitizeScrollFactor(vc.scaledHorizontalScrollFactor, fb), sanitizeScrollFactor(vc.scaledVerticalScrollFactor, fb))
+        val touchIds = devs.filter { it.supportsSource(android.view.InputDevice.SOURCE_TOUCHSCREEN) }.mapTo(mutableSetOf()) { it.id }
+        currentInputContext = DesktopInputContext(lease.displayId, environment, profileKind, resources.configuration.uiMode and Configuration.UI_MODE_TYPE_MASK == Configuration.UI_MODE_TYPE_DESK, displayCoordinator.loadSettings(profileKind, lease.displayId), rawInput, devs.any { !it.isExternal && it.supportsSource(android.view.InputDevice.SOURCE_TOUCHSCREEN) }, touchIds, sanitizeScrollFactor(vc.scaledHorizontalScrollFactor, fb), sanitizeScrollFactor(vc.scaledVerticalScrollFactor, fb))
         if (inputController == null) {
             inputController = X11InputController(
                 lorieView!!, lease.generation, 1,
@@ -584,10 +589,10 @@ class DesktopActivity : Activity() {
                     updateOverlayOffsets()
                     scheduleGeometry()
                 },
-                onDirectTouchObserved = { if (inputRouter.promoteDirectTouch(lease.displayId)) refreshInputPolicyOnly() },
+                onDirectTouchObserved = { deviceId -> if (inputRouter.promoteDirectTouch(lease.displayId, deviceId)) refreshInputPolicyOnly() },
             )
         }
-        inputRouter.refresh(clearUnbackedTouch)
+        inputRouter.refresh()
         if (policyOnly) return
         addDesktopControls()
         lorieView?.requestFocus()
@@ -604,15 +609,13 @@ class DesktopActivity : Activity() {
         inputDeviceListenerRegistered = true
     }
 
-    private fun scheduleDesktopInputRefresh(removed: Boolean = false) {
+    private fun scheduleDesktopInputRefresh() {
         if (!inputDeviceListenerRegistered || rendererCleanup.isReleased) return
-        pendingDeviceRemoved = pendingDeviceRemoved || removed
         inputDeviceHandler.removeCallbacks(refreshDesktopInput)
         inputDeviceHandler.post(refreshDesktopInput)
     }
 
     private fun unregisterInputDeviceListener() {
-        pendingDeviceRemoved = false
         inputDeviceHandler.removeCallbacks(refreshDesktopInput)
         if (!inputDeviceListenerRegistered) return
         getSystemService(InputManager::class.java).unregisterInputDeviceListener(

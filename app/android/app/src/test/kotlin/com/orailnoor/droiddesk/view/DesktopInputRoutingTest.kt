@@ -183,7 +183,7 @@ class DesktopInputRoutingTest {
             nextSupportedInputMode(TouchInputHandler.InputMode.SIMULATED_TOUCH, initialNative.allowDirectTouch),
         )
 
-        val promotedNative = checkNotNull(nativeHarness.onDirectTouchObserved(20))
+        val promotedNative = checkNotNull(nativeHarness.onDirectTouchObserved(20, deviceId = 41))
         assertEquals(TouchInputHandler.InputMode.TOUCH, promotedNative.defaultInputMode)
         assertTrue(promotedNative.allowDirectTouch)
         assertFalse(promotedNative.rendererPointerCapture)
@@ -219,12 +219,31 @@ class DesktopInputRoutingTest {
         )
         checkNotNull(relayHarness.refresh())
 
-        val promotedRelay = checkNotNull(relayHarness.onDirectTouchObserved(21))
+        val promotedRelay = checkNotNull(relayHarness.onDirectTouchObserved(21, deviceId = 42))
         assertTrue(promotedRelay.allowDirectTouch)
         assertEquals(TouchInputHandler.InputMode.SIMULATED_TOUCH, promotedRelay.defaultInputMode)
         assertEquals(ExternalInputRoute.PHONE_RELAY, promotedRelay.externalInputRoute)
         assertFalse(promotedRelay.rendererPointerCapture)
         assertTrue(promotedRelay.relayPointerCapture)
+
+        // Synthetic/injected direct touch (deviceId <= 0) promotes even without InputManager touchscreen devices and does not re-refresh per frame.
+        val syntheticHarness = RouterHarness(
+            snapshot = externalSnapshot(
+                displayId = 25,
+                pointerAssociation = PointerAssociationEvidence.NO_EXTERNAL_POINTER,
+                touch = TouchEvidence.NONE,
+                hasMouse = false,
+                hasInternalTouchscreen = false,
+                touchscreenDeviceIds = emptySet(),
+            ),
+        )
+        syntheticHarness.refresh()
+        val syntheticPromoted = checkNotNull(syntheticHarness.onDirectTouchObserved(25, deviceId = -1))
+        assertTrue(syntheticPromoted.allowDirectTouch)
+        assertEquals(TouchInputHandler.InputMode.TOUCH, syntheticPromoted.defaultInputMode)
+        val readsAfterPromote = syntheticHarness.contextReads
+        syntheticHarness.onDirectTouchObserved(25, deviceId = -1)
+        assertEquals(readsAfterPromote, syntheticHarness.contextReads)
     }
 
     @Test
@@ -387,26 +406,32 @@ class DesktopInputRoutingTest {
             pointerAssociation = PointerAssociationEvidence.UNKNOWN,
             touch = TouchEvidence.UNKNOWN_ASSOCIATION,
             hasMouse = true,
+            touchscreenDeviceIds = setOf(1, 42),
         )
-        val withMouse = checkNotNull(harness.onInputDevicesChanged(removed = false))
+        val withMouse = harness.refresh()
         assertEquals(ExternalInputRoute.PHONE_RELAY, withMouse.externalInputRoute)
         assertTrue(withMouse.relayPointerCapture)
 
-        // Observing direct touch promotes EXTERNAL_TOUCH; removing all touchscreens clears promotion.
-        val promoted = checkNotNull(harness.onDirectTouchObserved(18))
+        // Observing direct touch from device 42 promotes EXTERNAL_TOUCH.
+        val promoted = checkNotNull(harness.onDirectTouchObserved(18, deviceId = 42))
         assertTrue(promoted.allowDirectTouch)
         assertEquals(TouchInputHandler.InputMode.TOUCH, promoted.defaultInputMode)
 
-        // Removing the external touchscreen on a phone (hasInternalTouchscreen remains true!) clears external touch promotion.
+        // Removing an unrelated keyboard/gamepad while touch device 42 stays connected preserves direct touch!
+        val afterUnrelatedDeviceRemoved = harness.refresh()
+        assertTrue(afterUnrelatedDeviceRemoved.allowDirectTouch)
+        assertEquals(TouchInputHandler.InputMode.TOUCH, afterUnrelatedDeviceRemoved.defaultInputMode)
+
+        // Removing touch device 42 itself (while phone internal touch device 1 remains) clears external touch promotion.
         harness.snapshot = externalSnapshot(
             displayId = 18,
             pointerAssociation = PointerAssociationEvidence.TARGET_DISPLAY,
             touch = TouchEvidence.UNKNOWN_ASSOCIATION,
             hasMouse = true,
             hasInternalTouchscreen = true,
-            hasExternalTouchscreen = false,
+            touchscreenDeviceIds = setOf(1),
         )
-        val afterTouchRemoved = checkNotNull(harness.onInputDevicesChanged(removed = true))
+        val afterTouchRemoved = harness.refresh()
         assertFalse(afterTouchRemoved.allowDirectTouch)
         assertEquals(TouchInputHandler.InputMode.TRACKPAD, afterTouchRemoved.defaultInputMode)
         assertTrue(afterTouchRemoved.rendererPointerCapture)
@@ -529,7 +554,7 @@ class DesktopInputRoutingTest {
         touch: TouchEvidence = TouchEvidence.NONE,
         hasMouse: Boolean = true,
         hasInternalTouchscreen: Boolean = true,
-        hasExternalTouchscreen: Boolean = false,
+        touchscreenDeviceIds: Set<Int> = setOf(1, 41, 42),
         desktopUiMode: Boolean = false,
         savedSettings: DisplaySettings? = null,
         horizontalScrollFactor: Float = 48f,
@@ -549,7 +574,7 @@ class DesktopInputRoutingTest {
             hasStylus = false,
         ),
         hasInternalTouchscreen = hasInternalTouchscreen,
-        hasExternalTouchscreen = hasExternalTouchscreen,
+        touchscreenDeviceIds = touchscreenDeviceIds,
         horizontalScrollFactor = horizontalScrollFactor,
         verticalScrollFactor = verticalScrollFactor,
     )
@@ -573,14 +598,10 @@ class DesktopInputRoutingTest {
             closeRelay = { relayLifecycle += "close" },
         )
 
-        fun refresh(clearUnbackedTouch: Boolean = false): InputPolicyDecision =
-            checkNotNull(router.refresh(clearUnbackedTouch))
+        fun refresh(): InputPolicyDecision = checkNotNull(router.refresh())
 
-        fun onDirectTouchObserved(displayId: Int): InputPolicyDecision? =
-            if (router.promoteDirectTouch(displayId)) router.refresh() else appliedDecisions.lastOrNull()
-
-        fun onInputDevicesChanged(removed: Boolean): InputPolicyDecision =
-            checkNotNull(router.refresh(clearUnbackedTouch = removed))
+        fun onDirectTouchObserved(displayId: Int, deviceId: Int): InputPolicyDecision? =
+            if (router.promoteDirectTouch(displayId, deviceId)) router.refresh() else appliedDecisions.lastOrNull()
     }
 
     private class FakeExternalInputTarget : ExternalDesktopInputTarget {
