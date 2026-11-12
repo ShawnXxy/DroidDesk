@@ -985,13 +985,11 @@ class LinuxRuntime(context: Context) {
         return RendererProbe(evidence, backend)
     }
 
-    private data class ProbeProcessResult(val exitCode: Int, val output: String)
-
     private fun probeProcess(
         command: List<String>,
         environment: Map<String, String> = emptyMap(),
-    ): ProbeProcessResult? = runCatching {
-        val process = ProcessBuilder(command)
+    ): ProbeProcessResult? = awaitBoundedProbeProcess(PROBE_PROCESS_TIMEOUT_MILLIS) {
+        ProcessBuilder(command)
             .directory(prefixDir)
             .redirectErrorStream(true)
             .also { builder ->
@@ -999,16 +997,7 @@ class LinuxRuntime(context: Context) {
                 builder.environment().putAll(environment)
             }
             .start()
-        if (!process.waitFor(PROBE_PROCESS_TIMEOUT_MILLIS, TimeUnit.MILLISECONDS)) {
-            process.destroy()
-            if (!process.waitFor(100, TimeUnit.MILLISECONDS)) process.destroyForcibly()
-            return null
-        }
-        ProbeProcessResult(
-            exitCode = process.exitValue(),
-            output = process.inputStream.bufferedReader().readText(),
-        )
-    }.getOrNull()
+    }
 
     private fun ProbeProcessResult?.toEvidence(name: String): CapabilityEvidence = when {
         this == null -> CapabilityEvidence(
@@ -2840,7 +2829,7 @@ $stagedProfile
         val deadline = System.currentTimeMillis() + timeoutMs
         while (System.currentTimeMillis() < deadline) {
             val check = processes.joinToString(" && ") { "pgrep -x '$it' >/dev/null" }
-            val ready = runCatching {
+            val ready = awaitDesktopProbe {
                 ProcessBuilder(File(binDir, "bash").absolutePath, "-c", check)
                     .directory(homeDir)
                     .redirectErrorStream(true)
@@ -2849,8 +2838,7 @@ $stagedProfile
                         builder.environment().putAll(getTermuxEnv())
                     }
                     .start()
-                    .waitFor() == 0
-            }.getOrDefault(false)
+            }
             if (ready) {
                 Thread.sleep(650)
                 return true
@@ -3272,4 +3260,28 @@ $stagedProfile
             .split(Regex("\\s+"))
     }.getOrNull()
 
+}
+
+internal data class ProbeProcessResult(val exitCode: Int, val output: String)
+
+internal fun awaitBoundedProbeProcess(timeoutMs: Long, startProcess: () -> Process): ProbeProcessResult? {
+    if (Thread.currentThread().isInterrupted) throw InterruptedException()
+    var active: Process? = null
+    return try {
+        val process = startProcess().also { active = it }
+        if (!process.waitFor(timeoutMs, TimeUnit.MILLISECONDS)) {
+            process.destroy(); if (!process.waitFor(100, TimeUnit.MILLISECONDS)) process.destroyForcibly(); null
+        } else ProbeProcessResult(process.exitValue(), process.inputStream.bufferedReader().readText()).also {
+            if (Thread.currentThread().isInterrupted) throw InterruptedException()
+        }
+    } catch (interrupted: InterruptedException) { active?.destroyForcibly(); throw interrupted }
+    catch (_: Exception) { if (Thread.currentThread().isInterrupted) throw InterruptedException(); null }
+}
+
+internal fun awaitDesktopProbe(startProcess: () -> Process): Boolean {
+    if (Thread.currentThread().isInterrupted) throw InterruptedException()
+    var probe: Process? = null
+    return try { probe = startProcess(); probe.waitFor() == 0 }
+    catch (interrupted: InterruptedException) { probe?.destroyForcibly(); throw interrupted }
+    catch (_: Exception) { if (Thread.currentThread().isInterrupted) throw InterruptedException(); false }
 }

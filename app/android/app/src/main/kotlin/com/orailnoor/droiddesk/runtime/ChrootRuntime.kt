@@ -575,16 +575,11 @@ DROIDDESK_SESSION
         val deadline = System.currentTimeMillis() + timeoutMs
         while (System.currentTimeMillis() < deadline) {
             val check = processes.joinToString(" && ") { "pgrep -x '$it' >/dev/null" }
-            val output = runCatching {
-                rootShell.exec("chroot ${rootfsDir.absolutePath} /bin/bash -c ${shellQuote(check)}")
-            }.getOrDefault("")
-            if (!output.contains("not found", ignoreCase = true) &&
+            val first = execInterruptibleRootProbe(rootShell::execBounded, "chroot ${rootfsDir.absolutePath} /bin/bash -c ${shellQuote(check)}")
+            if (first?.exitCode == 0 && !first.output.contains("not found", ignoreCase = true) &&
                 processes.all { process ->
-                    runCatching {
-                        rootShell.exec(
-                            "chroot ${rootfsDir.absolutePath} /usr/bin/pgrep -x ${shellQuote(process)}",
-                        ).trim().isNotEmpty()
-                    }.getOrDefault(false)
+                    execInterruptibleRootProbe(rootShell::execBounded, "chroot ${rootfsDir.absolutePath} /usr/bin/pgrep -x ${shellQuote(process)}")
+                        ?.let { it.exitCode == 0 && it.output.trim().isNotEmpty() } == true
                 }) {
                 Thread.sleep(650)
                 return true
@@ -918,4 +913,11 @@ DROIDDESK_SESSION
         // -f='${Status}' returns something like 'install ok installed' if successfully installed
         return execChroot("dpkg-query -W -f='\${Status}' $pkg 2>/dev/null | grep -q 'install ok installed'") == 0
     }
+}
+
+internal fun execInterruptibleRootProbe(execBounded: (String, Long) -> ExecutionResult, command: String, timeoutMs: Long = 5_000L): ExecutionResult? {
+    if (Thread.currentThread().isInterrupted) throw InterruptedException()
+    val result = try { execBounded(command, timeoutMs) } catch (interrupted: InterruptedException) { throw interrupted } catch (_: Exception) { null }
+    if (Thread.currentThread().isInterrupted || result?.exitCode == 130) throw InterruptedException()
+    return result
 }

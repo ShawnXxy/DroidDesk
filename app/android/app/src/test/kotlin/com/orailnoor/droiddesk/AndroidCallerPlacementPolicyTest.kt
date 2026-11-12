@@ -2847,6 +2847,78 @@ class AndroidCallerPlacementPolicyTest {
         bgThread!!.join(2_000)
         while (bgMainQueue.isNotEmpty()) bgMainQueue.poll()?.invoke()
         assertEquals(listOf("error:SESSION_STOPPED"), bgEvents.toList())
+
+        // 7. Interruption DURING an active readiness probe (Process.waitFor inside awaitDesktopProbe, not Thread.sleep)
+        //    destroys the probe process and terminates the readiness loop without running another probe iteration!
+        local.requestOpen(DesktopOpenRequest(phone.id, "proot", "xfce4", true, null), { localHost.running = true }, {})
+        val probeInterruptEpoch = local.sessionGeneration
+        localHost.attachLatest(local)
+        local.sessionStarted(probeInterruptEpoch, Result.success(Unit))
+        val enteredProbeWait = java.util.concurrent.CountDownLatch(1)
+        val exitedProbeReadiness = java.util.concurrent.CountDownLatch(1)
+        val probeDestroyed = java.util.concurrent.atomic.AtomicBoolean(false)
+        val probeIterations = java.util.concurrent.atomic.AtomicInteger(0)
+        val probeMainQueue = java.util.concurrent.ConcurrentLinkedQueue<() -> Unit>()
+        val probeEvents = java.util.concurrent.CopyOnWriteArrayList<String>()
+        var probeThread: Thread? = null
+        runDesktopItemAfterOpen(
+            openEpoch = probeInterruptEpoch,
+            stopGeneration = local.userStopGeneration,
+            coordinator = local,
+            isProvisioningActive = { false },
+            spawnReadiness = { block ->
+                probeThread = Thread {
+                    try {
+                        block()
+                    } finally {
+                        exitedProbeReadiness.countDown()
+                    }
+                }.apply { start() }
+            },
+            waitUntilReady = {
+                val deadline = System.currentTimeMillis() + 10_000L
+                var ready = false
+                while (System.currentTimeMillis() < deadline && !ready) {
+                    ready = com.orailnoor.droiddesk.runtime.awaitDesktopProbe {
+                        probeIterations.incrementAndGet()
+                        object : Process() {
+                            override fun getOutputStream() = java.io.OutputStream.nullOutputStream()
+                            override fun getInputStream() = java.io.InputStream.nullInputStream()
+                            override fun getErrorStream() = java.io.InputStream.nullInputStream()
+                            override fun waitFor(): Int {
+                                enteredProbeWait.countDown()
+                                Thread.sleep(10_000)
+                                return 1
+                            }
+                            override fun exitValue(): Int = 1
+                            override fun destroy() {
+                                probeDestroyed.set(true)
+                            }
+                            override fun destroyForcibly(): Process {
+                                probeDestroyed.set(true)
+                                return this
+                            }
+                        }
+                    }
+                    if (!ready) Thread.sleep(150)
+                }
+                ready
+            },
+            executeOnSession = { error("probe-interrupted readiness must not enter executeOnSession") },
+            executeCommand = { error("probe-interrupted readiness must not execute command") },
+            postToMain = probeMainQueue::add,
+            onRejoin = { error("stopped probe-interrupted readiness must not rejoin") },
+            result = recordingResult(probeEvents),
+        )
+        assertTrue(enteredProbeWait.await(2, java.util.concurrent.TimeUnit.SECONDS))
+        local.stop()
+        localHost.running = false
+        assertTrue("readiness interrupted during Process.waitFor must exit promptly", exitedProbeReadiness.await(2, java.util.concurrent.TimeUnit.SECONDS))
+        probeThread!!.join(2_000)
+        assertTrue(probeDestroyed.get())
+        assertEquals(1, probeIterations.get())
+        while (probeMainQueue.isNotEmpty()) probeMainQueue.poll()?.invoke()
+        assertEquals(listOf("error:SESSION_STOPPED"), probeEvents.toList())
     }
 
     @Test
