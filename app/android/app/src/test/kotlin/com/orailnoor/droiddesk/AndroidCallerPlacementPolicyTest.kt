@@ -1440,7 +1440,78 @@ class AndroidCallerPlacementPolicyTest {
         assertEquals(3, dualOutcomes.size)
         assertTrue(dualOutcomes.all { it.second.isSuccess })
 
-        // Active provisioning still cancels a superseded pre-provisioning deferred open even if an open appears
+        // Active provisioning cancels superseded deferred opens (including stopped null-epoch cold opens
+        // and completed/aborted wasRestarting opens) while allowing provisioning's own current-epoch handoff!
+        local.stop()
+        localHost.running = false
+        val preProvStopGen = local.userStopGeneration
+        var coldStoppedBeforeProvisioningAttach: (() -> Unit)? = null
+        var coldStoppedCancelled = 0
+        assertTrue(
+            deferResolvedDesktopOpenIfNeeded(
+                isAttached = false,
+                expectedEpoch = null,
+                sessionGeneration = local.sessionGeneration,
+                isStopped = local.isStopped, // true -> deferredEpoch == null
+                isSessionCurrent = local::isSessionCurrent,
+                deferUntilAttached = { coldStoppedBeforeProvisioningAttach = it },
+                retry = { error("stopped cold open must not retry once provisioning starts") },
+                cancel = { coldStoppedCancelled++ },
+                userStopGeneration = preProvStopGen,
+                currentUserStopGeneration = { local.userStopGeneration },
+                isProvisioningActive = { true },
+            ),
+        )
+        val activeProvEpoch = local.beginSession()
+        coldStoppedBeforeProvisioningAttach!!.invoke()
+        assertEquals(1, coldStoppedCancelled)
+        assertTrue(local.isSessionCurrent(activeProvEpoch))
+
+        var restartBeforeProvisioningAttach: (() -> Unit)? = null
+        var restartBeforeProvisioningCancelled = 0
+        var wasRestartingFlag = true
+        assertTrue(
+            deferResolvedDesktopOpenIfNeeded(
+                isAttached = false,
+                expectedEpoch = activeProvEpoch - 1,
+                sessionGeneration = activeProvEpoch - 1,
+                isStopped = true,
+                isSessionCurrent = local::isSessionCurrent,
+                deferUntilAttached = { restartBeforeProvisioningAttach = it },
+                retry = { error("aborted preserveRestart open must not retry once provisioning starts") },
+                cancel = { restartBeforeProvisioningCancelled++ },
+                userStopGeneration = preProvStopGen,
+                currentUserStopGeneration = { local.userStopGeneration },
+                isRestarting = { wasRestartingFlag },
+                currentSessionGeneration = { local.sessionGeneration },
+                isProvisioningActive = { local.isSessionCurrent(activeProvEpoch) },
+            ),
+        )
+        wasRestartingFlag = false
+        restartBeforeProvisioningAttach!!.invoke()
+        assertEquals(1, restartBeforeProvisioningCancelled)
+        assertTrue(local.isSessionCurrent(activeProvEpoch))
+
+        var ownProvisioningHandoffAttach: (() -> Unit)? = null
+        val ownProvisioningRetries = mutableListOf<Long?>()
+        assertTrue(
+            deferResolvedDesktopOpenIfNeeded(
+                isAttached = false,
+                expectedEpoch = activeProvEpoch,
+                sessionGeneration = local.sessionGeneration,
+                isStopped = local.isStopped,
+                isSessionCurrent = local::isSessionCurrent,
+                deferUntilAttached = { ownProvisioningHandoffAttach = it },
+                retry = ownProvisioningRetries::add,
+                cancel = { error("provisioning's own current-epoch handoff must retry on attach") },
+                userStopGeneration = preProvStopGen,
+                currentUserStopGeneration = { local.userStopGeneration },
+                isProvisioningActive = { local.isSessionCurrent(activeProvEpoch) },
+            ),
+        )
+        ownProvisioningHandoffAttach!!.invoke()
+        assertEquals(listOf<Long?>(activeProvEpoch), ownProvisioningRetries)
+
         var attachDuringProvisioning: (() -> Unit)? = null
         var provisioningCancelled = 0
         assertTrue(

@@ -85,10 +85,11 @@ internal fun deferResolvedDesktopOpenIfNeeded(
     deferUntilAttached {
         val userStopped = currentUserStopGeneration() != userStopGeneration
         when {
-            !userStopped && isRestarting() -> retry(if (deferredEpoch == null || isSessionCurrent(deferredEpoch)) deferredEpoch else currentSessionGeneration())
-            !userStopped && (deferredEpoch == null || isSessionCurrent(deferredEpoch) || (hasRunningSession() && deferredEpoch == currentSessionGeneration())) -> retry(deferredEpoch)
-            !userStopped && !isProvisioningActive() && (hasInFlightOpen() || (expectedEpoch == null && hasRunningSession())) -> retry(expectedEpoch)
-            !userStopped && wasRestarting -> retry(null)
+            userStopped || (isProvisioningActive() && (expectedEpoch == null || !isSessionCurrent(expectedEpoch))) -> cancel()
+            isRestarting() -> retry(if (deferredEpoch == null || isSessionCurrent(deferredEpoch)) deferredEpoch else currentSessionGeneration())
+            deferredEpoch == null || isSessionCurrent(deferredEpoch) || (hasRunningSession() && deferredEpoch == currentSessionGeneration()) -> retry(deferredEpoch)
+            hasInFlightOpen() || (expectedEpoch == null && hasRunningSession()) -> retry(expectedEpoch)
+            wasRestarting -> retry(null)
             else -> cancel()
         }
     }
