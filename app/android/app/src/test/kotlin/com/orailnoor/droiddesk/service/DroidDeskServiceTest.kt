@@ -676,13 +676,17 @@ class DroidDeskServiceTest {
         val tnt = DesktopDisplay(100003, "tnt:100003", "TNT", isDefault = false, eligible = true, null)
         var current = tnt
         var running = false
+        var sessionRunningReads = 0
         var lastLaunched: DesktopLaunchRequest? = null
         var pendingEnvStop: ((Result<Unit>) -> Unit)? = null
         val host = object : DesktopDisplayHost {
             override fun currentDisplay() = current
             override fun displays() = listOf(phone, tnt)
             override fun defaultProfileKind() = ProfileKind.PHONE
-            override fun sessionRunning() = running
+            override fun sessionRunning(): Boolean {
+                sessionRunningReads++
+                return running
+            }
             override fun launch(request: DesktopLaunchRequest) {
                 lastLaunched = request
             }
@@ -720,7 +724,8 @@ class DroidDeskServiceTest {
         )
         assertEquals(1, messages.count { it.contains("Android denied starting the Linux service") })
 
-        // Start and attach on TNT: while attached, text must be "Linux desktop is running", not restart warning
+        // Start and attach on TNT: attached display-local session preserves coordinator restart warning
+        // because DesktopActivity stays attached while paused if notification Open is tapped on phone
         coordinator.requestOpen(
             request = DesktopOpenRequest(tnt.id, "proot", "xfce4", startSession = true, expectedEpoch = null),
             startService = {},
@@ -735,9 +740,14 @@ class DroidDeskServiceTest {
         val startEpoch = checkNotNull(coordinator.beginSessionStart(lease))
         running = true
         coordinator.sessionStarted(startEpoch, Result.success(Unit))
-        assertEquals("Linux desktop is running", notification.text)
+        assertEquals(coordinator.environmentRestartWarning, notification.text)
 
-        // Detach renderer while Linux stays running in background -> emits coordinator restart warning
+        // Geometry publication must reuse the coordinator's published snapshot without extra sessionRunning() probes
+        val readsBeforeGeometry = sessionRunningReads
+        coordinator.reportGeometry(lease, ProfileKind.MONITOR, PixelSize(1920, 1080))
+        assertEquals(readsBeforeGeometry + 1, sessionRunningReads)
+
+        // Detach renderer while Linux stays running in background -> keeps coordinator restart warning
         coordinator.release(lease)
         assertEquals(coordinator.environmentRestartWarning, notification.text)
 
@@ -764,7 +774,7 @@ class DroidDeskServiceTest {
         val restartEpoch = checkNotNull(coordinator.beginSessionStart(phoneLease))
         running = true
         coordinator.sessionStarted(restartEpoch, Result.success(Unit))
-        assertEquals("Linux desktop is running", notification.text)
+        assertEquals(coordinator.environmentRestartWarning, notification.text)
 
         // Explicit user stop -> "Linux desktop is stopped"
         coordinator.stop()
@@ -865,7 +875,7 @@ class DroidDeskServiceTest {
             ),
         )
         assertEquals(
-            "Linux desktop is running",
+            "Save unsaved work first.",
             desktopStartupNotificationText(
                 snapshot = mapOf(
                     "phase" to "attached",
@@ -873,6 +883,17 @@ class DroidDeskServiceTest {
                     "sessionRunning" to true,
                 ),
                 restartWarning = "Save unsaved work first.",
+            ),
+        )
+        assertEquals(
+            "Linux desktop is running",
+            desktopStartupNotificationText(
+                snapshot = mapOf(
+                    "phase" to "attached",
+                    "crossDisplayMovesAllowed" to false,
+                    "sessionRunning" to true,
+                ),
+                restartWarning = null,
             ),
         )
         assertEquals(

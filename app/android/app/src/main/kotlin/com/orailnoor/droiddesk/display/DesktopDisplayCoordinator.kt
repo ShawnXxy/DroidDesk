@@ -947,10 +947,8 @@ class DesktopDisplayCoordinator(
             allowsManualMoves = placementStrategy.allowsManualMoves,
             allowsAutomaticMoves = placementStrategy.allowsAutomaticMoves,
             environmentRestartWarning = placementStrategy.environmentRestartWarning,
-            environment = (display ?: if (platform == null || targetId == null) null else
-                boundActivities.values.firstNotNullOfOrNull { it.display?.takeIf { d -> d.id == targetId } }
-                    ?: listOfNotNull(move?.request?.display, lastTarget).firstOrNull { it.id == targetId })
-                ?.let(placementStrategy::environmentFor),
+            environment = (display ?: boundActivities.values.firstNotNullOfOrNull { it.display?.takeIf { d -> platform != null && d.id == targetId } }
+                ?: listOfNotNull(move?.request?.display, lastTarget).firstOrNull { platform != null && it.id == targetId })?.let(placementStrategy::environmentFor),
             shouldAutoLaunchCurrentDisplay = display?.let {
                 placementStrategy.shouldAutoLaunchCurrentDisplay(it, installed)
             } ?: false,
@@ -1767,10 +1765,11 @@ class DesktopDisplayCoordinator(
         } finally { deliveringStartupResults = false }
     }
 
+    private var publishVersion = 0L
     private fun publish() {
         if (host == null || listeners.isEmpty()) return
         val state = snapshot()
-        listeners.toList().forEach { it(state) }
+        val version = ++publishVersion; listeners.toList().forEach { if (publishVersion == version) it(state) }
     }
 
     companion object {

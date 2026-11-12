@@ -21,9 +21,9 @@ internal fun desktopStartupNotificationText(
             "Linux desktop needs attention: $errorMessage"
         starting || phase == "starting" -> "Linux desktop is starting"
         stopped || phase == "stopped" -> "Linux desktop is stopped"
-        !allowsManualMoves && running && phase == "attached" -> "Linux desktop is running"
-        !allowsManualMoves && running ->
-            restartWarning ?: "Linux desktop is running in the background"
+        !allowsManualMoves && running -> restartWarning
+            ?: if (phase == "attached") "Linux desktop is running"
+            else "Linux desktop is running in the background"
         messageEpoch == sessionGeneration && lastMessage != null &&
             (allowsManualMoves || running || lastMessage != "Linux desktop is running") ->
             lastMessage
@@ -34,31 +34,33 @@ internal fun desktopStartupNotificationText(
 
 internal class DesktopStartupNotification(
     private val coordinator: DesktopDisplayCoordinator,
-    notify: (String) -> Unit,
+    private val notify: (String) -> Unit,
 ) {
     private var lastMessage: String? = null
     private var messageEpoch = 0L
+    private fun textFor(snapshot: Map<String, Any?>): String = desktopStartupNotificationText(
+        snapshot = snapshot,
+        allowsManualMoves = coordinator.allowsManualMoves,
+        starting = coordinator.isStarting,
+        stopped = coordinator.isStopped,
+        restartWarning = coordinator.environmentRestartWarning,
+        lastMessage = lastMessage,
+        messageEpoch = messageEpoch,
+        sessionGeneration = coordinator.sessionGeneration,
+    )
+
     val text: String
-        get() = desktopStartupNotificationText(
-            snapshot = coordinator.snapshot(),
-            allowsManualMoves = coordinator.allowsManualMoves,
-            starting = coordinator.isStarting,
-            stopped = coordinator.isStopped,
-            restartWarning = coordinator.environmentRestartWarning,
-            lastMessage = lastMessage,
-            messageEpoch = messageEpoch,
-            sessionGeneration = coordinator.sessionGeneration,
-        )
+        get() = textFor(coordinator.snapshot())
 
     private var lastNotified: String? = null
-    private val emit = {
-        val message = text
+    private fun emit(snapshot: Map<String, Any?> = coordinator.snapshot()) {
+        val message = textFor(snapshot)
         if (message != lastNotified) {
             lastNotified = message
             notify(message)
         }
     }
-    private val unsubscribeState = coordinator.subscribe { emit() }
+    private val unsubscribeState = coordinator.subscribe(::emit)
     private val unsubscribe = coordinator.subscribeSessionStart { result ->
         lastMessage = result.fold(
             onSuccess = { "Linux desktop is running" },
