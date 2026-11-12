@@ -2996,9 +2996,10 @@ class AndroidCallerPlacementPolicyTest {
                 applyGeometryBody.contains("displayCoordinator.onActivityMoved(lease, actualDisplay)"),
         )
         assertTrue(
-            "DesktopStartupNotification must derive text from coordinator snapshot and capability diagnostics",
+            "DesktopStartupNotification must derive text from coordinator diagnostics without calling snapshot()",
             notificationSource.contains("desktopStartupNotificationText(") &&
-                notificationSource.contains("coordinator.snapshot()") &&
+                !notificationSource.contains("coordinator.snapshot()") &&
+                notificationSource.contains("coordinator.subscribe") &&
                 notificationSource.contains("coordinator.allowsManualMoves") &&
                 notificationSource.contains("coordinator.environmentRestartWarning"),
         )

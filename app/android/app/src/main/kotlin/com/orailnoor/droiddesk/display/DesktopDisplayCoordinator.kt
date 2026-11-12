@@ -1765,11 +1765,10 @@ class DesktopDisplayCoordinator(
         } finally { deliveringStartupResults = false }
     }
 
-    private var publishVersion = 0L
     private fun publish() {
         if (host == null || listeners.isEmpty()) return
         val state = snapshot()
-        val version = ++publishVersion; listeners.toList().forEach { if (publishVersion == version) it(state) }
+        listeners.toList().forEach { it(state) }
     }
 
     companion object {

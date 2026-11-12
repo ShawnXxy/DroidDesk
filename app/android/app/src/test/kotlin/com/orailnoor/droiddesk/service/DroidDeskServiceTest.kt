@@ -738,9 +738,18 @@ class DroidDeskServiceTest {
         coordinator.onAttached(lease, launch.requestId, PixelSize(1920, 1080))
         assertTrue(coordinator.consumeSessionStart(lease))
         val startEpoch = checkNotNull(coordinator.beginSessionStart(lease))
+        var waiterObservedWarning = false
+        coordinator.awaitSessionReady(startEpoch) {
+            waiterObservedWarning = messages.lastOrNull() == coordinator.environmentRestartWarning
+        }
         running = true
+        val readsBeforeSessionStarted = sessionRunningReads
         coordinator.sessionStarted(startEpoch, Result.success(Unit))
+        assertTrue(waiterObservedWarning)
+        assertEquals(readsBeforeSessionStarted + 1, sessionRunningReads)
+        val readsAfterSessionStarted = sessionRunningReads
         assertEquals(coordinator.environmentRestartWarning, notification.text)
+        assertEquals(readsAfterSessionStarted, sessionRunningReads)
 
         // Geometry publication must reuse the coordinator's published snapshot without extra sessionRunning() probes
         val readsBeforeGeometry = sessionRunningReads
@@ -827,6 +836,55 @@ class DroidDeskServiceTest {
         assertEquals("Linux desktop is starting", notification.text)
         notification.close()
         unsubscribeRetry()
+    }
+
+    @Test
+    fun synchronousBeginSessionOnStoppedStillDeliversStoppedToLaterSubscribersWithoutStaleNotification() {
+        val phone = DesktopDisplay(0, "phone", "Phone", isDefault = true, eligible = true, null)
+        val host = object : DesktopDisplayHost {
+            override fun currentDisplay() = phone
+            override fun displays() = listOf(phone)
+            override fun defaultProfileKind() = ProfileKind.PHONE
+            override fun sessionRunning() = false
+            override fun launch(request: DesktopLaunchRequest) = Unit
+            override fun focus(requestId: Long) = false
+            override fun cancelLaunch(requestId: Long) = Unit
+            override fun scheduleTimeout(delayMillis: Long, action: () -> Unit): () -> Unit = {}
+            override fun notifyReturnRequired(error: DesktopDisplayException) = Unit
+        }
+        val coordinator = DesktopDisplayCoordinator(
+            host = host,
+            placementStrategy = DisplayLocalRestartAdapter(
+                PlacementSelection(
+                    mode = PlacementMode.DISPLAY_LOCAL,
+                    source = PlacementSelectionSource.DEVICE_QUIRK,
+                    allowAutomaticMoves = false,
+                    reason = "reentrant stop delivery test",
+                ),
+            ),
+        )
+        var reopened = false
+        val unsubscribeReopen = coordinator.subscribe { state ->
+            if (!reopened && state["phase"] == "stopped") {
+                reopened = true
+                coordinator.beginSession()
+            }
+        }
+        val messages = mutableListOf<String>()
+        val notification = DesktopStartupNotification(coordinator, messages::add)
+        val laterPhases = mutableListOf<String?>()
+        val unsubscribeLater = coordinator.subscribe { state ->
+            laterPhases += state["phase"] as? String
+        }
+
+        coordinator.stop()
+
+        assertTrue("Later subscribers such as userStopLaunchReply must still observe stopped", "stopped" in laterPhases)
+        assertEquals("Linux desktop is not running", messages.last())
+        assertEquals("Linux desktop is not running", notification.text)
+        unsubscribeLater()
+        notification.close()
+        unsubscribeReopen()
     }
 
     @Test
