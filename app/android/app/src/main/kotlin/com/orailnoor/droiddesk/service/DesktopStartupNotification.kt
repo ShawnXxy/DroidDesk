@@ -34,33 +34,31 @@ internal fun desktopStartupNotificationText(
 
 internal class DesktopStartupNotification(
     private val coordinator: DesktopDisplayCoordinator,
-    private val notify: (String) -> Unit,
+    notify: (String) -> Unit,
 ) {
     private var lastMessage: String? = null
     private var messageEpoch = 0L
-    private fun textFor(snapshot: Map<String, Any?>): String = desktopStartupNotificationText(
-        snapshot = snapshot,
-        allowsManualMoves = coordinator.allowsManualMoves,
-        starting = coordinator.isStarting,
-        stopped = coordinator.isStopped,
-        restartWarning = coordinator.environmentRestartWarning,
-        lastMessage = lastMessage,
-        messageEpoch = messageEpoch,
-        sessionGeneration = coordinator.sessionGeneration,
-    )
-
     val text: String
-        get() = textFor(coordinator.snapshot())
+        get() = desktopStartupNotificationText(
+            snapshot = coordinator.snapshot(),
+            allowsManualMoves = coordinator.allowsManualMoves,
+            starting = coordinator.isStarting,
+            stopped = coordinator.isStopped,
+            restartWarning = coordinator.environmentRestartWarning,
+            lastMessage = lastMessage,
+            messageEpoch = messageEpoch,
+            sessionGeneration = coordinator.sessionGeneration,
+        )
 
     private var lastNotified: String? = null
-    private fun emit(snapshot: Map<String, Any?> = coordinator.snapshot()) {
-        val message = textFor(snapshot)
+    private val emit = {
+        val message = text
         if (message != lastNotified) {
             lastNotified = message
             notify(message)
         }
     }
-    private val unsubscribeState = coordinator.subscribe(::emit)
+    private val unsubscribeState = coordinator.subscribe { emit() }
     private val unsubscribe = coordinator.subscribeSessionStart { result ->
         lastMessage = result.fold(
             onSuccess = { "Linux desktop is running" },

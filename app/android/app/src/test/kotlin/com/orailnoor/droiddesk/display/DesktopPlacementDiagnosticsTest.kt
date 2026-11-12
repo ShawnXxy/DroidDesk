@@ -168,14 +168,17 @@ class DesktopPlacementDiagnosticsTest {
         assertEquals(DisplayEnvironment.TNT, coordinator.environmentForDisplay(syntheticTnt.id))
         assertNull(coordinator.environmentForDisplay(999))
 
-        // Movable coordinator: disconnected lastTarget preserves environment fallback without re-enabling auto-launch
+        // Movable coordinator: disconnected bound activity or lastTarget preserves environment fallback
+        // without re-enabling auto-launch eligibility for the disconnected external display
+        val phoneForMovable = DesktopDisplay(0, "phone", "Phone", isDefault = true, eligible = true, null)
         val ineligiblePhone = DesktopDisplay(0, "phone", "Phone", isDefault = true, eligible = false, "disabled")
         val external = DesktopDisplay(42, "hdmi:42", "HDMI", isDefault = false, eligible = true, null)
-        var movableDisplays: List<DesktopDisplay> = listOf(ineligiblePhone, external)
+        var movableCurrent: DesktopDisplay? = external
+        var movableDisplays: List<DesktopDisplay> = listOf(phoneForMovable, external)
         var movableLaunch: DesktopLaunchRequest? = null
         val movableCoordinator = DesktopDisplayCoordinator(
             host = object : DesktopDisplayHost {
-                override fun currentDisplay() = ineligiblePhone
+                override fun currentDisplay() = movableCurrent
                 override fun displays() = movableDisplays
                 override fun defaultProfileKind() = ProfileKind.PHONE
                 override fun sessionRunning() = true
@@ -196,6 +199,17 @@ class DesktopPlacementDiagnosticsTest {
                 ),
             ),
         )
+        val boundExternalActivity = Activity()
+        assertTrue(movableCoordinator.bindActivity(boundExternalActivity))
+        movableCurrent = phoneForMovable
+        movableDisplays = listOf(phoneForMovable)
+        val staleBoundDiagnostics = movableCoordinator.placementDiagnostics(external.id, installed = true)
+        assertEquals(DisplayEnvironment.OTHER_EXTERNAL, staleBoundDiagnostics.environment)
+        assertFalse(staleBoundDiagnostics.shouldAutoLaunchCurrentDisplay)
+        movableCoordinator.unbindActivity(boundExternalActivity)
+
+        movableCurrent = ineligiblePhone
+        movableDisplays = listOf(ineligiblePhone, external)
         movableCoordinator.open(external.id, external.key) {}
         val extReq = checkNotNull(movableLaunch)
         val extLease = (movableCoordinator.claim(external.id) {} as RendererClaim.Accepted).lease

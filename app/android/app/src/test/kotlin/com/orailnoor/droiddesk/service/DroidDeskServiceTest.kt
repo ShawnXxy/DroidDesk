@@ -773,6 +773,53 @@ class DroidDeskServiceTest {
     }
 
     @Test
+    fun synchronousRetryFromEarlierSubscriberDoesNotRestoreStaleErrorNotification() {
+        val phone = DesktopDisplay(0, "phone", "Phone", isDefault = true, eligible = true, null)
+        val host = object : DesktopDisplayHost {
+            override fun currentDisplay() = phone
+            override fun displays() = listOf(phone)
+            override fun defaultProfileKind() = ProfileKind.PHONE
+            override fun sessionRunning() = false
+            override fun launch(request: DesktopLaunchRequest) = Unit
+            override fun focus(requestId: Long) = false
+            override fun cancelLaunch(requestId: Long) = Unit
+            override fun scheduleTimeout(delayMillis: Long, action: () -> Unit): () -> Unit = {}
+            override fun notifyReturnRequired(error: DesktopDisplayException) = Unit
+        }
+        val coordinator = DesktopDisplayCoordinator(
+            host = host,
+            placementStrategy = DisplayLocalRestartAdapter(
+                PlacementSelection(
+                    mode = PlacementMode.DISPLAY_LOCAL,
+                    source = PlacementSelectionSource.DEVICE_QUIRK,
+                    allowAutomaticMoves = false,
+                    reason = "reentrant retry notification test",
+                ),
+            ),
+        )
+        var retried = false
+        val unsubscribeRetry = coordinator.subscribe { state ->
+            if (!retried && state["phase"] == "error") {
+                retried = true
+                coordinator.requestOpen(
+                    request = DesktopOpenRequest(phone.id, "proot", "xfce4", startSession = true, expectedEpoch = null),
+                    startService = {},
+                    completion = {},
+                )
+            }
+        }
+        val messages = mutableListOf<String>()
+        val notification = DesktopStartupNotification(coordinator, messages::add)
+
+        coordinator.reportError(DesktopDisplayException("DISPLAY_UNAVAILABLE", "Transient display glitch"))
+
+        assertEquals("Linux desktop is starting", messages.last())
+        assertEquals("Linux desktop is starting", notification.text)
+        notification.close()
+        unsubscribeRetry()
+    }
+
+    @Test
     fun startupNotificationTextReflectsNonMovableAndMovableLifecycleStates() {
         // Non-movable states
         assertEquals(
