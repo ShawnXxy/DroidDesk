@@ -62,6 +62,39 @@ import com.orailnoor.droiddesk.display.RenderPolicy
 import com.orailnoor.droiddesk.display.PixelSize
 import com.orailnoor.droiddesk.display.PixelInsets
 import com.orailnoor.droiddesk.display.DesktopDisplayException
+import com.orailnoor.droiddesk.display.capability.DisplayModeEvidence
+import com.orailnoor.droiddesk.display.refresh.DisplayRefreshPolicy
+import com.orailnoor.droiddesk.display.refresh.RefreshRequest
+
+internal fun displayModeEvidenceOrNull(
+    modeId: Int,
+    width: Int,
+    height: Int,
+    refreshRate: Float,
+): DisplayModeEvidence? {
+    if (modeId <= 0 || width <= 0 || height <= 0 || !refreshRate.isFinite() || refreshRate <= 0f) {
+        return null
+    }
+    return DisplayModeEvidence(
+        modeId = modeId,
+        width = width,
+        height = height,
+        refreshRate = refreshRate,
+    )
+}
+
+internal fun applyRefreshRequest(
+    request: RefreshRequest,
+    updateWindowRefresh: (preferredRefreshRate: Float, preferredDisplayModeId: Int) -> Unit,
+) {
+    if (request.preferredRefreshRate == null && request.preferredModeId == null) {
+        return
+    }
+    updateWindowRefresh(
+        request.preferredRefreshRate ?: 0f,
+        request.preferredModeId ?: 0,
+    )
+}
 
 internal fun shouldObserveInputDeviceChanges(
     sdkInt: Int,
@@ -265,25 +298,29 @@ class DesktopActivity : Activity() {
         )
     }
 
+    @Suppress("DEPRECATION")
     private fun applyProotRefreshPolicy() {
-        val display = windowManager.defaultDisplay
-        val currentMode = display.mode
-        val sixtyHertzMode = display.supportedModes
-            .filter { kotlin.math.abs(it.refreshRate - 60f) < 0.5f }
-            .minByOrNull { mode ->
-                kotlin.math.abs(mode.physicalWidth - currentMode.physicalWidth) +
-                    kotlin.math.abs(mode.physicalHeight - currentMode.physicalHeight)
-            }
-        window.attributes = window.attributes.apply {
-            preferredRefreshRate = 60f
-            sixtyHertzMode?.let { preferredDisplayModeId = it.modeId }
+        val activeDisplay = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            display ?: windowManager.defaultDisplay
+        } else {
+            windowManager.defaultDisplay
         }
-        Log.i(
-            TAG,
-            "PRoot refresh policy requested 60 Hz" +
-                sixtyHertzMode?.let { " via display mode ${it.modeId}" }.orEmpty(),
-        )
+        val currentEvidence = activeDisplay?.mode?.toEvidenceOrNull()
+        val supportedEvidence = activeDisplay?.supportedModes
+            ?.mapNotNull { it?.toEvidenceOrNull() }
+            .orEmpty()
+        val request = DisplayRefreshPolicy.resolve(currentEvidence, supportedEvidence)
+        applyRefreshRequest(request) { rate, modeId ->
+            window.attributes = window.attributes.apply {
+                preferredRefreshRate = rate
+                preferredDisplayModeId = modeId
+            }
+        }
+        Log.i(TAG, "PRoot refresh policy: ${request.reason}")
     }
+
+    private fun android.view.Display.Mode.toEvidenceOrNull(): DisplayModeEvidence? =
+        displayModeEvidenceOrNull(modeId, physicalWidth, physicalHeight, refreshRate)
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {
         super.onWindowFocusChanged(hasFocus)
