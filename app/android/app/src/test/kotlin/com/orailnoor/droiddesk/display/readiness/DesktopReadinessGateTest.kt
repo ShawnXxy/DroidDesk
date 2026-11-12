@@ -332,6 +332,60 @@ class DesktopReadinessGateTest {
         assertEquals(listOf(9L), completions)
     }
 
+    @Test
+    fun pendingLayoutBlocksStartupUntilPostLayoutGeometryCommits() {
+        val coordinator = DesktopDisplayCoordinator()
+        val epoch = coordinator.prepareSession("proot", "xfce4", true)
+        val lease = (coordinator.claim(0) {} as RendererClaim.Accepted).lease
+        val events = mutableListOf<String>()
+        var geometryQueued = false
+        var layoutPending = false
+        var committedSize = PixelSize(1080, 2400)
+
+        val gate = DesktopReadinessGate { generation ->
+            if (generation != lease.generation) return@DesktopReadinessGate
+            advanceReadyDesktopRenderer(
+                lease = lease,
+                isCurrentRenderer = coordinator::isCurrent,
+                isTransportAndSurfaceReady = { !geometryQueued && !layoutPending },
+                measuredContent = committedSize,
+                onAttached = { _, size -> events += "attached:${size.width}x${size.height}" },
+                consumeSessionStart = coordinator::consumeSessionStart,
+                beginSessionStart = coordinator::beginSessionStart,
+                startSession = { startEpoch -> events += "start:$startEpoch:${committedSize.width}x${committedSize.height}" },
+                shouldRevealExistingSession = { true },
+                isSessionStarting = { coordinator.isStarting },
+                awaitPendingSessionStart = { events += "await" },
+                waitForDesktopAndReveal = { events += "reveal" },
+            )
+        }
+
+        gate.reset(lease.generation)
+        gate.signal(lease.generation, ReadinessSignal.RENDERER_CLAIMED)
+        gate.signal(lease.generation, ReadinessSignal.SURFACE_READY)
+        gate.signal(lease.generation, ReadinessSignal.GEOMETRY_COMMITTED)
+
+        // Configuration/rotation queues layout before X11 finishes connecting; a synchronous
+        // pre-traversal geometry check must keep GEOMETRY_COMMITTED revoked rather than recommitting
+        // stale 1080x2400 portrait bounds.
+        geometryQueued = true
+        layoutPending = true
+        gate.revoke(lease.generation, ReadinessSignal.GEOMETRY_COMMITTED)
+        gate.signal(lease.generation, ReadinessSignal.X11_CONNECTED)
+        assertTrue(events.isEmpty())
+
+        // Post-layout pre-draw callback clears pending layout, commits 2400x1080, and starts Linux.
+        layoutPending = false
+        geometryQueued = false
+        committedSize = PixelSize(2400, 1080)
+        gate.signal(lease.generation, ReadinessSignal.GEOMETRY_COMMITTED)
+
+        assertEquals(
+            listOf("attached:2400x1080", "start:$epoch:2400x1080"),
+            events,
+        )
+    }
+
     private fun <T> permutationsOf(items: List<T>): List<List<T>> {
         if (items.size <= 1) return listOf(items)
         return items.flatMapIndexed { index, head ->

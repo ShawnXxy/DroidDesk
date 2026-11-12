@@ -89,12 +89,16 @@ class X11ServiceClient(
 
     fun connect() {
         if (!active.compareAndSet(false, true)) return
+        bindServer()
+    }
+
+    private fun bindServer() {
         val intent = Intent(appContext, X11ServerService::class.java)
         // A bound-only service is destroyed as soon as DesktopActivity goes
         // away. Keep the isolated X server started while the Linux session is
         // running so returning to the desktop can reuse the live connection.
-        appContext.startService(intent)
-        bound = appContext.bindService(intent, connection, Context.BIND_AUTO_CREATE)
+        runCatching { appContext.startService(intent) }
+        bound = runCatching { appContext.bindService(intent, connection, Context.BIND_AUTO_CREATE) }.getOrDefault(false)
         if (!bound) postError("Android refused the X11 service binding", null)
     }
 
@@ -102,7 +106,7 @@ class X11ServiceClient(
         if (!active.getAndSet(false)) return
         connectionSeq.incrementAndGet(); currentBinder = null
         if (bound) {
-            appContext.unbindService(connection)
+            runCatching { appContext.unbindService(connection) }
             bound = false
         }
     }
@@ -110,9 +114,9 @@ class X11ServiceClient(
     private fun handleDisconnect(message: String, rebind: Boolean) {
         if (!active.get()) return
         connectionSeq.incrementAndGet(); currentBinder = null; connectedServerPid = -1
-        if (rebind && bound) { appContext.unbindService(connection); bound = false }
+        if (rebind && bound) { runCatching { appContext.unbindService(connection) }; bound = false }
         onDisconnected(); onError(message, null)
-        if (rebind && active.get()) { val i = Intent(appContext, X11ServerService::class.java); appContext.startService(i); bound = appContext.bindService(i, connection, Context.BIND_AUTO_CREATE); if (!bound) postError("Android refused the X11 service binding", null) }
+        if (rebind && active.get()) bindServer()
     }
 
     private fun postError(message: String, error: Throwable?) {

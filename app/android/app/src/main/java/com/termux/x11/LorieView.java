@@ -819,11 +819,18 @@ public class LorieView extends SurfaceView implements InputStub {
     }
 
     public boolean hasValidSurface() { Surface s = getHolder().getSurface(); return isRendererOwner() && surfaceReady && s != null && s.isValid(); }
+    public boolean hasPendingLayout() {
+        if (isLayoutRequested() || isInLayout() || getWidth() <= 0 || getHeight() <= 0 || getMeasuredWidth() != getWidth() || getMeasuredHeight() != getHeight()) return true;
+        for (android.view.ViewParent parent = getParent(); parent != null; parent = parent.getParent()) {
+            if (parent.isLayoutRequested() || (parent instanceof android.view.View && ((android.view.View) parent).isInLayout())) return true;
+        }
+        return false;
+    }
     public boolean hasCommittedGeometry() {
-        return isRendererOwner() && desktopRenderSize != null && desktopRenderSize.x > 0 && desktopRenderSize.y > 0 && contentInsetsCommitted
+        return isRendererOwner() && !hasPendingLayout() && desktopRenderSize != null && desktopRenderSize.x > 0 && desktopRenderSize.y > 0 && contentInsetsCommitted
                 && committedWidth > Math.max(0, contentInsets.left + contentInsets.right) && committedHeight > Math.max(0, contentInsets.top + contentInsets.bottom)
-                && getWidth() == committedWidth && getHeight() == committedHeight && getMeasuredWidth() == committedWidth && getMeasuredHeight() == committedHeight
-                && viewport.width() > 0 && viewport.height() > 0 && p.x > 0 && p.y > 0 && (!connected() || (lastSentWidth == p.x && lastSentHeight == p.y));
+                && getWidth() == committedWidth && getHeight() == committedHeight && viewport.width() > 0 && viewport.height() > 0
+                && p.x > 0 && p.y > 0 && (!connected() || (lastSentWidth == p.x && lastSentHeight == p.y));
     }
 
     @Nullable

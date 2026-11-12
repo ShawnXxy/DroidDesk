@@ -230,11 +230,15 @@ class DesktopActivity : Activity() {
     private var currentInsets = PixelInsets(0, 0, 0, 0)
     private var lastWindowInsets: WindowInsets? = null
     private var viewportYScale = 1f
-    private var geometryQueued = false
+    private var geometryQueued = false; private var applyingGeometry = false; private var geometryObserver: android.view.ViewTreeObserver? = null
     private var geometryListener: View.OnLayoutChangeListener? = null
-    private val geometryUpdate = Runnable {
-        geometryQueued = false
-        applyWindowGeometry()
+    private val geometryUpdate = android.view.ViewTreeObserver.OnPreDrawListener {
+        if (rendererCleanup.isReleased || !::placeholder.isInitialized) { detachGeometryObserver(); return@OnPreDrawListener true }
+        if (lorieView?.let(::hasPendingWindowGeometry) == true) {
+            rendererLease?.let { readinessGate.revoke(it.generation, ReadinessSignal.GEOMETRY_COMMITTED) }
+            placeholder.postInvalidateOnAnimation(); return@OnPreDrawListener true
+        }
+        detachGeometryObserver(); applyWindowGeometry(); true
     }
     private var inputModeButton: Button? = null
     private var controlOverlay: LinearLayout? = null
@@ -410,8 +414,15 @@ class DesktopActivity : Activity() {
         )
     }
 
+    override fun setRequestedOrientation(requestedOrientation: Int) {
+        val changed = this.requestedOrientation != requestedOrientation
+        super.setRequestedOrientation(requestedOrientation)
+        if (changed) { lorieView?.requestLayout(); scheduleGeometry() }
+    }
+
     override fun onConfigurationChanged(newConfig: Configuration) {
         super.onConfigurationChanged(newConfig)
+        lorieView?.requestLayout()
         scheduleGeometry()
         if (inputController != null && isCurrentRenderer()) scheduleDesktopInputRefresh()
     }
@@ -599,7 +610,7 @@ class DesktopActivity : Activity() {
                     val scale = kotlin.math.abs(matrix[Matrix.MSCALE_Y])
                     if (scale > 0f) viewportYScale = 1f / scale
                     updateOverlayOffsets()
-                    scheduleGeometry()
+                    if (!applyingGeometry) scheduleGeometry()
                 },
                 onDirectTouchObserved = { deviceId -> if (presentationPlanner.promoteDirectTouch(lease.displayId, deviceId)) refreshInputPolicyOnly() },
             )
@@ -652,11 +663,21 @@ class DesktopActivity : Activity() {
         inputDeviceListenerRegistered = false
     }
 
+    private fun hasPendingWindowGeometry(view: LorieView): Boolean = view.hasPendingLayout() || (
+        Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && window.decorView.isAttachedToWindow &&
+            windowManager.currentWindowMetrics.bounds.let { it.width() > 0 && it.height() > 0 && (window.decorView.width > it.width() || window.decorView.height > it.height()) }
+    )
+    private fun detachGeometryObserver() {
+        geometryQueued = false
+        geometryObserver?.takeIf { it.isAlive }?.removeOnPreDrawListener(geometryUpdate); geometryObserver = null
+        if (::placeholder.isInitialized && placeholder.viewTreeObserver.isAlive) placeholder.viewTreeObserver.removeOnPreDrawListener(geometryUpdate)
+    }
+
     private fun scheduleGeometry() {
         rendererLease?.let { readinessGate.revoke(it.generation, ReadinessSignal.GEOMETRY_COMMITTED) }
-        if (geometryQueued || !::placeholder.isInitialized || rendererCleanup.isReleased) return
-        geometryQueued = true
-        placeholder.postOnAnimation(geometryUpdate)
+        if (!::placeholder.isInitialized || rendererCleanup.isReleased) return
+        if (!geometryQueued) { geometryQueued = true; geometryObserver = placeholder.viewTreeObserver.also { it.addOnPreDrawListener(geometryUpdate) } }
+        placeholder.invalidate(); placeholder.postInvalidateOnAnimation()
     }
 
     private fun remainingWindowInsets(view: View): PixelInsets? {
@@ -710,21 +731,23 @@ class DesktopActivity : Activity() {
             displayCoordinator.onActivityMoved(lease, actualDisplay)
             return
         }
+        if (geometryQueued || hasPendingWindowGeometry(view)) return scheduleGeometry()
         val remaining = remainingWindowInsets(view) ?: return readinessGate.revoke(lease.generation, ReadinessSignal.GEOMETRY_COMMITTED)
-        if (geometryQueued && ::placeholder.isInitialized) { placeholder.removeCallbacks(geometryUpdate); geometryQueued = false }
-        lastWindowInsets?.let(::updateExtraKeysBar)
-        val keysHeight = extraKeysBar?.takeIf { it.visibility == View.VISIBLE }?.height ?: 0
-        val nextInsets = remaining.copy(bottom = remaining.bottom + keysHeight)
-        val content = PixelSize(
-            view.width - nextInsets.left - nextInsets.right,
-            view.height - nextInsets.top - nextInsets.bottom,
-        )
-        if (content.width <= 0 || content.height <= 0) return readinessGate.revoke(lease.generation, ReadinessSignal.GEOMETRY_COMMITTED)
-        val previousInsets = currentInsets; currentInsets = nextInsets
-        val plan = presentationPlanner.updateMeasuredWindow(content, forceNextRelaySync.also { forceNextRelaySync = false }) ?: run { currentInsets = previousInsets; return readinessGate.revoke(lease.generation, ReadinessSignal.GEOMETRY_COMMITTED) }
-        val appliedRender = view.renderedSize ?: return readinessGate.revoke(lease.generation, ReadinessSignal.GEOMETRY_COMMITTED)
-        displayCoordinator.reportGeometry(lease, plan.profileKind, PixelSize(appliedRender.x, appliedRender.y))
-        syncReadinessSignals(lease)
+        applyingGeometry = true
+        try {
+            lastWindowInsets?.let(::updateExtraKeysBar)
+            if (hasPendingWindowGeometry(view)) return scheduleGeometry()
+            val keysHeight = extraKeysBar?.takeIf { it.visibility == View.VISIBLE }?.height ?: 0
+            val nextInsets = remaining.copy(bottom = remaining.bottom + keysHeight)
+            val content = PixelSize(view.width - nextInsets.left - nextInsets.right, view.height - nextInsets.top - nextInsets.bottom)
+            if (content.width <= 0 || content.height <= 0) return readinessGate.revoke(lease.generation, ReadinessSignal.GEOMETRY_COMMITTED)
+            val previousInsets = currentInsets; currentInsets = nextInsets
+            val plan = presentationPlanner.updateMeasuredWindow(content, forceNextRelaySync.also { forceNextRelaySync = false }) ?: run { currentInsets = previousInsets; return readinessGate.revoke(lease.generation, ReadinessSignal.GEOMETRY_COMMITTED) }
+            if (hasPendingWindowGeometry(view)) return scheduleGeometry()
+            val appliedRender = view.renderedSize ?: return readinessGate.revoke(lease.generation, ReadinessSignal.GEOMETRY_COMMITTED)
+            displayCoordinator.reportGeometry(lease, plan.profileKind, PixelSize(appliedRender.x, appliedRender.y))
+            syncReadinessSignals(lease)
+        } finally { applyingGeometry = false }
         val retry = explicitProfileRetry
         explicitProfileRetry = false
         applyLiveProfile(force = retry)
@@ -734,14 +757,14 @@ class DesktopActivity : Activity() {
     private fun syncReadinessSignals(lease: RendererLease) {
         if (!isCurrentRenderer(lease)) return readinessGate.cancel(lease.generation)
         val wasReady = readyGeneration == lease.generation; val surfaceOk = lorieView?.hasValidSurface() == true
-        val x11Ok = isX11Ready(lease); val geometryOk = !geometryQueued && lorieView?.hasCommittedGeometry() == true
+        val x11Ok = isX11Ready(lease); val geometryOk = !geometryQueued && lorieView?.let { !hasPendingWindowGeometry(it) && it.hasCommittedGeometry() } == true
         if (!surfaceOk) readinessGate.revoke(lease.generation, ReadinessSignal.SURFACE_READY); if (!x11Ok) readinessGate.revoke(lease.generation, ReadinessSignal.X11_CONNECTED); if (!geometryOk) readinessGate.revoke(lease.generation, ReadinessSignal.GEOMETRY_COMMITTED)
         readinessGate.signal(lease.generation, ReadinessSignal.RENDERER_CLAIMED); if (surfaceOk) readinessGate.signal(lease.generation, ReadinessSignal.SURFACE_READY); if (x11Ok) readinessGate.signal(lease.generation, ReadinessSignal.X11_CONNECTED); if (geometryOk) readinessGate.signal(lease.generation, ReadinessSignal.GEOMETRY_COMMITTED)
         if (wasReady && readyGeneration == lease.generation) advanceReadyRenderer(lease, presentationPlanner.measuredContentSize)
     }
     private fun onRendererReady(generation: Long) { rendererLease?.takeIf { it.generation == generation && isCurrentRenderer(it) }?.let { readyGeneration = generation; advanceReadyRenderer(it, presentationPlanner.measuredContentSize) } }
     private fun advanceReadyRenderer(lease: RendererLease, measuredContent: PixelSize?) = advanceReadyDesktopRenderer(
-        lease, ::isCurrentRenderer, { !geometryQueued && isX11Ready(lease) && lorieView?.hasValidSurface() == true && lorieView?.hasCommittedGeometry() == true },
+        lease, ::isCurrentRenderer, { !geometryQueued && isX11Ready(lease) && lorieView?.let { it.hasValidSurface() && !hasPendingWindowGeometry(it) && it.hasCommittedGeometry() } == true },
         measuredContent, { attached, content -> displayCoordinator.onAttached(attached, displayRequestId, content) }, displayCoordinator::consumeSessionStart, displayCoordinator::beginSessionStart,
         { startEpoch -> shouldStartSession = true; sessionStartPending = true; startDesktopSessionIfRequested(startEpoch) },
         { !sessionStartPending && !desktopReady && !desktopRevealed }, { displayCoordinator.isStarting }, ::awaitPendingSessionStart, ::waitForDesktopAndReveal,
@@ -1406,7 +1429,7 @@ class DesktopActivity : Activity() {
         ownedLease: RendererLease?,
         ownsLorieView: Boolean,
     ) {
-        ownedLease?.let { readinessGate.cancel(it.generation) }; readyGeneration = 0L; x11Attached = false; synchronized(this) { connectionRequested = false }
+        ownedLease?.let { readinessGate.cancel(it.generation) }; readyGeneration = 0L; x11Attached = false; applyingGeometry = false; synchronized(this) { connectionRequested = false }
         unregisterInputDeviceListener()
         appliedRefreshRequest = null; forceNextRelaySync = false
         sessionStartPending = false
@@ -1423,8 +1446,7 @@ class DesktopActivity : Activity() {
             "Settings were saved but the view closed before profile application was confirmed",
         ))
         pendingProfiles.forEach { it(cancelled) }
-        if (::placeholder.isInitialized) placeholder.removeCallbacks(geometryUpdate)
-        geometryQueued = false
+        detachGeometryObserver()
         geometryListener?.let { lorieView?.removeOnLayoutChangeListener(it) }
         geometryListener = null
         if (::placeholder.isInitialized) placeholder.setOnApplyWindowInsetsListener(null)
