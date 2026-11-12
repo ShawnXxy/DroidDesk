@@ -72,6 +72,25 @@ data class DisplayProfile(
     val autoMaximize: Boolean,
 )
 
+internal fun exceedsCap1440(content: PixelSize): Boolean =
+    maxOf(content.width, content.height) > 2560 || minOf(content.width, content.height) > 1440
+
+internal fun fallbackUiScalePercent(kind: ProfileKind, content: PixelSize): Int = when {
+    kind == ProfileKind.WIDE -> 150
+    minOf(content.width, content.height) <= 1080 -> 100
+    minOf(content.width, content.height) <= 1440 -> 150
+    else -> 200
+}
+
+internal fun scaledDisplayProfile(kind: ProfileKind, settings: DisplaySettings, percent: Int) = DisplayProfile(
+    kind,
+    settings,
+    (96 * percent / 100.0).roundToInt(),
+    (24 * percent / 100.0).roundToInt(),
+    (48 * percent / 100.0).roundToInt(),
+    kind == ProfileKind.PHONE,
+)
+
 object DisplayProfilePolicy {
     fun remainingInsets(
         view: PixelSize,
@@ -117,20 +136,8 @@ object DisplayProfilePolicy {
         if (kind == ProfileKind.PHONE && settings.uiScalePercent == null) {
             return phoneDefaultProfile().copy(settings = settings)
         }
-        val percent = settings.uiScalePercent ?: when {
-            kind == ProfileKind.WIDE -> 150
-            minOf(content.width, content.height) <= 1080 -> 100
-            minOf(content.width, content.height) <= 1440 -> 150
-            else -> 200
-        }
-        return DisplayProfile(
-            kind,
-            settings,
-            (96 * percent / 100.0).roundToInt(),
-            (24 * percent / 100.0).roundToInt(),
-            (48 * percent / 100.0).roundToInt(),
-            kind == ProfileKind.PHONE,
-        )
+        val percent = settings.uiScalePercent ?: fallbackUiScalePercent(kind, content)
+        return scaledDisplayProfile(kind, settings, percent)
     }
 
     fun renderSize(content: PixelSize, policy: RenderPolicy): PixelSize? {
