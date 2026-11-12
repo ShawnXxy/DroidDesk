@@ -38,39 +38,27 @@ internal class DesktopStartupNotification(
     private val coordinator: DesktopDisplayCoordinator,
     private val notify: (String) -> Unit,
 ) {
-    private var latestSnapshot: Map<String, Any?>? = null
-    private var latestSnapshotEpoch = 0L
     private var lastMessage: String? = null
     private var messageEpoch = 0L
 
-    private fun isSnapshotCurrent(snapshot: Map<String, Any?>): Boolean {
-        val phase = snapshot["phase"] as? String
-        val snapError = (snapshot["error"] as? Map<*, *>)?.get("message") as? String
-        return snapshot["crossDisplayMovesAllowed"] == coordinator.allowsManualMoves &&
-            snapshot["sessionRestarting"] == coordinator.isRestarting &&
-            snapError == coordinator.sessionFailure?.message &&
-            (phase == "stopped") == (coordinator.isStopped && !coordinator.isRestarting && coordinator.sessionFailure == null) &&
-            (phase == "starting") == (!coordinator.allowsManualMoves && coordinator.isStarting && !coordinator.isRestarting && coordinator.sessionFailure == null)
-    }
-
-    private fun textFor(runningOverride: Boolean? = null): String {
+    private fun textFor(
+        publishedSnapshot: Map<String, Any?>? = coordinator.latestPublishedSnapshot,
+        runningOverride: Boolean? = null,
+    ): String {
         val allowsManualMoves = coordinator.allowsManualMoves
         val restarting = coordinator.isRestarting
         val starting = coordinator.isStarting
         val stopped = coordinator.isStopped
         val errorMessage = coordinator.sessionFailure?.message
-        val reusable = latestSnapshot?.takeIf {
-            latestSnapshotEpoch == coordinator.sessionGeneration && isSnapshotCurrent(it)
-        }
         val needsRunning = !allowsManualMoves && !restarting && errorMessage == null && !starting && !stopped
         val running = when {
             !needsRunning -> false
             runningOverride != null -> runningOverride
-            reusable != null -> reusable["sessionRunning"] == true
+            publishedSnapshot != null -> publishedSnapshot["sessionRunning"] == true
             else -> coordinator.hasRunningSession
         }
         return desktopStartupNotificationText(
-            snapshot = reusable ?: emptyMap(),
+            snapshot = publishedSnapshot ?: emptyMap(),
             allowsManualMoves = allowsManualMoves,
             restarting = restarting,
             starting = starting,
@@ -86,13 +74,15 @@ internal class DesktopStartupNotification(
 
     val text: String get() = textFor()
     private var lastNotified: String? = null
-    private fun emit(runningOverride: Boolean? = null) {
-        val message = textFor(runningOverride)
+    private fun emit(
+        publishedSnapshot: Map<String, Any?>? = coordinator.latestPublishedSnapshot,
+        runningOverride: Boolean? = null,
+    ) {
+        val message = textFor(publishedSnapshot, runningOverride)
         if (message != lastNotified) { lastNotified = message; notify(message) }
     }
     private val unsubscribeState = coordinator.subscribe { state ->
-        if (isSnapshotCurrent(state)) { latestSnapshot = state; latestSnapshotEpoch = coordinator.sessionGeneration }
-        emit()
+        if (state === coordinator.latestPublishedSnapshot) emit(publishedSnapshot = state)
     }
     private val unsubscribe = coordinator.subscribeSessionStart { result ->
         lastMessage = result.fold(
@@ -100,7 +90,7 @@ internal class DesktopStartupNotification(
             onFailure = { "Linux desktop failed to start: ${it.message ?: "Check the session log"}" },
         )
         messageEpoch = coordinator.sessionGeneration
-        emit(runningOverride = result.isSuccess)
+        emit(publishedSnapshot = null, runningOverride = result.isSuccess)
     }
 
     fun close() { unsubscribe(); unsubscribeState() }

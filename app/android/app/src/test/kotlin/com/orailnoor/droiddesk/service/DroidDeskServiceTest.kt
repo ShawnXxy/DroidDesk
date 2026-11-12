@@ -747,14 +747,22 @@ class DroidDeskServiceTest {
         coordinator.sessionStarted(startEpoch, Result.success(Unit))
         assertTrue(waiterObservedWarning)
         assertEquals(readsBeforeSessionStarted + 1, sessionRunningReads)
-        val readsAfterSessionStarted = sessionRunningReads
-        assertEquals(coordinator.environmentRestartWarning, notification.text)
-        assertEquals(readsAfterSessionStarted, sessionRunningReads)
 
-        // Geometry publication must reuse the coordinator's published snapshot without extra sessionRunning() probes
+        // Subscriber notification.text read during publication reuses publishedSnapshot without extra probes
+        var subscriberObservedText: String? = null
+        val unsubscribeServiceProbe = coordinator.subscribe {
+            subscriberObservedText = notification.text
+        }
         val readsBeforeGeometry = sessionRunningReads
         coordinator.reportGeometry(lease, ProfileKind.MONITOR, PixelSize(1920, 1080))
+        assertEquals(coordinator.environmentRestartWarning, subscriberObservedText)
         assertEquals(readsBeforeGeometry + 1, sessionRunningReads)
+        unsubscribeServiceProbe()
+
+        // Independent notification.text read refreshes process status if Linux exited without coordinator publish
+        running = false
+        assertEquals("Linux desktop is not running", notification.text)
+        running = true
 
         // Detach renderer while Linux stays running in background -> keeps coordinator restart warning
         coordinator.release(lease)
@@ -885,6 +893,79 @@ class DroidDeskServiceTest {
         unsubscribeLater()
         notification.close()
         unsubscribeReopen()
+    }
+
+    @Test
+    fun synchronousStopAndBeginSessionDuringAttachedRunningRejectsSupersededSnapshot() {
+        val phone = DesktopDisplay(0, "phone", "Phone", isDefault = true, eligible = true, null)
+        var running = false
+        var lastLaunched: DesktopLaunchRequest? = null
+        val host = object : DesktopDisplayHost {
+            override fun currentDisplay() = phone
+            override fun displays() = listOf(phone)
+            override fun defaultProfileKind() = ProfileKind.PHONE
+            override fun sessionRunning() = running
+            override fun launch(request: DesktopLaunchRequest) {
+                lastLaunched = request
+            }
+            override fun focus(requestId: Long) = false
+            override fun cancelLaunch(requestId: Long) = Unit
+            override fun scheduleTimeout(delayMillis: Long, action: () -> Unit): () -> Unit = {}
+            override fun notifyReturnRequired(error: DesktopDisplayException) = Unit
+        }
+        val coordinator = DesktopDisplayCoordinator(
+            host = host,
+            placementStrategy = DisplayLocalRestartAdapter(
+                PlacementSelection(
+                    mode = PlacementMode.DISPLAY_LOCAL,
+                    source = PlacementSelectionSource.DEVICE_QUIRK,
+                    allowAutomaticMoves = false,
+                    reason = "superseded attached snapshot test",
+                ),
+            ),
+        )
+        var interceptAttached = false
+        val unsubscribeEarlier = coordinator.subscribe { state ->
+            if (interceptAttached && state["phase"] == "attached" && state["sessionRunning"] == true) {
+                interceptAttached = false
+                running = false
+                coordinator.stop()
+                coordinator.beginSession()
+            }
+        }
+        val messages = mutableListOf<String>()
+        val notification = DesktopStartupNotification(coordinator, messages::add)
+        val laterPhases = mutableListOf<String?>()
+        val unsubscribeLater = coordinator.subscribe { state ->
+            laterPhases += state["phase"] as? String
+        }
+
+        coordinator.requestOpen(
+            request = DesktopOpenRequest(phone.id, "proot", "xfce4", startSession = true, expectedEpoch = null),
+            startService = {},
+            completion = {},
+        )
+        val launch = checkNotNull(lastLaunched)
+        val lease = (coordinator.claim(phone.id) {} as RendererClaim.Accepted).lease
+        coordinator.registerActivity(lease, launch.requestId, { phone.id }) {}
+        coordinator.onAttached(lease, launch.requestId, PixelSize(1080, 2400))
+        assertTrue(coordinator.consumeSessionStart(lease))
+        val startEpoch = checkNotNull(coordinator.beginSessionStart(lease))
+        running = true
+        coordinator.sessionStarted(startEpoch, Result.success(Unit))
+        assertEquals(coordinator.environmentRestartWarning, notification.text)
+
+        laterPhases.clear()
+        interceptAttached = true
+        coordinator.onDisplaysChanged()
+
+        assertTrue("stopped" in laterPhases)
+        assertEquals("Linux desktop is not running", messages.last())
+        assertEquals("Linux desktop is not running", notification.text)
+
+        unsubscribeLater()
+        notification.close()
+        unsubscribeEarlier()
     }
 
     @Test
