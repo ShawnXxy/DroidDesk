@@ -20,12 +20,13 @@ import com.orailnoor.droiddesk.x11.ExternalDesktopInputTarget
 import com.orailnoor.droiddesk.x11.isDirectTouchEvent
 import com.orailnoor.droiddesk.x11.nextSupportedInputMode
 import com.termux.x11.input.InputEventSender
+import com.termux.x11.input.InputStrategyInterface
 import com.termux.x11.input.InputStub
 import com.termux.x11.input.TouchInputHandler
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
-import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -470,6 +471,54 @@ class DesktopInputRoutingTest {
         scroller.dispatch(sender, 1f, 1f)
         assertEquals(-100f, events.last().first, 0f)
         assertEquals(-100f, events.last().second, 0f)
+    }
+
+    @Test
+    fun unchangedModePreservesHeldDragStrategyAndModeSwitchReleasesHeldButtons() {
+        val mouseButtons = mutableListOf<Pair<Int, Boolean>>()
+        val sender = InputEventSender(
+            object : InputStub {
+                override fun sendMouseEvent(x: Float, y: Float, button: Int, down: Boolean, relative: Boolean) {
+                    if (button != InputStub.BUTTON_UNDEFINED) mouseButtons += button to down
+                }
+                override fun sendMouseWheelEvent(deltaX: Float, deltaY: Float) {}
+                override fun sendKeyEvent(s: Int, k: Int, d: Boolean): Boolean = false
+                override fun sendTextEvent(utf8Bytes: ByteArray) {}
+                override fun sendTouchEvent(a: Int, p: Int, x: Int, y: Int) {}
+                override fun sendStylusEvent(
+                    x: Float, y: Float, p: Int, tx: Int, ty: Int, o: Int, b: Int, e: Boolean, m: Boolean,
+                ) {}
+            },
+        )
+        fun createStrategy(mode: Int): InputStrategyInterface =
+            if (mode == TouchInputHandler.InputMode.TOUCH) {
+                InputStrategyInterface.NullInputStrategy()
+            } else {
+                InputStrategyInterface.TrackpadInputStrategy(sender)
+            }
+
+        val mainTracker = TouchInputHandler.ModeStrategyTracker(false)
+        val touchpadTracker = TouchInputHandler.ModeStrategyTracker(true)
+
+        val initialMain = mainTracker.update(TouchInputHandler.InputMode.TRACKPAD, sender::releaseAll, ::createStrategy)
+        val initialTouchpad = touchpadTracker.update(TouchInputHandler.InputMode.TRACKPAD, sender::releaseAll, ::createStrategy)
+        assertTrue(initialMain.onPressAndHold(InputStub.BUTTON_LEFT, true))
+        assertEquals(listOf(InputStub.BUTTON_LEFT to true), mouseButtons)
+
+        // Policy refresh with unchanged TRACKPAD mode keeps the exact strategy and does NOT release the held button.
+        val refreshedMain = mainTracker.update(TouchInputHandler.InputMode.TRACKPAD, sender::releaseAll, ::createStrategy)
+        assertSame(initialMain, refreshedMain)
+        assertEquals(listOf(InputStub.BUTTON_LEFT to true), mouseButtons)
+
+        // Nested touchpad handler stays in TRACKPAD and preserves its strategy even when main mode switches to TOUCH.
+        val refreshedTouchpad = touchpadTracker.update(TouchInputHandler.InputMode.TOUCH, sender::releaseAll, ::createStrategy)
+        assertSame(initialTouchpad, refreshedTouchpad)
+        assertEquals(listOf(InputStub.BUTTON_LEFT to true), mouseButtons)
+
+        // Switching main handler to TOUCH releases held buttons before replacing the strategy.
+        val touchStrategy = mainTracker.update(TouchInputHandler.InputMode.TOUCH, sender::releaseAll, ::createStrategy)
+        assertTrue(touchStrategy is InputStrategyInterface.NullInputStrategy)
+        assertTrue(mouseButtons.contains(InputStub.BUTTON_LEFT to false))
     }
 
     private fun newTarget() = FakeExternalInputTarget().also(createdTargets::add)

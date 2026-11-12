@@ -105,12 +105,10 @@ internal fun fallbackInputCapabilities(hasTouchscreen: Boolean, hasExternalPoint
 internal fun effectiveInputCapabilities(isDefaultDisplay: Boolean, hasInternalTouchscreen: Boolean, directTouchObserved: Boolean, rawInput: InputCapabilities): InputCapabilities =
     if (directTouchObserved || (isDefaultDisplay && hasInternalTouchscreen && rawInput.touch == TouchEvidence.UNKNOWN_ASSOCIATION)) rawInput.copy(touch = TouchEvidence.CURRENT_DISPLAY) else rawInput
 
-internal fun resolvePresentationClass(isDefaultDisplay: Boolean, profileKind: ProfileKind, touch: TouchEvidence): PresentationClass = when {
-    !isDefaultDisplay -> if (touch == TouchEvidence.CURRENT_DISPLAY) PresentationClass.EXTERNAL_TOUCH else PresentationClass.EXTERNAL_POINTER
-    profileKind == ProfileKind.PHONE -> PresentationClass.PHONE_TOUCH
-    profileKind == ProfileKind.WIDE || touch == TouchEvidence.CURRENT_DISPLAY -> PresentationClass.LARGE_TOUCH
-    else -> PresentationClass.EXTERNAL_POINTER
-}
+internal fun resolvePresentationClass(isDefaultDisplay: Boolean, profileKind: ProfileKind, touch: TouchEvidence): PresentationClass =
+    if (!isDefaultDisplay) (if (touch == TouchEvidence.CURRENT_DISPLAY) PresentationClass.EXTERNAL_TOUCH else PresentationClass.EXTERNAL_POINTER)
+    else if (profileKind == ProfileKind.PHONE) PresentationClass.PHONE_TOUCH
+    else if (profileKind == ProfileKind.WIDE || touch == TouchEvidence.CURRENT_DISPLAY) PresentationClass.LARGE_TOUCH else PresentationClass.EXTERNAL_POINTER
 
 internal data class DesktopInputContext(
     val displayId: Int, val environment: DisplayEnvironment, val profileKind: ProfileKind, val desktopUiMode: Boolean, val savedSettings: DisplaySettings?,

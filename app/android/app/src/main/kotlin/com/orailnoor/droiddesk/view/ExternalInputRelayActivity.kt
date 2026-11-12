@@ -100,17 +100,10 @@ class ExternalInputRelayActivity : Activity() {
         }
         setContentView(relayView)
         val decor = window.decorView
-        captureController = RelayPointerCaptureController(
-            ExternalDesktopInputBridge::shouldCapturePointer, ::hasWindowFocus,
-            decor::hasPointerCapture, decor::requestPointerCapture, decor::releasePointerCapture,
-            { decor.postDelayed(retryCapture, 100) }, { decor.removeCallbacks(retryCapture) },
-        ).also { ExternalDesktopInputBridge.onCaptureChanged = it::sync; it.sync() }
+        captureController = RelayPointerCaptureController(ExternalDesktopInputBridge::shouldCapturePointer, ::hasWindowFocus, decor::hasPointerCapture, decor::requestPointerCapture, decor::releasePointerCapture, { decor.postDelayed(retryCapture, 100) }, { decor.removeCallbacks(retryCapture) }).also { ExternalDesktopInputBridge.onCaptureChanged = it::sync; it.sync() }
     }
 
-    override fun onResume() {
-        super.onResume()
-        if (!ExternalDesktopInputBridge.isAttached()) finishAndRemoveTask() else maintainPointerCapture()
-    }
+    override fun onResume() { super.onResume(); if (!ExternalDesktopInputBridge.isAttached()) finishAndRemoveTask() else maintainPointerCapture() }
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {
         super.onWindowFocusChanged(hasFocus)

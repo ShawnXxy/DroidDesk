@@ -16,11 +16,9 @@ internal fun isDirectTouchEvent(source: Int, toolType: Int, isRendererView: Bool
     isRendererView && toolType == MotionEvent.TOOL_TYPE_FINGER && (source and InputDevice.SOURCE_TOUCHSCREEN) == InputDevice.SOURCE_TOUCHSCREEN &&
         (source and InputDevice.SOURCE_TOUCHPAD) != InputDevice.SOURCE_TOUCHPAD && (source and InputDevice.SOURCE_MOUSE) != InputDevice.SOURCE_MOUSE && (source and InputDevice.SOURCE_MOUSE_RELATIVE) != InputDevice.SOURCE_MOUSE_RELATIVE
 
-internal fun nextSupportedInputMode(currentMode: Int, allowDirectTouch: Boolean): Int = when (currentMode) {
-    TouchInputHandler.InputMode.TRACKPAD -> TouchInputHandler.InputMode.SIMULATED_TOUCH
-    TouchInputHandler.InputMode.SIMULATED_TOUCH -> if (allowDirectTouch) TouchInputHandler.InputMode.TOUCH else TouchInputHandler.InputMode.TRACKPAD
-    else -> TouchInputHandler.InputMode.TRACKPAD
-}
+internal fun nextSupportedInputMode(currentMode: Int, allowDirectTouch: Boolean): Int =
+    if (currentMode == TouchInputHandler.InputMode.TRACKPAD) TouchInputHandler.InputMode.SIMULATED_TOUCH
+    else if (currentMode == TouchInputHandler.InputMode.SIMULATED_TOUCH && allowDirectTouch) TouchInputHandler.InputMode.TOUCH else TouchInputHandler.InputMode.TRACKPAD
 
 /** Connects LorieView to the gesture/input implementation imported from Termux:X11. */
 class X11InputController(
@@ -76,9 +74,7 @@ class X11InputController(
     }
 
     fun nextMode(): Int {
-        val next = nextSupportedInputMode(mode, allowDirectTouch)
-        onModeChanged(next)
-        if (mode != next) setMode(next)
+        val next = nextSupportedInputMode(mode, allowDirectTouch); onModeChanged(next); if (mode != next) setMode(next)
         return mode
     }
 
@@ -91,8 +87,7 @@ class X11InputController(
     fun dispose() {
         if (isCurrent()) {
             if (LorieView.connected()) sender.releaseAll()
-            MainActivity.getPrefs().pointerCapture.put(false)
-            if (lorieView.hasPointerCapture()) lorieView.releasePointerCapture()
+            MainActivity.getPrefs().pointerCapture.put(false); if (lorieView.hasPointerCapture()) lorieView.releasePointerCapture()
             MainActivity.getInstance().setKeyHandler(null, generation)
             TouchInputHandler.setThreeFingerTapListener(null)
         }
@@ -113,17 +108,17 @@ class X11InputController(
 
     fun applyDecision(decision: InputPolicyDecision) {
         if (!isCurrent()) return
+        require(decision.defaultInputMode in 1..3)
         allowDirectTouch = decision.allowDirectTouch; inputHandler.setScrollScales(decision.horizontalScrollScale, decision.verticalScrollScale)
-        MainActivity.getPrefs().pointerCapture.put(decision.rendererPointerCapture); setMode(decision.defaultInputMode)
+        val prefs = MainActivity.getPrefs().apply { pointerCapture.put(decision.rendererPointerCapture); touchMode.put(decision.defaultInputMode.toString()) }
+        mode = decision.defaultInputMode; inputHandler.reloadPreferences(prefs)
         if (!decision.rendererPointerCapture && lorieView.hasPointerCapture()) lorieView.releasePointerCapture()
         else if (decision.rendererPointerCapture && lorieView.hasWindowFocus() && !lorieView.hasPointerCapture()) { if (!lorieView.isFocused) lorieView.requestFocus(); lorieView.requestPointerCapture() }
     }
 
-    override fun dispatchExternalKeyEvent(event: KeyEvent): Boolean =
-        isCurrent() && inputHandler.sendKeyEvent(event)
+    override fun dispatchExternalKeyEvent(event: KeyEvent): Boolean = isCurrent() && inputHandler.sendKeyEvent(event)
 
-    override fun dispatchExternalMotionEvent(view: View, event: MotionEvent): Boolean =
-        isCurrent() && inputHandler.handleTouchEvent(lorieView, view, event)
+    override fun dispatchExternalMotionEvent(view: View, event: MotionEvent): Boolean = isCurrent() && inputHandler.handleTouchEvent(lorieView, view, event)
 
     private fun handleMotionEvent(view: View, event: MotionEvent): Boolean {
         if (!isCurrent()) return false

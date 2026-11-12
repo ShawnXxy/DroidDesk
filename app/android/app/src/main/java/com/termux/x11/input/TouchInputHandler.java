@@ -79,24 +79,27 @@ public class TouchInputHandler {
     }
 
     public static final float DEFAULT_SCROLL_SCALE = -100f;
-
     public static final class WheelScroller {
         private float horizontalScale = DEFAULT_SCROLL_SCALE, verticalScale = DEFAULT_SCROLL_SCALE;
-        public void setScales(float horizontalScale, float verticalScale) {
-            this.horizontalScale = Float.isFinite(horizontalScale) && horizontalScale != 0f ? horizontalScale : DEFAULT_SCROLL_SCALE;
-            this.verticalScale = Float.isFinite(verticalScale) && verticalScale != 0f ? verticalScale : DEFAULT_SCROLL_SCALE;
-        }
-        public void dispatch(InputEventSender sender, float axisX, float axisY) {
-            sender.sendMouseWheelEvent(Float.isFinite(axisX) && axisX != 0f ? axisX * horizontalScale : 0f, Float.isFinite(axisY) && axisY != 0f ? axisY * verticalScale : 0f);
+        public void setScales(float h, float v) { horizontalScale = Float.isFinite(h) && h != 0f ? h : DEFAULT_SCROLL_SCALE; verticalScale = Float.isFinite(v) && v != 0f ? v : DEFAULT_SCROLL_SCALE; }
+        public void dispatch(InputEventSender sender, float axisX, float axisY) { sender.sendMouseWheelEvent(Float.isFinite(axisX) && axisX != 0f ? axisX * horizontalScale : 0f, Float.isFinite(axisY) && axisY != 0f ? axisY * verticalScale : 0f); }
+    }
+    public static final class ModeStrategyTracker {
+        private final boolean touchpadOnly;
+        private int currentMode;
+        private InputStrategyInterface strategy;
+        public ModeStrategyTracker(boolean touchpadOnly) { this.touchpadOnly = touchpadOnly; }
+        public InputStrategyInterface update(int requestedMode, Runnable releaseHeldInput, java.util.function.IntFunction<InputStrategyInterface> factory) {
+            int effective = touchpadOnly ? InputMode.TRACKPAD : (requestedMode == InputMode.TOUCH || requestedMode == InputMode.SIMULATED_TOUCH ? requestedMode : InputMode.TRACKPAD);
+            if (strategy != null && currentMode == effective) return strategy;
+            if (strategy != null) releaseHeldInput.run();
+            currentMode = effective;
+            return strategy = factory.apply(effective);
         }
     }
-
     private final WheelScroller mWheelScroller = new WheelScroller();
-
-    public void setScrollScales(float horizontalScale, float verticalScale) {
-        mWheelScroller.setScales(horizontalScale, verticalScale);
-        if (mTouchpadHandler != null) mTouchpadHandler.setScrollScales(horizontalScale, verticalScale);
-    }
+    private final ModeStrategyTracker mModeTracker;
+    public void setScrollScales(float horizontalScale, float verticalScale) { mWheelScroller.setScales(horizontalScale, verticalScale); if (mTouchpadHandler != null) mTouchpadHandler.setScrollScales(horizontalScale, verticalScale); }
 
     private final RenderData mRenderData;
     private final GestureDetector mScroller;
@@ -241,6 +244,7 @@ public class TouchInputHandler {
 
 //        mEdgeSlopInPx = ViewConfiguration.get(/*desktop*/ ctx).getScaledEdgeSlop();
 
+        mModeTracker = new ModeStrategyTracker(isTouchpad);
         setInputMode(InputMode.TRACKPAD);
         mDexListener = new DexListener(activity);
         mTouchpadHandler = isTouchpad ? null : new TouchInputHandler(activity, mRenderData, injector, true);
@@ -434,14 +438,10 @@ public class TouchInputHandler {
     }
 
     public void setInputMode(@InputMode int inputMode) {
-        if (mTouchpadHandler == null)
-            mInputStrategy = new InputStrategyInterface.TrackpadInputStrategy(mInjector);
-        else if (inputMode == InputMode.TOUCH)
-            mInputStrategy = new InputStrategyInterface.NullInputStrategy();
-        else if (inputMode == InputMode.SIMULATED_TOUCH)
-            mInputStrategy = new InputStrategyInterface.SimulatedTouchInputStrategy(mRenderData, mInjector, mActivity);
-        else
-            mInputStrategy = new InputStrategyInterface.TrackpadInputStrategy(mInjector);
+        mInputStrategy = mModeTracker.update(inputMode, () -> { mIsDragging = false; if (LorieView.connected()) mInjector.releaseAll(); },
+                mode -> mode == InputMode.TOUCH ? new InputStrategyInterface.NullInputStrategy()
+                        : mode == InputMode.SIMULATED_TOUCH ? new InputStrategyInterface.SimulatedTouchInputStrategy(mRenderData, mInjector, mActivity)
+                        : new InputStrategyInterface.TrackpadInputStrategy(mInjector));
     }
 
     public void setCapturingEnabled(boolean enabled) {
