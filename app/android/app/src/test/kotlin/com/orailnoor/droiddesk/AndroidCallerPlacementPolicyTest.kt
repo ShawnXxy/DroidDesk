@@ -2223,32 +2223,68 @@ class AndroidCallerPlacementPolicyTest {
 
         // Complete the restart; an item whose status read started before restart (running = false snapshot)
         // sees hasRunningSession == true and passes startSession = false with null epoch!
+        // Complete the restart; items whose status probe ran before/during teardown (both stale snapshot and
+        // failed teardown IOException) rejoin the recovered session using coordinator's current mode, desktop, and epoch!
         stopCompletion!!.invoke(Result.success(Unit))
         localHost.running = true
         localHost.attachLatest(local)
-        local.sessionStarted(localHost.launches.last().sessionGeneration, Result.success(Unit))
-        var postRestartOutcome: Triple<FakeStatus, Boolean, Long?>? = null
-        resolveDesktopItemStatus(
-            expectedEpoch = runningEpoch,
+        val recoveredTntEpoch = localHost.launches.last().sessionGeneration
+        local.sessionStarted(recoveredTntEpoch, Result.success(Unit))
+        val expectedRecoveredSpec = InFlightDesktopOpenSpec(
+            local.sessionMode,
+            local.desktopEnv,
+            startSession = false,
+            expectedEpoch = recoveredTntEpoch,
+        )
+        val postRestartRejoined = mutableListOf<InFlightDesktopOpenSpec>()
+        listOf(
+            Result.success(FakeStatus(running = false, desktop = "stale-de")),
+            Result.failure(IOException("teardown closed runtime during status")),
+        ).forEach { staleProbeResult ->
+            resolveDesktopItemStatus(
+                expectedEpoch = runningEpoch,
+                isSessionCurrent = local::isSessionCurrent,
+                status = staleProbeResult,
+                isStatusRunning = FakeStatus::running,
+                sessionLive = isDesktopItemSessionLive(
+                    runningStopGen,
+                    local.userStopGeneration,
+                    local.isStopped,
+                    local.isRestarting,
+                ),
+                hasRunningSession = local.hasRunningSession,
+                isRestarting = local.isRestarting,
+                inFlightOpen = local::inFlightOpenSpec,
+                currentRunningOpen = {
+                    InFlightDesktopOpenSpec(local.sessionMode, local.desktopEnv, false, local.sessionGeneration)
+                },
+                onInFlight = { postRestartRejoined += it },
+                onReady = { _, _, _ -> error("stale epoch after completed restart must rejoin recovered session") },
+                onFailure = { error("stale teardown probe failure after completed restart must rejoin: $it") },
+            )
+        }
+        assertEquals(listOf(expectedRecoveredSpec, expectedRecoveredSpec), postRestartRejoined)
+
+        // Genuine status failure on a CURRENT running epoch still forwards the probe error to onFailure!
+        val currentRunningProbeError = IOException("runtime socket broken")
+        val currentRunningProbeFailures = mutableListOf<Throwable>()
+        resolveDesktopItemStatus<FakeStatus>(
+            expectedEpoch = recoveredTntEpoch,
             isSessionCurrent = local::isSessionCurrent,
-            status = Result.success(FakeStatus(running = false)),
+            status = Result.failure(currentRunningProbeError),
             isStatusRunning = FakeStatus::running,
-            sessionLive = isDesktopItemSessionLive(
-                runningStopGen,
-                local.userStopGeneration,
-                local.isStopped,
-                local.isRestarting,
-            ),
+            sessionLive = true,
             hasRunningSession = local.hasRunningSession,
             isRestarting = local.isRestarting,
             inFlightOpen = local::inFlightOpenSpec,
-            onInFlight = { error("restart already settled") },
-            onReady = { status, startSession, epoch ->
-                postRestartOutcome = Triple(status, startSession, epoch)
+            currentRunningOpen = {
+                InFlightDesktopOpenSpec(local.sessionMode, local.desktopEnv, false, local.sessionGeneration)
             },
-            onFailure = { error("completed restart must proceed: $it") },
+            onInFlight = { error("current-epoch probe error must not mask failure") },
+            onReady = { _, _, _ -> error("failed probe must not call onReady") },
+            onFailure = { currentRunningProbeFailures += it },
         )
-        assertEquals(Triple(FakeStatus(running = false), false, null), postRestartOutcome)
+        assertSame(currentRunningProbeError, currentRunningProbeFailures.single())
 
         // 2b. Failed preserveRestart during status() (hasRunningSession == false, inFlightOpenSpec() == null,
         //     sessionFailure == DISPLAY_UNAVAILABLE) rejects superseded epoch with SESSION_STOPPED instead of onReady!

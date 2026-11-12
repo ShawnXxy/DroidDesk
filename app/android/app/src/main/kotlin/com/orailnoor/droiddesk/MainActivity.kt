@@ -116,12 +116,16 @@ internal fun isDesktopItemSessionLive(initialStopGeneration: Long, currentUserSt
 internal fun <S> resolveDesktopItemStatus(
     expectedEpoch: Long, isSessionCurrent: (Long) -> Boolean, status: Result<S>, isStatusRunning: (S) -> Boolean,
     sessionLive: Boolean, hasRunningSession: Boolean = false, isRestarting: Boolean = false, provisioningInFlight: Boolean = false,
-    inFlightOpen: () -> InFlightDesktopOpenSpec?, onInFlight: (InFlightDesktopOpenSpec) -> Unit, onReady: (S, Boolean, Long?) -> Unit, onFailure: (Throwable) -> Unit,
+    inFlightOpen: () -> InFlightDesktopOpenSpec?, currentRunningOpen: (() -> InFlightDesktopOpenSpec)? = null,
+    onInFlight: (InFlightDesktopOpenSpec) -> Unit, onReady: (S, Boolean, Long?) -> Unit, onFailure: (Throwable) -> Unit,
 ) {
     if (!sessionLive || provisioningInFlight) return onFailure(DesktopDisplayException("SESSION_STOPPED", "The session was stopped before the asynchronous desktop action completed"))
     inFlightOpen()?.let { onInFlight(it); return }
     val currentEpoch = expectedEpoch.takeIf(isSessionCurrent)
-    if (currentEpoch == null && !hasRunningSession) return onFailure(DesktopDisplayException("SESSION_STOPPED", "The session was stopped before the asynchronous desktop action completed"))
+    if (currentEpoch == null) {
+        if (hasRunningSession && currentRunningOpen != null) return onInFlight(currentRunningOpen())
+        if (!hasRunningSession) return onFailure(DesktopDisplayException("SESSION_STOPPED", "The session was stopped before the asynchronous desktop action completed"))
+    }
     status.fold({ onReady(it, !isStatusRunning(it) && !hasRunningSession && !isRestarting, currentEpoch) }, onFailure)
 }
 
@@ -1052,12 +1056,9 @@ class MainActivity : FlutterActivity() {
                                     runOnUiThread {
                                         resolveDesktopItemStatus(itemAdmission.expectedEpoch, displays::isSessionCurrent, status, { it.running },
                                             isDesktopItemSessionLive(stopGeneration, displays.userStopGeneration, displays.isStopped, displays.isRestarting), displays.hasRunningSession, displays.isRestarting, isProvisioningActive(displays), displays::inFlightOpenSpec,
+                                            { InFlightDesktopOpenSpec(displays.sessionMode, displays.desktopEnv, false, displays.sessionGeneration) },
                                             { launchDesktopItemAfterOpen(kind, id, reply, it.mode, it.desktopEnv, it.startSession, it.expectedEpoch, stopGeneration) },
-                                            { ready, startSession, epoch ->
-                                                val mode = if (epoch == null && displays.hasRunningSession) displays.sessionMode else ready.kind.sessionMode
-                                                val desktop = if (epoch == null && displays.hasRunningSession) displays.desktopEnv else ready.desktop
-                                                launchDesktopItemAfterOpen(kind, id, reply, mode, desktop, startSession, epoch, stopGeneration)
-                                            },
+                                            { ready, startSession, epoch -> launchDesktopItemAfterOpen(kind, id, reply, ready.kind.sessionMode, ready.desktop, startSession, epoch, stopGeneration) },
                                             { displayFailure(it, reply) })
                                     }
                                 }
