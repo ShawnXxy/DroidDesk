@@ -47,7 +47,7 @@ import com.orailnoor.droiddesk.packages.ProcessPackageStoreRegistry
 import com.orailnoor.droiddesk.packages.toWireMap
 
 internal fun forwardResolvedDesktopOpen(
-    currentDisplayId: Int,
+    currentDisplayId: Int?,
     mode: String,
     desktopEnv: String,
     startSession: Boolean,
@@ -57,6 +57,7 @@ internal fun forwardResolvedDesktopOpen(
     requestOpen: (DesktopOpenRequest, () -> Unit, (Result<Unit>) -> Unit) -> Unit,
     completion: (Result<Unit>) -> Unit,
 ) {
+    if (currentDisplayId == null) return completion(Result.failure(DesktopDisplayException("DISPLAY_UNAVAILABLE", "The app window has no current display")))
     requestOpen(
         DesktopOpenRequest(currentDisplayId, mode, desktopEnv, startSession, expectedEpoch),
         { if (startSession || isRestarting()) startService() },
@@ -73,13 +74,40 @@ internal fun deferResolvedDesktopOpenIfNeeded(
     deferUntilAttached: (() -> Unit) -> Unit,
     retry: (Long?) -> Unit,
     cancel: () -> Unit,
+    userStopGeneration: Long = 0L, currentUserStopGeneration: () -> Long = { userStopGeneration },
+    isRestarting: () -> Boolean = { false }, currentSessionGeneration: () -> Long = { sessionGeneration },
+    hasRunningSession: () -> Boolean = { false },
+    hasInFlightOpen: () -> Boolean = { false }, isProvisioningActive: () -> Boolean = { false },
 ): Boolean {
     if (isAttached) return false
-    val deferredEpoch = expectedEpoch ?: sessionGeneration.takeUnless { isStopped }
+    val wasRestarting = isRestarting()
+    val deferredEpoch = expectedEpoch ?: sessionGeneration.takeUnless { isStopped && !wasRestarting && !hasRunningSession() }
     deferUntilAttached {
-        if (deferredEpoch == null || isSessionCurrent(deferredEpoch)) retry(deferredEpoch) else cancel()
+        val userStopped = currentUserStopGeneration() != userStopGeneration
+        when {
+            !userStopped && isRestarting() -> retry(if (deferredEpoch == null || isSessionCurrent(deferredEpoch)) deferredEpoch else currentSessionGeneration())
+            !userStopped && (deferredEpoch == null || isSessionCurrent(deferredEpoch) || (hasRunningSession() && deferredEpoch == currentSessionGeneration())) -> retry(deferredEpoch)
+            !userStopped && !isProvisioningActive() && (hasInFlightOpen() || (expectedEpoch == null && hasRunningSession())) -> retry(expectedEpoch)
+            !userStopped && wasRestarting -> retry(null)
+            else -> cancel()
+        }
     }
     return true
+}
+
+internal data class ProvisioningOpenCallbacks(val startService: () -> Unit, val onCompletion: (Result<Unit>) -> Unit)
+internal fun provisioningOpenCallbacks(epoch: Long, startForegroundService: () -> Unit, completeProvisioning: (Long) -> Unit, failProvisioning: (Long, Throwable) -> Unit) =
+    ProvisioningOpenCallbacks({ startForegroundService(); completeProvisioning(epoch) }) { it.exceptionOrNull()?.let { err -> failProvisioning(epoch, err) } ?: completeProvisioning(epoch) }
+
+internal fun userStopLaunchReply(result: MethodChannel.Result, coordinator: DesktopDisplayCoordinator): MethodChannel.Result {
+    val stopGeneration = coordinator.userStopGeneration; val completed = java.util.concurrent.atomic.AtomicBoolean(false); var unsubscribe: () -> Unit = {}
+    fun settle(block: () -> Unit) { if (completed.compareAndSet(false, true)) { unsubscribe(); block() } }
+    unsubscribe = coordinator.subscribe { if (it["phase"] == "stopped" && coordinator.userStopGeneration != stopGeneration) settle { result.error("SESSION_STOPPED", "The session stopped before launch completed", null) } }
+    return object : MethodChannel.Result {
+        override fun success(value: Any?) = settle { result.success(value) }
+        override fun error(code: String, message: String?, details: Any?) = settle { result.error(code, message, details) }
+        override fun notImplemented() = settle { result.notImplemented() }
+    }
 }
 
 internal fun shouldDeferResolvedDesktopOpen(
@@ -87,6 +115,9 @@ internal fun shouldDeferResolvedDesktopOpen(
     isAttached: Boolean,
     allowsManualMoves: Boolean,
 ): Boolean = !isAttached && (displayId == null || !allowsManualMoves)
+
+internal fun resolveDeferredOpenStart(start: Boolean, wasRestarting: Boolean, isRestarting: Boolean, hasRunningSession: Boolean): Boolean =
+    if (wasRestarting && !isRestarting) !hasRunningSession else start && (!hasRunningSession || isRestarting)
 
 internal class AsyncDesktopAdmission(
     val expectedEpoch: Long,
@@ -107,7 +138,7 @@ internal class AsyncDesktopAdmission(
 
 internal fun settleProvisioningStartFailure(
     epoch: Long, error: RuntimeException, isSessionCurrent: (Long) -> Boolean,
-    settleSession: (Long, Result<Unit>) -> Unit, reportFailure: (DesktopDisplayException) -> Unit,
+    settleSession: (Long, Result<Unit>) -> Unit = { _, _ -> }, reportFailure: (DesktopDisplayException) -> Unit,
 ) {
     val failure = error as? DesktopDisplayException ?: DesktopDisplayException("DISPLAY_NOT_ALLOWED",
         if (error is SecurityException) "Android denied starting the Linux service"
@@ -144,6 +175,7 @@ class MainActivity : FlutterActivity() {
         const val ACTION_OPEN_DESKTOP = "com.orailnoor.droiddesk.action.OPEN_DESKTOP"
         const val ACTION_RETURN_TO_PHONE = "com.orailnoor.droiddesk.action.RETURN_TO_PHONE"
         private val activityCreatedInProcess = java.util.concurrent.atomic.AtomicBoolean(false)
+        private val provisioningEpoch = java.util.concurrent.atomic.AtomicLong(0L)
     }
 
     /** Icon lookups may download from the network; cap concurrency so a long list doesn't time out. */
@@ -278,7 +310,7 @@ class MainActivity : FlutterActivity() {
         desktopIntegration = DesktopIntegration(this)
         DesktopDisplayCoordinator.shared.initialize(applicationContext)
         DesktopDisplayCoordinator.shared.bindActivity(this)
-        if (DesktopDisplayCoordinator.shared.isDisplayLocal) {
+        if (!DesktopDisplayCoordinator.shared.allowsManualMoves) {
             window.decorView.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ ->
                 DesktopDisplayCoordinator.shared.observeActivityEnvironment(this, DesktopDisplayCoordinator.shared.sessionGeneration)
             }
@@ -292,16 +324,18 @@ class MainActivity : FlutterActivity() {
             if (intent.getBooleanExtra("autoSetup", false)) {
                 runAutoChrootSetup()
             }
-            handleHomeLaunch(intent)
-            if (!intent.getBooleanExtra("autoSetup", false)) maybeAutoStartDesktop(intent)
+            if (!intent.getBooleanExtra("autoSetup", false)) { handleHomeLaunch(intent); maybeAutoStartDesktop(intent) }
         }
         window.decorView.post {
             if (!isDestroyed && !isFinishing) maybeAutoStartExternalDesktop()
         }
     }
 
+    private fun isProvisioningActive(coordinator: DesktopDisplayCoordinator) = provisioningEpoch.get().let { it > 0L && coordinator.isSessionCurrent(it) }
+
     private fun maybeAutoStartExternalDesktop() {
         val coordinator = DesktopDisplayCoordinator.shared
+        if (isProvisioningActive(coordinator)) return
         val displayId = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             display?.displayId ?: window.decorView.display?.displayId
         } else {
@@ -326,6 +360,7 @@ class MainActivity : FlutterActivity() {
         // Home presses and the notification's Open action already launch the desktop.
         val isHomeLaunch = launchIntent.action == Intent.ACTION_MAIN && launchIntent.hasCategory(Intent.CATEGORY_HOME)
         if (isHomeLaunch || launchIntent.action == ACTION_OPEN_DESKTOP || launchIntent.action == ACTION_RETURN_TO_PHONE) return
+        if (isProvisioningActive(DesktopDisplayCoordinator.shared)) return
         val prefs = getSharedPreferences("FlutterSharedPreferences", Context.MODE_PRIVATE)
         if (!DesktopDisplayCoordinator.shared.placementDiagnostics().allowsManualMoves) return
         val autoStart = prefs.getBoolean("flutter.autoStartDesktop", false)
@@ -369,6 +404,7 @@ class MainActivity : FlutterActivity() {
     }
 
     override fun onDestroy() {
+        pendingAttachCancellations.toList().also { pendingAttachCancellations.clear() }.forEach { it() }
         packageStoreSubscriberId?.let(packageStoreManager::unsubscribe)
         packageStoreSubscriberId = null
         DesktopDisplayCoordinator.shared.unbindActivity(this)
@@ -438,10 +474,11 @@ class MainActivity : FlutterActivity() {
             coordinator.moveToPhone { outcome -> outcome.exceptionOrNull()?.let { displayFailure(it) } }
             return
         }
-        if (coordinator.isStarting || coordinator.isRestarting) {
-            launchPreparedDesktop(coordinator.sessionGeneration, null)
+        coordinator.inFlightOpenSpec()?.let {
+            requestResolvedDesktopOpen(it.mode, it.desktopEnv, it.startSession, expectedEpoch = it.expectedEpoch)
             return
         }
+        if (isProvisioningActive(coordinator)) return
         if (readDesktopRuntimeStatus(environmentManager::status, ::displayFailure)?.running ?: return) {
             requestResolvedDesktopOpen(
                 coordinator.sessionMode,
@@ -470,12 +507,7 @@ class MainActivity : FlutterActivity() {
 
             runOnUiThread {
                 admission.current().exceptionOrNull()?.let { displayFailure(it); return@runOnUiThread }
-                requestDesktop(
-                    status.kind.sessionMode,
-                    status.desktop,
-                    !status.running,
-                    expectedEpoch = epoch,
-                )
+                requestResolvedDesktopOpen(status.kind.sessionMode, status.desktop, !status.running, expectedEpoch = epoch)
             }
         }
     }
@@ -485,17 +517,24 @@ class MainActivity : FlutterActivity() {
      * the chroot desktop without any Flutter UI interaction.
      */
     private fun runAutoChrootSetup() {
+        val coordinator = DesktopDisplayCoordinator.shared
+        coordinator.inFlightOpenSpec()?.takeIf { it.mode == "chroot" && it.desktopEnv == "xfce4" }?.let {
+            requestResolvedDesktopOpen(it.mode, it.desktopEnv, it.startSession, expectedEpoch = it.expectedEpoch); return
+        }
+        if (isProvisioningActive(coordinator)) return
         val epoch = try {
-            DesktopDisplayCoordinator.shared.beginSession()
+            coordinator.beginSession()
         } catch (error: DesktopDisplayException) {
             displayFailure(error)
             return
         }
-        val admission = AsyncDesktopAdmission(epoch, DesktopDisplayCoordinator.shared::isSessionCurrent)
+        provisioningEpoch.set(epoch)
+        val admission = AsyncDesktopAdmission(epoch, coordinator::isSessionCurrent)
         thread(name = "auto-chroot-setup") {
             try {
                 Log.i(TAG, "Auto-setup: checking root...")
                 if (!admission.cross(chrootRuntime::hasRoot).getOrThrow()) {
+                    provisioningEpoch.compareAndSet(epoch, 0L)
                     runOnUiThread {
                         if (admission.current().isSuccess)
                             Toast.makeText(this, "Auto-setup requires root", Toast.LENGTH_LONG).show()
@@ -556,11 +595,12 @@ class MainActivity : FlutterActivity() {
                 val startSession = !admission.cross(chrootRuntime::isRunning).getOrThrow()
                 runOnUiThread {
                     admission.current().onSuccess {
-                        DroidDeskService.completeProvisioning(epoch)
-                        requestDesktop("chroot", "xfce4", startSession, expectedEpoch = epoch)
-                    }.onFailure { DroidDeskService.failProvisioning(epoch, it) }
+                        val callbacks = provisioningOpenCallbacks(epoch, ::startForegroundService, { provisioningEpoch.compareAndSet(it, 0L); DroidDeskService.completeProvisioning(it) }, { id, err -> provisioningEpoch.compareAndSet(id, 0L); DroidDeskService.failProvisioning(id, err) })
+                        requestResolvedDesktopOpen("chroot", "xfce4", startSession, expectedEpoch = epoch, startService = callbacks.startService, onCompletion = callbacks.onCompletion)
+                    }.onFailure { provisioningEpoch.compareAndSet(epoch, 0L); DroidDeskService.failProvisioning(epoch, it) }
                 }
             } catch (e: Exception) {
+                provisioningEpoch.compareAndSet(epoch, 0L)
                 val reported = admission.current().exceptionOrNull() ?: e
                 Log.e(TAG, "Auto-setup failed", reported)
                 DroidDeskService.failProvisioning(epoch, reported)
@@ -1107,8 +1147,14 @@ class MainActivity : FlutterActivity() {
 
                 // ── Start Linux session ──
                 "startLinux" -> {
-                    val startReply = DesktopLaunchReply(result, displays)
+                    val startReply = userStopLaunchReply(result, displays)
                     val desktopEnv = call.argument<String>("de") ?: "xfce4"
+                    val inFlight = displays.inFlightOpenSpec()
+                    if (inFlight != null && inFlight.desktopEnv == desktopEnv) {
+                        requestResolvedDesktopOpen(inFlight.mode, desktopEnv, inFlight.startSession, startReply, expectedEpoch = inFlight.expectedEpoch)
+                        return@setMethodCallHandler
+                    }
+                    if (isProvisioningActive(displays)) { displayFailure(DesktopDisplayException("INVALID_ARGUMENT", "Linux desktop is still provisioning"), startReply); return@setMethodCallHandler }
                     val status = readDesktopRuntimeStatus(environmentManager::status) {
                         displayFailure(it, startReply)
                     } ?: return@setMethodCallHandler
@@ -1118,24 +1164,23 @@ class MainActivity : FlutterActivity() {
                         requestResolvedDesktopOpen(
                             environmentKind.sessionMode,
                             desktopEnv,
-                            !status.running,
+                            !status.running && !displays.isRestarting,
                             startReply,
+                            expectedEpoch = displays.sessionGeneration.takeIf { displays.isRestarting },
                         )
                         return@setMethodCallHandler
                     }
                     val epoch = try {
-                        displays.prepareSession(
-                            environmentKind.sessionMode,
-                            desktopEnv,
-                            !status.running,
-                        )
+                        displays.beginSession()
                     } catch (error: DesktopDisplayException) {
                         displayFailure(error, startReply)
                         return@setMethodCallHandler
                     }
+                    provisioningEpoch.set(epoch)
                     val admission = AsyncDesktopAdmission(epoch, displays::isSessionCurrent)
                     try { DroidDeskService.beginProvisioning(this, epoch, "Preparing Linux desktop") } catch (error: RuntimeException) {
-                        settleProvisioningStartFailure(epoch, error, displays::isSessionCurrent, displays::sessionStarted) { displayFailure(it, startReply) }
+                        provisioningEpoch.compareAndSet(epoch, 0L)
+                        settleProvisioningStartFailure(epoch, error, displays::isSessionCurrent) { displayFailure(it, startReply) }
                         return@setMethodCallHandler
                     }
                     installThread("prepare-linux-environment") {
@@ -1159,18 +1204,18 @@ class MainActivity : FlutterActivity() {
                                 ).getOrThrow()
                             }.getOrThrow()
                             runOnUiThread {
-                                admission.current()
-                                    .onSuccess { DroidDeskService.completeProvisioning(epoch); launchPreparedDesktop(epoch, startReply) }
-                                    .onFailure { DroidDeskService.failProvisioning(epoch, it); displayFailure(it, startReply) }
+                                admission.current().onSuccess {
+                                    val callbacks = provisioningOpenCallbacks(epoch, ::startForegroundService, { provisioningEpoch.compareAndSet(it, 0L); DroidDeskService.completeProvisioning(it) }, { id, err -> provisioningEpoch.compareAndSet(id, 0L); DroidDeskService.failProvisioning(id, err) })
+                                    requestResolvedDesktopOpen(environmentKind.sessionMode, desktopEnv, true, startReply, expectedEpoch = epoch, startService = callbacks.startService, onCompletion = callbacks.onCompletion)
+                                }.onFailure { provisioningEpoch.compareAndSet(epoch, 0L); DroidDeskService.failProvisioning(epoch, it); displayFailure(it, startReply) }
                             }
                         } catch (error: Exception) {
+                            provisioningEpoch.compareAndSet(epoch, 0L)
                             val currentError = admission.current().exceptionOrNull() ?: error
                             Log.e(TAG, "Linux environment preparation failed", currentError)
                             DroidDeskService.failProvisioning(epoch, currentError)
                             runOnUiThread {
-                                val stale = admission.current().exceptionOrNull()
-                                if (stale == null) displays.sessionStarted(epoch, Result.failure(error))
-                                val reported = stale ?: currentError
+                                val reported = admission.current().exceptionOrNull() ?: currentError
                                 startReply.error(
                                     (reported as? DesktopDisplayException)?.code ?: "SESSION_STOPPED",
                                     reported.message,
@@ -1182,6 +1227,7 @@ class MainActivity : FlutterActivity() {
                 }
 
                 "launchDesktopActivity" -> {
+                    if (isProvisioningActive(displays)) { displayFailure(DesktopDisplayException("INVALID_ARGUMENT", "Linux desktop is still provisioning"), result); return@setMethodCallHandler }
                     val status = readDesktopRuntimeStatus(environmentManager::status) {
                         displayFailure(it, result)
                     } ?: return@setMethodCallHandler
@@ -1343,8 +1389,15 @@ class MainActivity : FlutterActivity() {
         result: MethodChannel.Result? = null,
         expectedEpoch: Long? = null,
         currentDisplayId: Int? = null,
+        startService: () -> Unit = ::startForegroundService,
+        onCompletion: ((Result<Unit>) -> Unit)? = null,
     ) {
+        val finish: (Result<Unit>) -> Unit = { outcome ->
+            onCompletion?.invoke(outcome)
+            outcome.exceptionOrNull()?.let { displayFailure(it, result) } ?: result?.success(true)
+        }
         val coordinator = DesktopDisplayCoordinator.shared
+        val wasRestarting = coordinator.isRestarting
         val decorView = window.decorView
         val displayId = currentDisplayId ?: if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             display?.displayId ?: decorView.display?.displayId
@@ -1355,64 +1408,60 @@ class MainActivity : FlutterActivity() {
         } else {
             null
         }
-        if (shouldDeferResolvedDesktopOpen(
-                displayId,
-                decorView.isAttachedToWindow,
-                coordinator.placementDiagnostics(displayId).allowsManualMoves,
-            ) && deferResolvedDesktopOpenIfNeeded(
+        val needsAttach = shouldDeferResolvedDesktopOpen(displayId, decorView.isAttachedToWindow, coordinator.placementDiagnostics(displayId).allowsManualMoves)
+        if (needsAttach && (isFinishing || isDestroyed)) return finish(Result.failure(DesktopDisplayException("DISPLAY_UNAVAILABLE", "The app window is no longer available")))
+        if (needsAttach && deferResolvedDesktopOpenIfNeeded(
                 isAttached = decorView.isAttachedToWindow,
                 expectedEpoch = expectedEpoch,
                 sessionGeneration = coordinator.sessionGeneration,
                 isStopped = coordinator.isStopped,
                 isSessionCurrent = coordinator::isSessionCurrent,
                 deferUntilAttached = { retry ->
-                    decorView.addOnAttachStateChangeListener(
-                        object : android.view.View.OnAttachStateChangeListener {
-                            override fun onViewAttachedToWindow(view: android.view.View) {
-                                view.removeOnAttachStateChangeListener(this)
-                                retry()
-                            }
+                    var abortOnDestroy: () -> Unit = {}
+                    val listener = object : android.view.View.OnAttachStateChangeListener {
+                        override fun onViewAttachedToWindow(view: android.view.View) {
+                            pendingAttachCancellations.remove(abortOnDestroy); view.removeOnAttachStateChangeListener(this); retry()
+                        }
 
-                            override fun onViewDetachedFromWindow(view: android.view.View) = Unit
-                        },
-                    )
+                        override fun onViewDetachedFromWindow(view: android.view.View) = Unit
+                    }
+                    abortOnDestroy = { decorView.removeOnAttachStateChangeListener(listener); finish(Result.failure(DesktopDisplayException("DISPLAY_UNAVAILABLE", "The app window was destroyed before launch"))) }
+                    pendingAttachCancellations += abortOnDestroy; decorView.addOnAttachStateChangeListener(listener)
                 },
                 retry = { deferredEpoch ->
                     requestResolvedDesktopOpen(
                         mode = mode,
                         desktop = desktop,
-                        start = start,
+                        start = resolveDeferredOpenStart(start, wasRestarting, coordinator.isRestarting, coordinator.hasRunningSession),
                         result = result,
                         expectedEpoch = deferredEpoch,
+                        startService = startService,
+                        onCompletion = onCompletion,
                     )
                 },
                 cancel = {
-                    displayFailure(
-                        DesktopDisplayException("SESSION_STOPPED", "The session was stopped before launch"),
-                        result,
-                    )
+                    finish(Result.failure(DesktopDisplayException("SESSION_STOPPED", "The session was stopped before launch")))
                 },
+                userStopGeneration = coordinator.userStopGeneration,
+                currentUserStopGeneration = { coordinator.userStopGeneration },
+                isRestarting = { coordinator.isRestarting },
+                currentSessionGeneration = { coordinator.sessionGeneration },
+                hasRunningSession = { coordinator.hasRunningSession },
+                hasInFlightOpen = { coordinator.inFlightOpenSpec() != null },
+                isProvisioningActive = { isProvisioningActive(coordinator) },
             )
         ) return
-        if (displayId == null) {
-            displayFailure(
-                DesktopDisplayException("DISPLAY_UNAVAILABLE", "The app window has no current display"),
-                result,
-            )
-            return
-        }
         forwardResolvedDesktopOpen(
             currentDisplayId = displayId,
             mode = mode,
             desktopEnv = desktop,
             startSession = start,
             expectedEpoch = expectedEpoch,
-            startService = ::startForegroundService,
+            startService = startService,
             isRestarting = { coordinator.isRestarting },
             requestOpen = coordinator::requestOpen,
-        ) { outcome ->
-            outcome.exceptionOrNull()?.let { displayFailure(it, result) } ?: result?.success(true)
-        }
+            completion = finish,
+        )
     }
 
     private fun openDesktop(startSession: Boolean, expectedEpoch: Long? = null) {
@@ -1601,6 +1650,7 @@ class MainActivity : FlutterActivity() {
 
     // ── Install wake lock ──
 
+    private val pendingAttachCancellations = mutableListOf<() -> Unit>()
     private val installOperations = java.util.concurrent.atomic.AtomicInteger(0)
     private val installWakeLock by lazy {
         (getSystemService(POWER_SERVICE) as android.os.PowerManager)
