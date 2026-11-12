@@ -6,13 +6,17 @@ import com.orailnoor.droiddesk.display.DesktopDisplayException
 import com.orailnoor.droiddesk.display.DesktopDisplayHost
 import com.orailnoor.droiddesk.display.DesktopLaunchReply
 import com.orailnoor.droiddesk.display.DesktopLaunchRequest
+import com.orailnoor.droiddesk.display.InFlightDesktopOpenSpec
+import com.orailnoor.droiddesk.display.PixelSize
 import com.orailnoor.droiddesk.display.ProfileKind
+import com.orailnoor.droiddesk.display.RendererClaim
 import com.orailnoor.droiddesk.display.capability.PlacementMode
 import com.orailnoor.droiddesk.display.placement.DesktopOpenRequest
 import com.orailnoor.droiddesk.display.placement.DisplayLocalRestartAdapter
 import com.orailnoor.droiddesk.display.placement.MovableSecondaryDisplayAdapter
 import com.orailnoor.droiddesk.display.placement.PlacementSelection
 import com.orailnoor.droiddesk.display.placement.PlacementSelectionSource
+import com.orailnoor.droiddesk.service.ProvisioningNotificationState
 import io.flutter.plugin.common.MethodChannel
 import java.io.File
 import java.io.IOException
@@ -615,10 +619,1247 @@ class AndroidCallerPlacementPolicyTest {
             scopes.getValue("resolved open adapter").contains("deferResolvedDesktopOpenIfNeeded("),
         )
         val homeLaunch = functionBody(source, "private fun handleHomeLaunch(homeIntent: Intent)")
+        val readyStart = scopes.getValue("ready runtime start")
         assertTrue(
-            "coordinator transitions must retain the legacy recovery path before runtime-running opens",
-            homeLaunch.indexOf("if (coordinator.isStarting || coordinator.isRestarting)") <
+            "coordinator transitions must short-circuit via inFlightOpenSpec before runtime-running status probes",
+            homeLaunch.indexOf("coordinator.inFlightOpenSpec()") in 0 until
                 homeLaunch.indexOf("if (readDesktopRuntimeStatus("),
+        )
+        assertTrue(
+            "startLinux must coalesce matching in-flight opens via inFlightOpenSpec before probing status",
+            readyStart.indexOf("displays.inFlightOpenSpec()") in 0 until
+                readyStart.indexOf("readDesktopRuntimeStatus("),
+        )
+        assertTrue(
+            "startLinux ready branch must avoid starting a duplicate session while restarting",
+            readyStart.substringAfter("if (ready)").contains("!status.running && !displays.isRestarting"),
+        )
+    }
+
+    @Test
+    fun inFlightOpenSpecCoalescesIdenticalTransitionsAndForwardsChangedTargetsStatelessly() {
+        val phone = DesktopDisplay(0, "phone", "Phone", isDefault = true, eligible = true, null)
+        val hdmi = DesktopDisplay(2, "hdmi:2", "HDMI", isDefault = false, eligible = true, null)
+        val tnt = DesktopDisplay(100003, "tnt", "TNT", isDefault = false, eligible = true, null)
+
+        val movableHost = FakeCoordinatorHost(listOf(phone, hdmi)).apply {
+            currentDisplayId = hdmi.id
+            running = false
+        }
+        val movable = DesktopDisplayCoordinator(
+            host = movableHost,
+            placementStrategy = MovableSecondaryDisplayAdapter(
+                PlacementSelection(
+                    mode = PlacementMode.MOVABLE,
+                    source = PlacementSelectionSource.RUNTIME_EVIDENCE,
+                    allowAutomaticMoves = false,
+                    reason = "movable test",
+                    tntDisplayIds = setOf(100003),
+                ),
+            ),
+        )
+        assertNull(movable.inFlightOpenSpec())
+
+        var movableServiceStarts = 0
+        val firstStart = mutableListOf<Result<Unit>>()
+        val conflictingStart = mutableListOf<Result<Unit>>()
+        val coalescedStart = mutableListOf<Result<Unit>>()
+        val reservedStartEpoch = movable.beginSession()
+        assertNull(movable.inFlightOpenSpec())
+
+        forwardResolvedDesktopOpen(
+            currentDisplayId = hdmi.id,
+            mode = "proot",
+            desktopEnv = "xfce4",
+            startSession = true,
+            expectedEpoch = reservedStartEpoch,
+            startService = { movableServiceStarts++ },
+            isRestarting = { movable.isRestarting },
+            requestOpen = movable::requestOpen,
+            completion = firstStart::add,
+        )
+        val startingSpec = checkNotNull(movable.inFlightOpenSpec())
+        assertEquals(
+            InFlightDesktopOpenSpec("proot", "xfce4", startSession = true, expectedEpoch = null),
+            startingSpec,
+        )
+
+        // Different desktop/mode in ready branch forwards changed spec and is rejected without corrupting active open
+        forwardResolvedDesktopOpen(
+            currentDisplayId = phone.id,
+            mode = "chroot",
+            desktopEnv = "plasma",
+            startSession = true,
+            expectedEpoch = null,
+            startService = { movableServiceStarts++ },
+            isRestarting = { movable.isRestarting },
+            requestOpen = movable::requestOpen,
+            completion = conflictingStart::add,
+        )
+        assertEquals(
+            "INVALID_ARGUMENT",
+            (conflictingStart.single().exceptionOrNull() as DesktopDisplayException).code,
+        )
+
+        // Subsequent caller on phone display reads inFlightOpenSpec() and coalesces statelessly onto HDMI startup
+        val postRejectSpec = checkNotNull(movable.inFlightOpenSpec())
+        forwardResolvedDesktopOpen(
+            currentDisplayId = phone.id,
+            mode = postRejectSpec.mode,
+            desktopEnv = postRejectSpec.desktopEnv,
+            startSession = postRejectSpec.startSession,
+            expectedEpoch = postRejectSpec.expectedEpoch,
+            startService = { movableServiceStarts++ },
+            isRestarting = { movable.isRestarting },
+            requestOpen = movable::requestOpen,
+            completion = coalescedStart::add,
+        )
+        assertEquals(1, movableServiceStarts)
+        assertEquals(1, movableHost.launches.size)
+        movableHost.running = true
+        movableHost.attachLatest(movable)
+        movable.sessionStarted(movableHost.launches.single().sessionGeneration, Result.success(Unit))
+        assertTrue(firstStart.single().isSuccess)
+        assertTrue(coalescedStart.single().isSuccess)
+        assertNull(movable.inFlightOpenSpec())
+
+        // Running move coalesces statelessly via inFlightOpenSpec() without restarting service
+        movableHost.focusResult = false
+        movableHost.currentDisplayId = phone.id
+        val firstMove = mutableListOf<Result<Unit>>()
+        val coalescedMove = mutableListOf<Result<Unit>>()
+        forwardResolvedDesktopOpen(
+            currentDisplayId = phone.id,
+            mode = movable.sessionMode,
+            desktopEnv = movable.desktopEnv,
+            startSession = false,
+            expectedEpoch = movable.sessionGeneration,
+            startService = { movableServiceStarts++ },
+            isRestarting = { movable.isRestarting },
+            requestOpen = movable::requestOpen,
+            completion = firstMove::add,
+        )
+        val movingSpec = checkNotNull(movable.inFlightOpenSpec())
+        assertEquals(
+            InFlightDesktopOpenSpec("proot", "xfce4", startSession = false, expectedEpoch = movable.sessionGeneration),
+            movingSpec,
+        )
+        forwardResolvedDesktopOpen(
+            currentDisplayId = hdmi.id,
+            mode = movingSpec.mode,
+            desktopEnv = movingSpec.desktopEnv,
+            startSession = movingSpec.startSession,
+            expectedEpoch = movingSpec.expectedEpoch,
+            startService = { movableServiceStarts++ },
+            isRestarting = { movable.isRestarting },
+            requestOpen = movable::requestOpen,
+            completion = coalescedMove::add,
+        )
+        assertEquals(2, movableHost.launches.size)
+        movableHost.attachLatest(movable)
+        assertTrue(firstMove.single().isSuccess)
+        assertTrue(coalescedMove.single().isSuccess)
+        assertEquals(1, movableServiceStarts)
+        assertNull(movable.inFlightOpenSpec())
+
+        // Display-local restart: coalesces same display across teardown & starting, supersedes on display/environment change
+        val localHost = FakeCoordinatorHost(listOf(phone, tnt)).apply {
+            currentDisplayId = phone.id
+            running = true
+        }
+        var stopCompletion: ((Result<Unit>) -> Unit)? = null
+        var localStops = 0
+        lateinit var local: DesktopDisplayCoordinator
+        local = DesktopDisplayCoordinator(
+            host = localHost,
+            placementStrategy = DisplayLocalRestartAdapter(
+                PlacementSelection(
+                    mode = PlacementMode.DISPLAY_LOCAL,
+                    source = PlacementSelectionSource.DEVICE_QUIRK,
+                    allowAutomaticMoves = false,
+                    reason = "display-local test",
+                    tntDisplayIds = setOf(100003),
+                ),
+            ),
+            stopForEnvironmentChange = { completion ->
+                localStops++
+                local.stop(preserveRestart = true)
+                localHost.running = false
+                stopCompletion = completion
+            },
+        )
+        local.requestOpen(DesktopOpenRequest(phone.id, "termux", "xfce4", false, null), {}, {})
+        localHost.attachLatest(local)
+
+        localHost.currentDisplayId = tnt.id
+        var restartServiceStarts = 0
+        val tntFirst = mutableListOf<Result<Unit>>()
+        val tntCoalesced = mutableListOf<Result<Unit>>()
+        val tntChangedDesktop = mutableListOf<Result<Unit>>()
+        val phoneSuperseded = mutableListOf<Result<Unit>>()
+        val phoneCoalesced = mutableListOf<Result<Unit>>()
+
+        forwardResolvedDesktopOpen(
+            currentDisplayId = tnt.id,
+            mode = "proot",
+            desktopEnv = "xfce4",
+            startSession = true,
+            expectedEpoch = local.sessionGeneration,
+            startService = { restartServiceStarts++ },
+            isRestarting = { local.isRestarting },
+            requestOpen = local::requestOpen,
+            completion = tntFirst::add,
+        )
+        val teardownSpec = checkNotNull(local.inFlightOpenSpec())
+        assertEquals(
+            InFlightDesktopOpenSpec("proot", "xfce4", startSession = false, expectedEpoch = local.sessionGeneration),
+            teardownSpec,
+        )
+        forwardResolvedDesktopOpen(
+            currentDisplayId = tnt.id,
+            mode = teardownSpec.mode,
+            desktopEnv = teardownSpec.desktopEnv,
+            startSession = teardownSpec.startSession,
+            expectedEpoch = teardownSpec.expectedEpoch,
+            startService = { restartServiceStarts++ },
+            isRestarting = { local.isRestarting },
+            requestOpen = local::requestOpen,
+            completion = tntCoalesced::add,
+        )
+        assertTrue(tntFirst.isEmpty())
+        assertTrue(tntCoalesced.isEmpty())
+
+        // startLinux ready branch for a different desktop ("plasma") during restart forwards !running && !isRestarting = false
+        forwardResolvedDesktopOpen(
+            currentDisplayId = tnt.id,
+            mode = "proot",
+            desktopEnv = "plasma",
+            startSession = false,
+            expectedEpoch = local.sessionGeneration.takeIf { local.isRestarting },
+            startService = { restartServiceStarts++ },
+            isRestarting = { local.isRestarting },
+            requestOpen = local::requestOpen,
+            completion = tntChangedDesktop::add,
+        )
+        assertEquals("SESSION_STOPPED", (tntFirst.single().exceptionOrNull() as DesktopDisplayException).code)
+        assertEquals("SESSION_STOPPED", (tntCoalesced.single().exceptionOrNull() as DesktopDisplayException).code)
+        assertEquals("plasma", local.inFlightOpenSpec()?.desktopEnv)
+
+        // Caller on changed display (phone) forwards phone.id with inFlightOpenSpec() and supersedes TNT restart
+        localHost.currentDisplayId = phone.id
+        val changedDisplaySpec = checkNotNull(local.inFlightOpenSpec())
+        forwardResolvedDesktopOpen(
+            currentDisplayId = phone.id,
+            mode = changedDisplaySpec.mode,
+            desktopEnv = changedDisplaySpec.desktopEnv,
+            startSession = changedDisplaySpec.startSession,
+            expectedEpoch = changedDisplaySpec.expectedEpoch,
+            startService = { restartServiceStarts++ },
+            isRestarting = { local.isRestarting },
+            requestOpen = local::requestOpen,
+            completion = phoneSuperseded::add,
+        )
+        assertEquals("SESSION_STOPPED", (tntChangedDesktop.single().exceptionOrNull() as DesktopDisplayException).code)
+
+        stopCompletion!!.invoke(Result.success(Unit))
+        assertEquals(1, localStops)
+        val startingRestartSpec = checkNotNull(local.inFlightOpenSpec())
+        forwardResolvedDesktopOpen(
+            currentDisplayId = phone.id,
+            mode = startingRestartSpec.mode,
+            desktopEnv = startingRestartSpec.desktopEnv,
+            startSession = startingRestartSpec.startSession,
+            expectedEpoch = startingRestartSpec.expectedEpoch,
+            startService = { restartServiceStarts++ },
+            isRestarting = { local.isRestarting },
+            requestOpen = local::requestOpen,
+            completion = phoneCoalesced::add,
+        )
+        assertEquals(1, restartServiceStarts)
+        assertEquals(phone.id, localHost.launches.last().display.id)
+        assertEquals("plasma", localHost.launches.last().desktopEnv)
+        localHost.running = true
+        localHost.attachLatest(local)
+        local.sessionStarted(localHost.launches.last().sessionGeneration, Result.success(Unit))
+        assertTrue(phoneSuperseded.single().isSuccess)
+        assertTrue(phoneCoalesced.single().isSuccess)
+        assertNull(local.inFlightOpenSpec())
+    }
+
+    @Test
+    fun deferredResolvedOpenUsesUserStopGenerationAcrossPreserveRestartAndUserStop() {
+        // 1. Deferred during preserveRestart teardown (isStopped=true, isRestarting=true, userStopGeneration unchanged)
+        //    retries on attachment both while still in teardown (17L) and after advancing to startingRestart (18L).
+        var attachDuringTeardown: (() -> Unit)? = null
+        val teardownRetries = mutableListOf<Long?>()
+        var restarting = true
+        var stopped = true
+        var generation = 17L
+        var stopGen = 3L
+
+        assertTrue(
+            deferResolvedDesktopOpenIfNeeded(
+                isAttached = false,
+                expectedEpoch = 17L,
+                sessionGeneration = generation,
+                isStopped = stopped,
+                isSessionCurrent = { !stopped && it == generation },
+                deferUntilAttached = { attachDuringTeardown = it },
+                retry = teardownRetries::add,
+                cancel = { error("preserveRestart teardown must retry on attachment") },
+                userStopGeneration = stopGen,
+                currentUserStopGeneration = { stopGen },
+                isRestarting = { restarting },
+                currentSessionGeneration = { generation },
+            ),
+        )
+        attachDuringTeardown!!.invoke()
+        assertEquals(listOf<Long?>(17L), teardownRetries)
+
+        var attachDuringStartingRestart: (() -> Unit)? = null
+        val startingRetries = mutableListOf<Long?>()
+        assertTrue(
+            deferResolvedDesktopOpenIfNeeded(
+                isAttached = false,
+                expectedEpoch = 17L,
+                sessionGeneration = generation,
+                isStopped = stopped,
+                isSessionCurrent = { !stopped && it == generation },
+                deferUntilAttached = { attachDuringStartingRestart = it },
+                retry = startingRetries::add,
+                cancel = { error("active restart start must retry on attachment") },
+                userStopGeneration = stopGen,
+                currentUserStopGeneration = { stopGen },
+                isRestarting = { restarting },
+                currentSessionGeneration = { generation },
+            ),
+        )
+        stopped = false
+        generation = 18L
+        attachDuringStartingRestart!!.invoke()
+        assertEquals(listOf<Long?>(18L), startingRetries)
+
+        // 2. Restart finishes completely before attachment with userStopGeneration unchanged -> retries with null epoch
+        var attachAfterFinishedRestart: (() -> Unit)? = null
+        val finishedRetries = mutableListOf<Long?>()
+        stopped = true
+        restarting = true
+        generation = 21L
+        assertTrue(
+            deferResolvedDesktopOpenIfNeeded(
+                isAttached = false,
+                expectedEpoch = 21L,
+                sessionGeneration = generation,
+                isStopped = stopped,
+                isSessionCurrent = { !stopped && it == generation },
+                deferUntilAttached = { attachAfterFinishedRestart = it },
+                retry = finishedRetries::add,
+                cancel = { error("completed preserveRestart must retry on attachment") },
+                userStopGeneration = stopGen,
+                currentUserStopGeneration = { stopGen },
+                isRestarting = { restarting },
+                currentSessionGeneration = { generation },
+            ),
+        )
+        restarting = false
+        stopped = false
+        generation = 22L
+        attachAfterFinishedRestart!!.invoke()
+        assertEquals(listOf<Long?>(null), finishedRetries)
+
+        // 3. End-to-end against DesktopDisplayCoordinator: when inFlightOpenSpec() (startSession=false) is deferred
+        //    during preserveRestart teardown and the pending restart aborts before decorView attaches (either via
+        //    validateRestartTarget leaving isStopped=true or launch failure in startOnTarget leaving isStopped=false,
+        //    hasRunningSession=false), attachment retries with start=true and launches cleanly on the attached display.
+        val phone = DesktopDisplay(0, "phone", "Phone", isDefault = true, eligible = true, null)
+        val tnt = DesktopDisplay(100003, "tnt", "TNT", isDefault = false, eligible = true, null)
+        val localHost = FakeCoordinatorHost(listOf(phone, tnt)).apply {
+            currentDisplayId = phone.id
+            running = true
+        }
+        var stopCompletion: ((Result<Unit>) -> Unit)? = null
+        lateinit var local: DesktopDisplayCoordinator
+        local = DesktopDisplayCoordinator(
+            host = localHost,
+            placementStrategy = DisplayLocalRestartAdapter(
+                PlacementSelection(
+                    mode = PlacementMode.DISPLAY_LOCAL,
+                    source = PlacementSelectionSource.DEVICE_QUIRK,
+                    allowAutomaticMoves = false,
+                    reason = "deferred restart abort test",
+                    tntDisplayIds = setOf(100003),
+                ),
+            ),
+            stopForEnvironmentChange = { completion ->
+                local.stop(preserveRestart = true)
+                localHost.running = false
+                stopCompletion = completion
+            },
+        )
+        local.requestOpen(DesktopOpenRequest(phone.id, "proot", "xfce4", false, null), {}, {})
+        localHost.attachLatest(local)
+
+        // 3a. validateRestartTarget aborts TNT restart when unattached MainActivity binds on Phone (isStopped=true)
+        localHost.currentDisplayId = tnt.id
+        local.requestOpen(DesktopOpenRequest(tnt.id, "proot", "xfce4", true, local.sessionGeneration), {}, {})
+        val inFlightTeardown = checkNotNull(local.inFlightOpenSpec())
+        assertFalse(inFlightTeardown.startSession)
+        val wasRestartingA = local.isRestarting
+        val initialStopGenA = local.userStopGeneration
+        var pendingPhoneAttach: (() -> Unit)? = null
+        val phoneReplyOutcomes = mutableListOf<String>()
+        val phoneReply = userStopLaunchReply(
+            object : MethodChannel.Result {
+                override fun success(result: Any?) {
+                    phoneReplyOutcomes += "success:$result"
+                }
+                override fun error(errorCode: String, errorMessage: String?, errorDetails: Any?) {
+                    phoneReplyOutcomes += "error:$errorCode"
+                }
+                override fun notImplemented() = error("unexpected notImplemented")
+            },
+            local,
+        )
+        var phoneServiceStarts = 0
+        assertTrue(
+            deferResolvedDesktopOpenIfNeeded(
+                isAttached = false,
+                expectedEpoch = inFlightTeardown.expectedEpoch,
+                sessionGeneration = local.sessionGeneration,
+                isStopped = local.isStopped,
+                isSessionCurrent = local::isSessionCurrent,
+                deferUntilAttached = { pendingPhoneAttach = it },
+                retry = { deferredEpoch ->
+                    forwardResolvedDesktopOpen(
+                        currentDisplayId = phone.id,
+                        mode = inFlightTeardown.mode,
+                        desktopEnv = inFlightTeardown.desktopEnv,
+                        startSession = resolveDeferredOpenStart(
+                            inFlightTeardown.startSession,
+                            wasRestartingA,
+                            local.isRestarting,
+                            local.hasRunningSession,
+                        ),
+                        expectedEpoch = deferredEpoch,
+                        startService = {
+                            phoneServiceStarts++
+                            localHost.running = true
+                        },
+                        isRestarting = { local.isRestarting },
+                        requestOpen = local::requestOpen,
+                    ) { outcome ->
+                        outcome.exceptionOrNull()?.let { err ->
+                            phoneReply.error((err as? DesktopDisplayException)?.code ?: "DISPLAY_UNAVAILABLE", err.message, null)
+                        } ?: phoneReply.success(true)
+                    }
+                },
+                cancel = { error("aborted preserveRestart without user Stop must recover on attachment") },
+                userStopGeneration = initialStopGenA,
+                currentUserStopGeneration = { local.userStopGeneration },
+                isRestarting = { local.isRestarting },
+                currentSessionGeneration = { local.sessionGeneration },
+            ),
+        )
+        localHost.currentDisplayId = phone.id
+        stopCompletion!!.invoke(Result.success(Unit))
+        assertFalse(local.isRestarting)
+        assertTrue(local.isStopped)
+        assertFalse(local.hasRunningSession)
+        // Aborted preserveRestart published phase="stopped" without advancing userStopGeneration -> reply MUST stay open!
+        assertTrue(phoneReplyOutcomes.isEmpty())
+        pendingPhoneAttach!!.invoke()
+        assertEquals(1, phoneServiceStarts)
+        localHost.attachLatest(local)
+        local.sessionStarted(localHost.launches.last().sessionGeneration, Result.success(Unit))
+        assertEquals(listOf("success:true"), phoneReplyOutcomes)
+
+        // Attached caller on TNT when validateRestartTarget aborts receives DISPLAY_UNAVAILABLE (not clobbered by SESSION_STOPPED)
+        localHost.currentDisplayId = tnt.id
+        val attachedAbortCodes = mutableListOf<String>()
+        val attachedAbortReply = userStopLaunchReply(
+            object : MethodChannel.Result {
+                override fun success(result: Any?) = error("aborted restart must not succeed")
+                override fun error(errorCode: String, errorMessage: String?, errorDetails: Any?) {
+                    attachedAbortCodes += errorCode
+                }
+                override fun notImplemented() = error("unexpected notImplemented")
+            },
+            local,
+        )
+        local.requestOpen(DesktopOpenRequest(tnt.id, "proot", "xfce4", true, local.sessionGeneration), {}) { outcome ->
+            val err = outcome.exceptionOrNull() as DesktopDisplayException
+            attachedAbortReply.error(err.code, err.message, null)
+        }
+        localHost.currentDisplayId = phone.id
+        stopCompletion!!.invoke(Result.success(Unit))
+        assertEquals(listOf("DISPLAY_UNAVAILABLE"), attachedAbortCodes)
+        // Recover back onto phone before scenario 3b
+        local.requestOpen(DesktopOpenRequest(phone.id, "proot", "xfce4", true, null), { localHost.running = true }, {})
+        localHost.attachLatest(local)
+        local.sessionStarted(localHost.launches.last().sessionGeneration, Result.success(Unit))
+
+        // 3b. startOnTarget fails before decorView attaches (isStopped=false, isRestarting=false, hasRunningSession=false)
+        localHost.currentDisplayId = tnt.id
+        local.requestOpen(DesktopOpenRequest(tnt.id, "proot", "xfce4", true, local.sessionGeneration), {}, {})
+        val inFlightLaunchAbort = checkNotNull(local.inFlightOpenSpec())
+        val wasRestartingB = local.isRestarting
+        val initialStopGenB = local.userStopGeneration
+        var pendingTntAttach: (() -> Unit)? = null
+        val tntRecoveredOutcomes = mutableListOf<Result<Unit>>()
+        var tntServiceStarts = 0
+        assertTrue(
+            deferResolvedDesktopOpenIfNeeded(
+                isAttached = false,
+                expectedEpoch = inFlightLaunchAbort.expectedEpoch,
+                sessionGeneration = local.sessionGeneration,
+                isStopped = local.isStopped,
+                isSessionCurrent = local::isSessionCurrent,
+                deferUntilAttached = { pendingTntAttach = it },
+                retry = { deferredEpoch ->
+                    forwardResolvedDesktopOpen(
+                        currentDisplayId = tnt.id,
+                        mode = inFlightLaunchAbort.mode,
+                        desktopEnv = inFlightLaunchAbort.desktopEnv,
+                        startSession = resolveDeferredOpenStart(
+                            inFlightLaunchAbort.startSession,
+                            wasRestartingB,
+                            local.isRestarting,
+                            local.hasRunningSession,
+                        ),
+                        expectedEpoch = deferredEpoch,
+                        startService = {
+                            tntServiceStarts++
+                            localHost.running = true
+                        },
+                        isRestarting = { local.isRestarting },
+                        requestOpen = local::requestOpen,
+                        completion = tntRecoveredOutcomes::add,
+                    )
+                },
+                cancel = { error("failed startOnTarget without user Stop must recover on attachment") },
+                userStopGeneration = initialStopGenB,
+                currentUserStopGeneration = { local.userStopGeneration },
+                isRestarting = { local.isRestarting },
+                currentSessionGeneration = { local.sessionGeneration },
+            ),
+        )
+        localHost.launchFailure = DesktopDisplayException("DISPLAY_UNAVAILABLE", "decorView unattached")
+        stopCompletion!!.invoke(Result.success(Unit))
+        localHost.launchFailure = null
+        assertFalse(local.isRestarting)
+        assertFalse(local.isStopped)
+        assertFalse(local.hasRunningSession)
+        pendingTntAttach!!.invoke()
+        assertEquals(1, tntServiceStarts)
+        localHost.attachLatest(local)
+        local.sessionStarted(localHost.launches.last().sessionGeneration, Result.success(Unit))
+        assertTrue(tntRecoveredOutcomes.single().isSuccess)
+        assertFalse(resolveDeferredOpenStart(start = true, wasRestarting = true, isRestarting = false, hasRunningSession = true))
+
+        // 3c. Failed stop (isStopped=true, stopFailed=true, hasRunningSession=true) deferred from onCreate
+        //     recovers on attachment via coordinator.requestOpen instead of cancelling with SESSION_STOPPED
+        local.startStopping()
+        local.finishStopping(IllegalStateException("teardown failed"))
+        assertTrue(local.isStopped)
+        assertTrue(local.hasRunningSession)
+        val failedStopEpoch = local.sessionGeneration
+        val failedStopGen = local.userStopGeneration
+        var pendingFailedStopAttach: (() -> Unit)? = null
+        val failedStopRecovered = mutableListOf<Result<Unit>>()
+        assertTrue(
+            deferResolvedDesktopOpenIfNeeded(
+                isAttached = false,
+                expectedEpoch = failedStopEpoch,
+                sessionGeneration = local.sessionGeneration,
+                isStopped = local.isStopped,
+                isSessionCurrent = local::isSessionCurrent,
+                deferUntilAttached = { pendingFailedStopAttach = it },
+                retry = { deferredEpoch ->
+                    forwardResolvedDesktopOpen(
+                        currentDisplayId = tnt.id,
+                        mode = local.sessionMode,
+                        desktopEnv = local.desktopEnv,
+                        startSession = false,
+                        expectedEpoch = deferredEpoch,
+                        startService = {},
+                        isRestarting = { local.isRestarting },
+                        requestOpen = local::requestOpen,
+                        completion = failedStopRecovered::add,
+                    )
+                },
+                cancel = { error("failed-stop running session without new user Stop must recover on attachment") },
+                userStopGeneration = failedStopGen,
+                currentUserStopGeneration = { local.userStopGeneration },
+                isRestarting = { local.isRestarting },
+                currentSessionGeneration = { local.sessionGeneration },
+                hasRunningSession = { local.hasRunningSession },
+            ),
+        )
+        pendingFailedStopAttach!!.invoke()
+        localHost.attachLatest(local)
+        assertTrue(failedStopRecovered.single().isSuccess)
+
+        // 3d. Non-restarting deferred start=true when startup finishes before decorView attaches reuses running session
+        assertFalse(resolveDeferredOpenStart(start = true, wasRestarting = false, isRestarting = false, hasRunningSession = true))
+        assertTrue(resolveDeferredOpenStart(start = true, wasRestarting = false, isRestarting = true, hasRunningSession = true))
+        assertTrue(resolveDeferredOpenStart(start = true, wasRestarting = false, isRestarting = false, hasRunningSession = false))
+        local.stop()
+        localHost.running = false
+        var nonRestartFinishAttach: (() -> Unit)? = null
+        val nonRestartFinishOutcomes = mutableListOf<Result<Unit>>()
+        var nonRestartExtraServiceStarts = 0
+        local.requestOpen(DesktopOpenRequest(tnt.id, "proot", "xfce4", true, null), { localHost.running = true }, {})
+        val startingInFlight = checkNotNull(local.inFlightOpenSpec())
+        assertTrue(startingInFlight.startSession)
+        val startingGen = local.sessionGeneration
+        val startingStopGen = local.userStopGeneration
+        assertTrue(
+            deferResolvedDesktopOpenIfNeeded(
+                isAttached = false,
+                expectedEpoch = startingInFlight.expectedEpoch,
+                sessionGeneration = local.sessionGeneration,
+                isStopped = local.isStopped,
+                isSessionCurrent = local::isSessionCurrent,
+                deferUntilAttached = { nonRestartFinishAttach = it },
+                retry = { deferredEpoch ->
+                    forwardResolvedDesktopOpen(
+                        currentDisplayId = tnt.id,
+                        mode = startingInFlight.mode,
+                        desktopEnv = startingInFlight.desktopEnv,
+                        startSession = resolveDeferredOpenStart(
+                            startingInFlight.startSession,
+                            wasRestarting = false,
+                            isRestarting = local.isRestarting,
+                            hasRunningSession = local.hasRunningSession,
+                        ),
+                        expectedEpoch = deferredEpoch,
+                        startService = { nonRestartExtraServiceStarts++ },
+                        isRestarting = { local.isRestarting },
+                        requestOpen = local::requestOpen,
+                        completion = nonRestartFinishOutcomes::add,
+                    )
+                },
+                cancel = { error("deferred open must focus running session if startup finishes before attach") },
+                userStopGeneration = startingStopGen,
+                currentUserStopGeneration = { local.userStopGeneration },
+                isRestarting = { local.isRestarting },
+                currentSessionGeneration = { local.sessionGeneration },
+                hasRunningSession = { local.hasRunningSession },
+                hasInFlightOpen = { local.inFlightOpenSpec() != null },
+            ),
+        )
+        // Startup finishes before decorView attaches
+        localHost.attachLatest(local)
+        local.sessionStarted(startingGen, Result.success(Unit))
+        nonRestartFinishAttach!!.invoke()
+        assertEquals(0, nonRestartExtraServiceStarts)
+        assertEquals(startingGen, local.sessionGeneration)
+        assertEquals(startingGen, localHost.launches.last().sessionGeneration)
+        localHost.attachLatest(local)
+        assertTrue(nonRestartFinishOutcomes.single().isSuccess)
+
+        // 3e. Same-frame dual attachment: Listener 1 bumps sessionGeneration via requestOpen (recording admittedFromEpoch),
+        //     and Listener 2 (both admitted expectedEpoch and cold null expectedEpoch) coalesces instead of cancelling!
+        val freshHost = FakeCoordinatorHost(listOf(phone, tnt)).apply {
+            currentDisplayId = tnt.id
+            running = false
+        }
+        val freshLocal = DesktopDisplayCoordinator(
+            host = freshHost,
+            placementStrategy = DisplayLocalRestartAdapter(
+                PlacementSelection(
+                    mode = PlacementMode.DISPLAY_LOCAL,
+                    source = PlacementSelectionSource.DEVICE_QUIRK,
+                    allowAutomaticMoves = false,
+                    reason = "fresh dual attach test",
+                    tntDisplayIds = setOf(100003),
+                ),
+            ),
+        )
+        assertEquals(1L, freshLocal.sessionGeneration)
+        var freshListener1: (() -> Unit)? = null
+        var freshListener2: (() -> Unit)? = null
+        var freshServiceStarts = 0
+        val freshOutcomes = mutableListOf<Result<Unit>>()
+        listOf(1, 2).forEach { index ->
+            assertTrue(
+                deferResolvedDesktopOpenIfNeeded(
+                    isAttached = false,
+                    expectedEpoch = null,
+                    sessionGeneration = freshLocal.sessionGeneration,
+                    isStopped = freshLocal.isStopped,
+                    isSessionCurrent = freshLocal::isSessionCurrent,
+                    deferUntilAttached = { if (index == 1) freshListener1 = it else freshListener2 = it },
+                    retry = { deferredEpoch ->
+                        forwardResolvedDesktopOpen(
+                            currentDisplayId = tnt.id,
+                            mode = "proot",
+                            desktopEnv = "xfce4",
+                            startSession = resolveDeferredOpenStart(true, false, freshLocal.isRestarting, freshLocal.hasRunningSession),
+                            expectedEpoch = deferredEpoch,
+                            startService = { freshServiceStarts++; freshHost.running = true },
+                            isRestarting = { freshLocal.isRestarting },
+                            requestOpen = freshLocal::requestOpen,
+                            completion = freshOutcomes::add,
+                        )
+                    },
+                    cancel = { error("same-frame Listener $index must coalesce instead of cancelling") },
+                    userStopGeneration = freshLocal.userStopGeneration,
+                    currentUserStopGeneration = { freshLocal.userStopGeneration },
+                    isRestarting = { freshLocal.isRestarting },
+                    currentSessionGeneration = { freshLocal.sessionGeneration },
+                    hasRunningSession = { freshLocal.hasRunningSession },
+                    hasInFlightOpen = { freshLocal.inFlightOpenSpec() != null },
+                ),
+            )
+        }
+        freshListener1!!.invoke()
+        assertEquals(2L, freshLocal.sessionGeneration)
+        freshListener2!!.invoke()
+        assertEquals(1, freshServiceStarts)
+        assertEquals(1, freshHost.launches.size)
+        freshHost.attachLatest(freshLocal)
+        freshLocal.sessionStarted(freshHost.launches.single().sessionGeneration, Result.success(Unit))
+        assertEquals(2, freshOutcomes.size)
+        assertTrue(freshOutcomes.all { it.isSuccess })
+
+        local.stop()
+        localHost.running = false
+        val dualStopGen = local.userStopGeneration
+        var dualColdEarlyAttach: (() -> Unit)? = null
+        var dualColdAttach: (() -> Unit)? = null
+        var dualAdmittedAttach: (() -> Unit)? = null
+        val dualOutcomes = mutableListOf<Pair<String, Result<Unit>>>()
+        var dualServiceStarts = 0
+
+        // Cold caller deferred BEFORE beginSession() (deferredEpoch = null while stopped)
+        assertTrue(
+            deferResolvedDesktopOpenIfNeeded(
+                isAttached = false,
+                expectedEpoch = null,
+                sessionGeneration = local.sessionGeneration,
+                isStopped = local.isStopped,
+                isSessionCurrent = local::isSessionCurrent,
+                deferUntilAttached = { dualColdEarlyAttach = it },
+                retry = { deferredEpoch ->
+                    assertNull(deferredEpoch)
+                    forwardResolvedDesktopOpen(
+                        currentDisplayId = tnt.id,
+                        mode = "proot",
+                        desktopEnv = "xfce4",
+                        startSession = resolveDeferredOpenStart(true, false, local.isRestarting, local.hasRunningSession),
+                        expectedEpoch = deferredEpoch,
+                        startService = { dualServiceStarts++; localHost.running = true },
+                        isRestarting = { local.isRestarting },
+                        requestOpen = local::requestOpen,
+                        completion = { dualOutcomes += "cold-early" to it },
+                    )
+                },
+                cancel = { error("cold caller must start open on attach") },
+                userStopGeneration = dualStopGen,
+                currentUserStopGeneration = { local.userStopGeneration },
+                isRestarting = { local.isRestarting },
+                currentSessionGeneration = { local.sessionGeneration },
+                hasRunningSession = { local.hasRunningSession },
+                hasInFlightOpen = { local.inFlightOpenSpec() != null },
+            ),
+        )
+        // Admitted caller (e.g. home-launch) reserves epoch, and cold caller (e.g. maybeAutoStartDesktop) also defers
+        val reservedDualEpoch = local.beginSession()
+        assertTrue(
+            deferResolvedDesktopOpenIfNeeded(
+                isAttached = false,
+                expectedEpoch = null,
+                sessionGeneration = local.sessionGeneration,
+                isStopped = local.isStopped,
+                isSessionCurrent = local::isSessionCurrent,
+                deferUntilAttached = { dualColdAttach = it },
+                retry = { deferredEpoch ->
+                    assertNull(deferredEpoch)
+                    forwardResolvedDesktopOpen(
+                        currentDisplayId = tnt.id,
+                        mode = "proot",
+                        desktopEnv = "xfce4",
+                        startSession = resolveDeferredOpenStart(true, false, local.isRestarting, local.hasRunningSession),
+                        expectedEpoch = deferredEpoch,
+                        startService = { dualServiceStarts++; localHost.running = true },
+                        isRestarting = { local.isRestarting },
+                        requestOpen = local::requestOpen,
+                        completion = { dualOutcomes += "cold-same-epoch" to it },
+                    )
+                },
+                cancel = { error("cold Listener 3 must coalesce onto active open") },
+                userStopGeneration = dualStopGen,
+                currentUserStopGeneration = { local.userStopGeneration },
+                isRestarting = { local.isRestarting },
+                currentSessionGeneration = { local.sessionGeneration },
+                hasRunningSession = { local.hasRunningSession },
+                hasInFlightOpen = { local.inFlightOpenSpec() != null },
+            ),
+        )
+        assertTrue(
+            deferResolvedDesktopOpenIfNeeded(
+                isAttached = false,
+                expectedEpoch = reservedDualEpoch,
+                sessionGeneration = local.sessionGeneration,
+                isStopped = local.isStopped,
+                isSessionCurrent = local::isSessionCurrent,
+                deferUntilAttached = { dualAdmittedAttach = it },
+                retry = { deferredEpoch ->
+                    assertEquals(reservedDualEpoch, deferredEpoch)
+                    forwardResolvedDesktopOpen(
+                        currentDisplayId = tnt.id,
+                        mode = "proot",
+                        desktopEnv = "xfce4",
+                        startSession = resolveDeferredOpenStart(true, false, local.isRestarting, local.hasRunningSession),
+                        expectedEpoch = deferredEpoch,
+                        startService = { dualServiceStarts++; localHost.running = true },
+                        isRestarting = { local.isRestarting },
+                        requestOpen = local::requestOpen,
+                        completion = { dualOutcomes += "admitted" to it },
+                    )
+                },
+                cancel = { error("Listener 2 must coalesce via admittedFromEpoch instead of cancelling") },
+                userStopGeneration = dualStopGen,
+                currentUserStopGeneration = { local.userStopGeneration },
+                isRestarting = { local.isRestarting },
+                currentSessionGeneration = { local.sessionGeneration },
+                hasRunningSession = { local.hasRunningSession },
+                hasInFlightOpen = { local.inFlightOpenSpec() != null },
+            ),
+        )
+        val launchesBeforeDual = localHost.launches.size
+        dualColdEarlyAttach!!.invoke()
+        assertTrue(local.sessionGeneration > reservedDualEpoch)
+        dualAdmittedAttach!!.invoke()
+        dualColdAttach!!.invoke()
+        assertEquals(1, dualServiceStarts)
+        assertEquals(launchesBeforeDual + 1, localHost.launches.size)
+        localHost.attachLatest(local)
+        local.sessionStarted(localHost.launches.last().sessionGeneration, Result.success(Unit))
+        assertEquals(3, dualOutcomes.size)
+        assertTrue(dualOutcomes.all { it.second.isSuccess })
+
+        // Active provisioning cancels superseded deferred opens (including stopped null-epoch cold opens
+        // and completed/aborted wasRestarting opens) while allowing provisioning's own current-epoch handoff!
+        local.stop()
+        localHost.running = false
+        val preProvStopGen = local.userStopGeneration
+        var coldStoppedBeforeProvisioningAttach: (() -> Unit)? = null
+        var coldStoppedCancelled = 0
+        assertTrue(
+            deferResolvedDesktopOpenIfNeeded(
+                isAttached = false,
+                expectedEpoch = null,
+                sessionGeneration = local.sessionGeneration,
+                isStopped = local.isStopped, // true -> deferredEpoch == null
+                isSessionCurrent = local::isSessionCurrent,
+                deferUntilAttached = { coldStoppedBeforeProvisioningAttach = it },
+                retry = { error("stopped cold open must not retry once provisioning starts") },
+                cancel = { coldStoppedCancelled++ },
+                userStopGeneration = preProvStopGen,
+                currentUserStopGeneration = { local.userStopGeneration },
+                isProvisioningActive = { true },
+            ),
+        )
+        val activeProvEpoch = local.beginSession()
+        coldStoppedBeforeProvisioningAttach!!.invoke()
+        assertEquals(1, coldStoppedCancelled)
+        assertTrue(local.isSessionCurrent(activeProvEpoch))
+
+        var restartBeforeProvisioningAttach: (() -> Unit)? = null
+        var restartBeforeProvisioningCancelled = 0
+        var wasRestartingFlag = true
+        assertTrue(
+            deferResolvedDesktopOpenIfNeeded(
+                isAttached = false,
+                expectedEpoch = activeProvEpoch - 1,
+                sessionGeneration = activeProvEpoch - 1,
+                isStopped = true,
+                isSessionCurrent = local::isSessionCurrent,
+                deferUntilAttached = { restartBeforeProvisioningAttach = it },
+                retry = { error("aborted preserveRestart open must not retry once provisioning starts") },
+                cancel = { restartBeforeProvisioningCancelled++ },
+                userStopGeneration = preProvStopGen,
+                currentUserStopGeneration = { local.userStopGeneration },
+                isRestarting = { wasRestartingFlag },
+                currentSessionGeneration = { local.sessionGeneration },
+                isProvisioningActive = { local.isSessionCurrent(activeProvEpoch) },
+            ),
+        )
+        wasRestartingFlag = false
+        restartBeforeProvisioningAttach!!.invoke()
+        assertEquals(1, restartBeforeProvisioningCancelled)
+        assertTrue(local.isSessionCurrent(activeProvEpoch))
+
+        var ownProvisioningHandoffAttach: (() -> Unit)? = null
+        val ownProvisioningRetries = mutableListOf<Long?>()
+        assertTrue(
+            deferResolvedDesktopOpenIfNeeded(
+                isAttached = false,
+                expectedEpoch = activeProvEpoch,
+                sessionGeneration = local.sessionGeneration,
+                isStopped = local.isStopped,
+                isSessionCurrent = local::isSessionCurrent,
+                deferUntilAttached = { ownProvisioningHandoffAttach = it },
+                retry = ownProvisioningRetries::add,
+                cancel = { error("provisioning's own current-epoch handoff must retry on attach") },
+                userStopGeneration = preProvStopGen,
+                currentUserStopGeneration = { local.userStopGeneration },
+                isProvisioningActive = { local.isSessionCurrent(activeProvEpoch) },
+            ),
+        )
+        ownProvisioningHandoffAttach!!.invoke()
+        assertEquals(listOf<Long?>(activeProvEpoch), ownProvisioningRetries)
+
+        var attachDuringProvisioning: (() -> Unit)? = null
+        var provisioningCancelled = 0
+        assertTrue(
+            deferResolvedDesktopOpenIfNeeded(
+                isAttached = false,
+                expectedEpoch = null,
+                sessionGeneration = 40L,
+                isStopped = false,
+                isSessionCurrent = { false },
+                deferUntilAttached = { attachDuringProvisioning = it },
+                retry = { error("active provisioning must not retry stale pre-provisioning open") },
+                cancel = { provisioningCancelled++ },
+                userStopGeneration = 1L,
+                currentUserStopGeneration = { 1L },
+                hasInFlightOpen = { true },
+                isProvisioningActive = { true },
+            ),
+        )
+        attachDuringProvisioning!!.invoke()
+        assertEquals(1, provisioningCancelled)
+
+        // 4. Real user Stop increments userStopGeneration -> ALWAYS cancels deferred open and userStopLaunchReply
+        //    with SESSION_STOPPED once, even when expectedEpoch was null or when a new session/restart begins!
+        val stopReplyErrors = mutableListOf<String>()
+        val stopReply = userStopLaunchReply(
+            object : MethodChannel.Result {
+                override fun success(result: Any?) = error("stopped launch must not succeed")
+                override fun error(errorCode: String, errorMessage: String?, errorDetails: Any?) {
+                    stopReplyErrors += errorCode
+                }
+                override fun notImplemented() = error("unexpected notImplemented")
+            },
+            local,
+        )
+        local.stop()
+        localHost.running = false
+        assertEquals(listOf("SESSION_STOPPED"), stopReplyErrors)
+        stopReply.error("DESKTOP_LAUNCH_FAILED", "ignored duplicate", null)
+        assertEquals(listOf("SESSION_STOPPED"), stopReplyErrors)
+
+        var attachAfterUserStop: (() -> Unit)? = null
+        val cancelledOutcomes = mutableListOf<Result<Unit>>()
+        restarting = true
+        stopped = true
+        generation = 25L
+        assertTrue(
+            deferResolvedDesktopOpenIfNeeded(
+                isAttached = false,
+                expectedEpoch = null,
+                sessionGeneration = generation,
+                isStopped = true,
+                isSessionCurrent = { !stopped && it == generation },
+                deferUntilAttached = { attachAfterUserStop = it },
+                retry = { error("user Stop must cancel deferred open even if a new restart begins") },
+                cancel = {
+                    cancelledOutcomes += Result.failure(
+                        DesktopDisplayException("SESSION_STOPPED", "The session was stopped before launch"),
+                    )
+                },
+                userStopGeneration = stopGen,
+                currentUserStopGeneration = { stopGen },
+                isRestarting = { restarting },
+                currentSessionGeneration = { generation },
+            ),
+        )
+        stopGen++
+        restarting = true
+        stopped = false
+        generation = 30L
+        attachAfterUserStop!!.invoke()
+        assertEquals(
+            "SESSION_STOPPED",
+            (cancelledOutcomes.single().exceptionOrNull() as DesktopDisplayException).code,
+        )
+    }
+
+    @Test
+    fun provisioningHandoffSettlesNotificationAcrossImmediateNonStartingUnavailableAndDeferredPaths() {
+        val phone = DesktopDisplay(0, "phone", "Phone", isDefault = true, eligible = true, null)
+        val host = FakeCoordinatorHost(listOf(phone)).apply {
+            currentDisplayId = phone.id
+            running = false
+        }
+        val coordinator = DesktopDisplayCoordinator(host = host)
+        val published = mutableListOf<String?>()
+        val provisioning = ProvisioningNotificationState(published::add)
+
+        // 1. Immediate start handoff clears provisioning once startService succeeds
+        val startEpoch = coordinator.beginSession()
+        var serviceStarts = 0
+        provisioning.start(startEpoch, "Preparing Linux desktop", coordinator::isSessionCurrent)
+        val startCallbacks = provisioningOpenCallbacks(
+            epoch = startEpoch,
+            startForegroundService = { serviceStarts++ },
+            completeProvisioning = { provisioning.complete(it, coordinator::isSessionCurrent) },
+            failProvisioning = { epoch, err -> provisioning.fail(epoch, err, coordinator::isSessionCurrent) },
+        )
+        val immediateStartOutcomes = mutableListOf<Result<Unit>>()
+        forwardResolvedDesktopOpen(
+            currentDisplayId = phone.id,
+            mode = "proot",
+            desktopEnv = "xfce4",
+            startSession = true,
+            expectedEpoch = startEpoch,
+            startService = startCallbacks.startService,
+            isRestarting = { coordinator.isRestarting },
+            requestOpen = coordinator::requestOpen,
+        ) { outcome ->
+            startCallbacks.onCompletion(outcome)
+            immediateStartOutcomes += outcome
+        }
+        assertEquals(1, serviceStarts)
+        assertNull(provisioning.text)
+        host.running = true
+        host.attachLatest(coordinator)
+        coordinator.sessionStarted(startEpoch, Result.success(Unit))
+        assertTrue(immediateStartOutcomes.single().isSuccess)
+        assertNull(provisioning.text)
+
+        // 2. Non-starting join/move (startSession = false, startService not invoked) still clears provisioning on completion
+        val noStartEpoch = coordinator.beginSession()
+        provisioning.start(noStartEpoch, "Preparing Linux desktop", coordinator::isSessionCurrent)
+        val noStartCallbacks = provisioningOpenCallbacks(
+            epoch = noStartEpoch,
+            startForegroundService = { serviceStarts++ },
+            completeProvisioning = { provisioning.complete(it, coordinator::isSessionCurrent) },
+            failProvisioning = { epoch, err -> provisioning.fail(epoch, err, coordinator::isSessionCurrent) },
+        )
+        forwardResolvedDesktopOpen(
+            currentDisplayId = phone.id,
+            mode = "proot",
+            desktopEnv = "xfce4",
+            startSession = false,
+            expectedEpoch = noStartEpoch,
+            startService = noStartCallbacks.startService,
+            isRestarting = { false },
+            requestOpen = coordinator::requestOpen,
+        ) { outcome ->
+            noStartCallbacks.onCompletion(outcome)
+        }
+        host.attachLatest(coordinator)
+        assertEquals(1, serviceStarts)
+        assertNull(provisioning.text)
+
+        // 3. Immediate service-start failure marks provisioning failed without clearing first
+        coordinator.stop()
+        host.running = false
+        val deniedEpoch = coordinator.beginSession()
+        provisioning.start(deniedEpoch, "Preparing Linux desktop", coordinator::isSessionCurrent)
+        val deniedCallbacks = provisioningOpenCallbacks(
+            epoch = deniedEpoch,
+            startForegroundService = { throw SecurityException("background start denied") },
+            completeProvisioning = { provisioning.complete(it, coordinator::isSessionCurrent) },
+            failProvisioning = { epoch, err -> provisioning.fail(epoch, err, coordinator::isSessionCurrent) },
+        )
+        val deniedOutcomes = mutableListOf<Result<Unit>>()
+        forwardResolvedDesktopOpen(
+            currentDisplayId = phone.id,
+            mode = "proot",
+            desktopEnv = "xfce4",
+            startSession = true,
+            expectedEpoch = deniedEpoch,
+            startService = deniedCallbacks.startService,
+            isRestarting = { coordinator.isRestarting },
+            requestOpen = coordinator::requestOpen,
+        ) { outcome ->
+            deniedCallbacks.onCompletion(outcome)
+            deniedOutcomes += outcome
+        }
+        assertEquals(
+            "DISPLAY_NOT_ALLOWED",
+            (deniedOutcomes.single().exceptionOrNull() as DesktopDisplayException).code,
+        )
+        assertEquals(
+            "Linux desktop failed to start: Android denied starting the Linux service",
+            provisioning.text,
+        )
+
+        // 4. DISPLAY_UNAVAILABLE (null displayId) invokes onCompletion and marks provisioning failed
+        val unavailableEpoch = coordinator.beginSession()
+        provisioning.start(unavailableEpoch, "Preparing Linux desktop", coordinator::isSessionCurrent)
+        val unavailableCallbacks = provisioningOpenCallbacks(
+            epoch = unavailableEpoch,
+            startForegroundService = { error("service must not start without a display") },
+            completeProvisioning = { provisioning.complete(it, coordinator::isSessionCurrent) },
+            failProvisioning = { epoch, err -> provisioning.fail(epoch, err, coordinator::isSessionCurrent) },
+        )
+        val unavailableOutcomes = mutableListOf<Result<Unit>>()
+        forwardResolvedDesktopOpen(
+            currentDisplayId = null,
+            mode = "proot",
+            desktopEnv = "xfce4",
+            startSession = true,
+            expectedEpoch = unavailableEpoch,
+            startService = unavailableCallbacks.startService,
+            isRestarting = { false },
+            requestOpen = { _, _, _ -> error("requestOpen must not run without a display") },
+        ) { outcome ->
+            unavailableCallbacks.onCompletion(outcome)
+            unavailableOutcomes += outcome
+        }
+        assertEquals(
+            "DISPLAY_UNAVAILABLE",
+            (unavailableOutcomes.single().exceptionOrNull() as DesktopDisplayException).code,
+        )
+        assertEquals(
+            "Linux desktop failed to start: The app window has no current display",
+            provisioning.text,
+        )
+
+        // 5. Deferred-attachment cancel clears provisioning via cancel -> onCompletion
+        val cancelledEpoch = coordinator.beginSession()
+        val cancelledInitialStopGen = coordinator.userStopGeneration
+        provisioning.start(cancelledEpoch, "Preparing Linux desktop", coordinator::isSessionCurrent)
+        val cancelledCallbacks = provisioningOpenCallbacks(
+            epoch = cancelledEpoch,
+            startForegroundService = { error("cancelled open must not start service") },
+            completeProvisioning = { provisioning.complete(it, coordinator::isSessionCurrent) },
+            failProvisioning = { epoch, err -> provisioning.fail(epoch, err, coordinator::isSessionCurrent) },
+        )
+        var pendingAttach: (() -> Unit)? = null
+        val cancelledOutcomes = mutableListOf<Result<Unit>>()
+        assertTrue(
+            deferResolvedDesktopOpenIfNeeded(
+                isAttached = false,
+                expectedEpoch = cancelledEpoch,
+                sessionGeneration = coordinator.sessionGeneration,
+                isStopped = coordinator.isStopped,
+                isSessionCurrent = coordinator::isSessionCurrent,
+                deferUntilAttached = { pendingAttach = it },
+                retry = { error("stopped epoch must not retry") },
+                cancel = {
+                    val failure = Result.failure<Unit>(
+                        DesktopDisplayException("SESSION_STOPPED", "The session was stopped before launch"),
+                    )
+                    cancelledCallbacks.onCompletion(failure)
+                    cancelledOutcomes += failure
+                },
+                userStopGeneration = cancelledInitialStopGen,
+                currentUserStopGeneration = { coordinator.userStopGeneration },
+            ),
+        )
+        coordinator.stop()
+        pendingAttach!!.invoke()
+        assertEquals(
+            "SESSION_STOPPED",
+            (cancelledOutcomes.single().exceptionOrNull() as DesktopDisplayException).code,
+        )
+        assertNull(provisioning.text)
+
+        // 6. Deferred-attachment retry preserves startService and onCompletion across attachment
+        val retryEpoch = coordinator.beginSession()
+        val retryInitialStopGen = coordinator.userStopGeneration
+        provisioning.start(retryEpoch, "Preparing Linux desktop", coordinator::isSessionCurrent)
+        var retryServiceStarts = 0
+        val retryCallbacks = provisioningOpenCallbacks(
+            epoch = retryEpoch,
+            startForegroundService = { retryServiceStarts++ },
+            completeProvisioning = { provisioning.complete(it, coordinator::isSessionCurrent) },
+            failProvisioning = { epoch, err -> provisioning.fail(epoch, err, coordinator::isSessionCurrent) },
+        )
+        var retryAttach: (() -> Unit)? = null
+        val retryOutcomes = mutableListOf<Result<Unit>>()
+        assertTrue(
+            deferResolvedDesktopOpenIfNeeded(
+                isAttached = false,
+                expectedEpoch = retryEpoch,
+                sessionGeneration = coordinator.sessionGeneration,
+                isStopped = coordinator.isStopped,
+                isSessionCurrent = coordinator::isSessionCurrent,
+                deferUntilAttached = { retryAttach = it },
+                retry = { deferredEpoch ->
+                    forwardResolvedDesktopOpen(
+                        currentDisplayId = phone.id,
+                        mode = "chroot",
+                        desktopEnv = "xfce4",
+                        startSession = true,
+                        expectedEpoch = deferredEpoch,
+                        startService = retryCallbacks.startService,
+                        isRestarting = { coordinator.isRestarting },
+                        requestOpen = coordinator::requestOpen,
+                    ) { outcome ->
+                        retryCallbacks.onCompletion(outcome)
+                        retryOutcomes += outcome
+                    }
+                },
+                cancel = { error("current epoch must retry") },
+                userStopGeneration = retryInitialStopGen,
+                currentUserStopGeneration = { coordinator.userStopGeneration },
+            ),
+        )
+        assertEquals("Preparing Linux desktop", provisioning.text)
+        retryAttach!!.invoke()
+        assertEquals(1, retryServiceStarts)
+        assertNull(provisioning.text)
+        host.running = true
+        host.attachLatest(coordinator)
+        coordinator.sessionStarted(retryEpoch, Result.success(Unit))
+        assertTrue(retryOutcomes.single().isSuccess)
+
+        // 7. Activity teardown (onDestroy / isFinishing) settles deferred open once with DISPLAY_UNAVAILABLE
+        coordinator.stop()
+        host.running = false
+        val destroyedEpoch = coordinator.beginSession()
+        provisioning.start(destroyedEpoch, "Preparing Linux desktop", coordinator::isSessionCurrent)
+        val destroyedCallbacks = provisioningOpenCallbacks(
+            epoch = destroyedEpoch,
+            startForegroundService = { error("destroyed window must not start service") },
+            completeProvisioning = { provisioning.complete(it, coordinator::isSessionCurrent) },
+            failProvisioning = { epoch, err -> provisioning.fail(epoch, err, coordinator::isSessionCurrent) },
+        )
+        val destroyReplyCodes = mutableListOf<String>()
+        val destroyReply = userStopLaunchReply(
+            object : MethodChannel.Result {
+                override fun success(result: Any?) = error("destroyed window must not succeed")
+                override fun error(errorCode: String, errorMessage: String?, errorDetails: Any?) {
+                    destroyReplyCodes += errorCode
+                }
+                override fun notImplemented() = error("unexpected notImplemented")
+            },
+            coordinator,
+        )
+        val pendingCancellations = mutableListOf<() -> Unit>()
+        assertTrue(
+            deferResolvedDesktopOpenIfNeeded(
+                isAttached = false,
+                expectedEpoch = destroyedEpoch,
+                sessionGeneration = coordinator.sessionGeneration,
+                isStopped = coordinator.isStopped,
+                isSessionCurrent = coordinator::isSessionCurrent,
+                deferUntilAttached = {
+                    pendingCancellations += {
+                        val failure = DesktopDisplayException("DISPLAY_UNAVAILABLE", "The app window was destroyed before launch")
+                        destroyedCallbacks.onCompletion(Result.failure(failure))
+                        destroyReply.error(failure.code, failure.message, null)
+                    }
+                },
+                retry = { error("destroyed window must detach listener and never retry") },
+                cancel = { error("destroyed window settles via abortOnDestroy") },
+                userStopGeneration = coordinator.userStopGeneration,
+                currentUserStopGeneration = { coordinator.userStopGeneration },
+            ),
+        )
+        pendingCancellations.toList().also { pendingCancellations.clear() }.forEach { it() }
+        assertEquals(listOf("DISPLAY_UNAVAILABLE"), destroyReplyCodes)
+        assertEquals(
+            "Linux desktop failed to start: The app window was destroyed before launch",
+            provisioning.text,
         )
     }
 
@@ -692,16 +1933,17 @@ class AndroidCallerPlacementPolicyTest {
             )
         }
         assertTrue(
-            "home async status must preserve requestDesktop handoff for P11b2b",
-            homeAsyncScope.contains("requestDesktop("),
+            "home async status must delegate to requestResolvedDesktopOpen",
+            homeAsyncScope.contains("requestResolvedDesktopOpen("),
         )
         assertTrue(
-            "auto provisioning must preserve requestDesktop handoff for P11b2b",
-            autoSetupScope.contains("requestDesktop("),
+            "auto provisioning must delegate to requestResolvedDesktopOpen",
+            autoSetupScope.contains("requestResolvedDesktopOpen("),
         )
         assertTrue(
-            "runtime provisioning must preserve launchPreparedDesktop handoff for P11b2b",
-            runtimeProvisionScope.contains("launchPreparedDesktop(epoch, startReply)"),
+            "runtime provisioning must reserve an epoch via beginSession and delegate to requestResolvedDesktopOpen",
+            runtimeProvisionScope.contains("displays.beginSession()") &&
+                runtimeProvisionScope.contains("requestResolvedDesktopOpen("),
         )
         assertTrue(
             "foreground service helper must delegate to DroidDeskService.ensureStarted",
@@ -779,6 +2021,133 @@ class AndroidCallerPlacementPolicyTest {
         assertTrue(spec.contains("\"sessionRunning\""))
         assertTrue(notification.contains("coordinator.snapshot()"))
         assertTrue(notification.contains("desktopReturnNotificationSpec("))
+    }
+
+    @Test
+    fun migratedAsyncAndProvisioningCallersEliminateLegacyHelpersAndGuardProvisioning() {
+        val mainSource = readSource(MAIN_ACTIVITY)
+        val serviceSource = readSource(DROID_DESK_SERVICE)
+        val onCreateBody = functionBody(mainSource, "override fun onCreate(savedInstanceState: Bundle?)")
+        val externalAutoBody = functionBody(mainSource, "private fun maybeAutoStartExternalDesktop()")
+        val prefAutoBody = functionBody(mainSource, "private fun maybeAutoStartDesktop(launchIntent: Intent)")
+        val onDestroyBody = functionBody(mainSource, "override fun onDestroy()")
+        val homeLaunchBody = functionBody(mainSource, "private fun handleHomeLaunch(homeIntent: Intent)")
+        val autoSetupBody = functionBody(mainSource, "private fun runAutoChrootSetup()")
+        val startLinuxScope = sourceBetween(
+            mainSource,
+            "\"startLinux\" -> {",
+            "\"launchDesktopActivity\" -> {",
+        )
+        val manualLaunchScope = sourceBetween(
+            mainSource,
+            "\"launchDesktopActivity\" -> {",
+            "\"stopLinux\" -> {",
+        )
+        val resolvedOpen = functionBody(mainSource, "private fun requestResolvedDesktopOpen(")
+        val companionBody = functionBody(mainSource, "companion object")
+
+        val forbidden = listOf(
+            Regex("""\bBuild\.DEVICE\b"""),
+            Regex("""\b100003\b"""),
+            Regex("""\bdisplayLocalMode\b"""),
+            Regex("""\.isDisplayLocal\b"""),
+            Regex("""\bstartupTarget\s*\("""),
+            Regex("""\brestartForEnvironmentIfNeeded\s*\("""),
+            Regex("""\bopenActive\s*\("""),
+            Regex("""\bprepareSession\s*\("""),
+            Regex("""\brequestDesktop\s*\("""),
+            Regex("""\blaunchPreparedDesktop\s*\("""),
+            Regex("""\blaunchLocalDesktopItem\s*\("""),
+            Regex("""\bopenDesktop\s*\("""),
+            Regex("""\bsessionStarted\b"""),
+            Regex("""\bActiveDesktopOpenTracker\b"""),
+            Regex("""\bopenTracker\b"""),
+            Regex("""\bactiveOpenFor\b"""),
+        )
+
+        mapOf(
+            "MainActivity.onCreate" to onCreateBody,
+            "MainActivity.maybeAutoStartExternalDesktop" to externalAutoBody,
+            "MainActivity.maybeAutoStartDesktop" to prefAutoBody,
+            "MainActivity.onDestroy" to onDestroyBody,
+            "MainActivity.handleHomeLaunch" to homeLaunchBody,
+            "MainActivity.runAutoChrootSetup" to autoSetupBody,
+            "MainActivity.startLinux" to startLinuxScope,
+            "MainActivity.launchDesktopActivity" to manualLaunchScope,
+            "MainActivity.requestResolvedDesktopOpen" to resolvedOpen,
+            "DroidDeskService.kt" to serviceSource,
+        ).forEach { (scopeName, source) ->
+            forbidden.forEach { pattern ->
+                assertFalse(
+                    "$scopeName must not contain ${pattern.pattern}",
+                    pattern.containsMatchIn(source),
+                )
+            }
+        }
+
+        assertTrue(companionBody.contains("provisioningEpoch"))
+        assertTrue(onCreateBody.contains("!DesktopDisplayCoordinator.shared.allowsManualMoves"))
+        assertTrue(
+            "onCreate must skip handleHomeLaunch and maybeAutoStartDesktop when autoSetup is active",
+            Regex("""if\s*\(\s*!intent\.getBooleanExtra\("autoSetup",\s*false\)\s*\)\s*\{\s*handleHomeLaunch\(intent\);\s*maybeAutoStartDesktop\(intent\)\s*\}""")
+                .containsMatchIn(onCreateBody),
+        )
+        assertTrue(onDestroyBody.contains("pendingAttachCancellations"))
+        assertTrue(homeLaunchBody.contains("if (isProvisioningActive(coordinator)) return"))
+        assertTrue(externalAutoBody.contains("if (isProvisioningActive(coordinator)) return"))
+        assertTrue(prefAutoBody.contains("if (isProvisioningActive("))
+        assertTrue(startLinuxScope.contains("isProvisioningActive(displays)"))
+        assertTrue(manualLaunchScope.contains("isProvisioningActive(displays)"))
+        assertTrue(startLinuxScope.contains("userStopLaunchReply(result, displays)"))
+        assertFalse(startLinuxScope.contains("DesktopLaunchReply("))
+        assertTrue(autoSetupBody.contains("inFlightOpenSpec()"))
+        assertTrue(autoSetupBody.contains("isProvisioningActive(coordinator)"))
+        assertTrue(autoSetupBody.contains("provisioningOpenCallbacks("))
+        assertTrue(startLinuxScope.contains("provisioningOpenCallbacks("))
+        assertTrue(resolvedOpen.contains("isFinishing || isDestroyed"))
+        assertTrue(resolvedOpen.contains("hasRunningSession = { coordinator.hasRunningSession }"))
+        assertTrue(resolvedOpen.contains("hasInFlightOpen = { coordinator.inFlightOpenSpec() != null }"))
+        assertTrue(resolvedOpen.contains("isProvisioningActive = { isProvisioningActive(coordinator) }"))
+        assertTrue(resolvedOpen.contains("coordinator.userStopGeneration"))
+        assertTrue(resolvedOpen.contains("startService = startService"))
+        assertTrue(resolvedOpen.contains("onCompletion = onCompletion"))
+    }
+
+    private class FakeCoordinatorHost(
+        private val availableDisplays: List<DesktopDisplay>,
+    ) : DesktopDisplayHost {
+        var currentDisplayId: Int? = availableDisplays.firstOrNull()?.id
+        var running = false
+        var focusResult = true
+        var captureTimeouts = false
+        var launchFailure: DesktopDisplayException? = null
+        val launches = mutableListOf<DesktopLaunchRequest>()
+        private val timeouts = mutableListOf<() -> Unit>()
+
+        override fun currentDisplay() = availableDisplays.firstOrNull { it.id == currentDisplayId }
+        override fun currentDisplayId() = currentDisplayId
+        override fun displays() = availableDisplays
+        override fun defaultProfileKind() = ProfileKind.PHONE
+        override fun sessionRunning() = running
+        override fun launch(request: DesktopLaunchRequest) {
+            launchFailure?.let { throw it }
+            launches += request
+        }
+        override fun focus(requestId: Long) = focusResult
+        override fun cancelLaunch(requestId: Long) = Unit
+        override fun scheduleTimeout(delayMillis: Long, action: () -> Unit): () -> Unit {
+            if (!captureTimeouts) return {}
+            timeouts += action
+            return { timeouts.remove(action) }
+        }
+        override fun notifyReturnRequired(error: DesktopDisplayException) = Unit
+
+        fun attachLatest(coordinator: DesktopDisplayCoordinator) {
+            val request = launches.last()
+            val claim = coordinator.claim(request.display.id) {}
+            check(claim is RendererClaim.Accepted) { "Expected accepted renderer claim for $request" }
+            coordinator.onAttached(claim.lease, request.requestId, PixelSize(1920, 1080))
+        }
     }
 
     private fun callBodies(source: String, callName: String): List<String> {
