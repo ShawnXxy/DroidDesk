@@ -62,8 +62,10 @@ import com.orailnoor.droiddesk.display.PixelSize
 import com.orailnoor.droiddesk.display.PixelInsets
 import com.orailnoor.droiddesk.display.DesktopDisplayException
 import com.orailnoor.droiddesk.display.capability.*
+import com.orailnoor.droiddesk.display.policy.*
 import com.orailnoor.droiddesk.display.refresh.DisplayRefreshPolicy
 import com.orailnoor.droiddesk.display.refresh.RefreshRequest
+import com.orailnoor.droiddesk.runtime.*
 
 internal fun displayModeEvidenceOrNull(
     modeId: Int,
@@ -105,38 +107,42 @@ internal fun fallbackInputCapabilities(hasTouchscreen: Boolean, hasExternalPoint
 internal fun effectiveInputCapabilities(isDefaultDisplay: Boolean, hasInternalTouchscreen: Boolean, directTouchObserved: Boolean, rawInput: InputCapabilities): InputCapabilities =
     if (directTouchObserved || (isDefaultDisplay && hasInternalTouchscreen && rawInput.touch == TouchEvidence.UNKNOWN_ASSOCIATION)) rawInput.copy(touch = TouchEvidence.CURRENT_DISPLAY) else rawInput
 
-internal fun resolvePresentationClass(isDefaultDisplay: Boolean, profileKind: ProfileKind, touch: TouchEvidence): PresentationClass =
-    if (!isDefaultDisplay) (if (touch == TouchEvidence.CURRENT_DISPLAY) PresentationClass.EXTERNAL_TOUCH else PresentationClass.EXTERNAL_POINTER)
-    else if (profileKind == ProfileKind.PHONE) PresentationClass.PHONE_TOUCH
-    else if (profileKind == ProfileKind.WIDE || touch == TouchEvidence.CURRENT_DISPLAY) PresentationClass.LARGE_TOUCH else PresentationClass.EXTERNAL_POINTER
-
-internal data class DesktopInputContext(
-    val displayId: Int, val environment: DisplayEnvironment, val profileKind: ProfileKind, val desktopUiMode: Boolean, val savedSettings: DisplaySettings?,
-    val rawInput: InputCapabilities, val hasInternalTouchscreen: Boolean, val touchscreenDeviceIds: Set<Int>, val horizontalScrollFactor: Float, val verticalScrollFactor: Float,
+internal data class DesktopPresentationSnapshot(
+    val rawContext: PresentationContext, val environment: DisplayEnvironment, val runtimeCapabilities: RuntimeCapabilities,
+    val hasInternalTouchscreen: Boolean, val touchscreenDeviceIds: Set<Int>, val horizontalScrollFactor: Float, val verticalScrollFactor: Float,
 )
 
-internal class DesktopInputRouter(
-    private val readContext: () -> DesktopInputContext?, private val applyRenderer: (InputPolicyDecision) -> ExternalDesktopInputTarget?,
-    private val openRelay: () -> Unit, private val closeRelay: () -> Unit,
+internal class DesktopPresentationPlanner(
+    private val policy: PresentationPolicy = PresentationPolicy(), private val onClassified: (PresentationClass) -> Unit = {},
+    private val readSnapshot: ((Int) -> PixelSize?) -> DesktopPresentationSnapshot?, private val loadSettings: (ProfileKind, Int) -> DisplaySettings?,
+    private val applyPlan: (PresentationPlan, PixelSize?) -> ExternalDesktopInputTarget? = { _, _ -> null },
+    private val openRelay: () -> Unit = {}, private val closeRelay: () -> Unit = {},
 ) {
-    private var promotedTouchDisplayId: Int? = null
-    private val promotedTouchDevices = mutableSetOf<Int>()
-    fun refresh(): InputPolicyDecision? {
-        val ctx = readContext() ?: return null
-        val isDefault = ctx.displayId == android.view.Display.DEFAULT_DISPLAY
-        if (promotedTouchDisplayId != ctx.displayId) { promotedTouchDisplayId = null; promotedTouchDevices.clear() }
-        else promotedTouchDevices.retainAll { it <= 0 || it in ctx.touchscreenDeviceIds }
+    private var promotedTouchDisplayId: Int? = null; private val promotedTouchDevices = mutableSetOf<Int>()
+    private var measuredDisplayId: Int? = null; private var lastMeasuredContent: PixelSize? = null
+    private var lastAppliedInput: InputPolicyDecision? = null; private var lastAppliedTarget: ExternalDesktopInputTarget? = null
+    var currentPlan: PresentationPlan? = null; private set
+    val measuredContentSize: PixelSize? get() = lastMeasuredContent
+    fun updateMeasuredWindow(contentSize: PixelSize, forceRelaySync: Boolean = false): PresentationPlan? = if (contentSize.width <= 0 || contentSize.height <= 0) null else resolveAndApply(contentSize, forceRelaySync)
+    fun refresh(): PresentationPlan? = resolveAndApply(null, true)
+    private fun resolveAndApply(explicitSize: PixelSize?, forceRelaySync: Boolean): PresentationPlan? {
+        val snap = readSnapshot { id -> explicitSize ?: lastMeasuredContent?.takeIf { measuredDisplayId == id } } ?: return null
+        val displayId = snap.rawContext.displayId
+        if (explicitSize != null) { measuredDisplayId = displayId; lastMeasuredContent = explicitSize } else if (measuredDisplayId != displayId) { measuredDisplayId = null; lastMeasuredContent = null }
+        if (promotedTouchDisplayId != displayId) { promotedTouchDisplayId = null; promotedTouchDevices.clear() } else promotedTouchDevices.retainAll { it <= 0 || it in snap.touchscreenDeviceIds }
         if (promotedTouchDevices.isEmpty()) promotedTouchDisplayId = null
-        val caps = effectiveInputCapabilities(isDefault, ctx.hasInternalTouchscreen, promotedTouchDisplayId == ctx.displayId, ctx.rawInput)
-        val decision = DesktopInputPolicy.resolve(resolvePresentationClass(isDefault, ctx.profileKind, caps.touch), ctx.environment, caps, ctx.savedSettings?.inputMode, ctx.savedSettings?.inputRoute ?: ExternalInputRoutePreference.AUTOMATIC, ctx.desktopUiMode, sanitizeScrollFactor(ctx.horizontalScrollFactor), sanitizeScrollFactor(ctx.verticalScrollFactor))
-        applyRenderer(decision)?.let { if (decision.externalInputRoute == ExternalInputRoute.PHONE_RELAY) { ExternalDesktopInputBridge.attach(it, decision.relayPointerCapture); openRelay() } else { ExternalDesktopInputBridge.detach(it); closeRelay() } }
-        return decision
+        val committed = lastMeasuredContent?.takeIf { measuredDisplayId == displayId }
+        val ctx = snap.rawContext.copyWithSnapshot(windowSizePx = committed ?: snap.rawContext.windowSizePx, input = effectiveInputCapabilities(snap.rawContext.isDefaultDisplay, snap.hasInternalTouchscreen, promotedTouchDisplayId == displayId, snap.rawContext.input))
+        val cls = policy.classify(ctx).also(onClassified); val kind = policy.profileKind(cls)
+        val plan = policy.resolve(ctx, cls, snap.environment, loadSettings(kind, displayId), snap.runtimeCapabilities, sanitizeScrollFactor(snap.horizontalScrollFactor), sanitizeScrollFactor(snap.verticalScrollFactor)).also { currentPlan = it }
+        applyPlan(plan, committed)?.let { target ->
+            val sync = forceRelaySync || lastAppliedTarget !== target || lastAppliedInput != plan.input; lastAppliedTarget = target; lastAppliedInput = plan.input
+            if (plan.input.externalInputRoute == ExternalInputRoute.PHONE_RELAY) { ExternalDesktopInputBridge.attach(target, plan.input.relayPointerCapture); if (sync) openRelay() } else { ExternalDesktopInputBridge.detach(target); if (sync) closeRelay() }
+        }
+        return plan
     }
-    fun promoteDirectTouch(displayId: Int, deviceId: Int): Boolean {
-        if (promotedTouchDisplayId != displayId) { promotedTouchDisplayId = displayId; promotedTouchDevices.clear() }
-        return promotedTouchDevices.isEmpty().also { promotedTouchDevices.add(deviceId) }
-    }
-    fun release(target: ExternalDesktopInputTarget?, finishRelay: Boolean = false) { promotedTouchDisplayId = null; promotedTouchDevices.clear(); if ((target != null && ExternalDesktopInputBridge.detach(target)) || finishRelay) closeRelay() }
+    fun promoteDirectTouch(displayId: Int, deviceId: Int): Boolean { if (promotedTouchDisplayId != displayId) { promotedTouchDisplayId = displayId; promotedTouchDevices.clear() }; return promotedTouchDevices.isEmpty().also { promotedTouchDevices.add(deviceId) } }
+    fun release(target: ExternalDesktopInputTarget?, finishRelay: Boolean = false) { promotedTouchDisplayId = null; promotedTouchDevices.clear(); measuredDisplayId = null; lastMeasuredContent = null; lastAppliedInput = null; lastAppliedTarget = null; currentPlan = null; if ((target != null && ExternalDesktopInputBridge.detach(target)) || finishRelay) closeRelay() }
 }
 
 internal fun continueAfterActivityBinding(
@@ -173,16 +179,16 @@ class DesktopActivity : Activity() {
     private var desktopEnv = "xfce4"
     private lateinit var linuxRuntime: LinuxRuntime
     private lateinit var chrootRuntime: ChrootRuntime
+    private lateinit var capabilityCache: RuntimeCapabilityCache
     private lateinit var environmentManager: com.orailnoor.droiddesk.runtime.LinuxEnvironmentManager
     private lateinit var placeholder: FrameLayout
     private var x11ServiceClient: X11ServiceClient? = null
     private var inputController: X11InputController? = null
     private val displayCoordinator = DesktopDisplayCoordinator.shared
     private val evidenceProbe by lazy { AndroidPresentationEvidenceProbe(applicationContext, DisplayRepository(applicationContext)) }
-    private var currentInputContext: DesktopInputContext? = null
-    private val inputRouter = DesktopInputRouter({ currentInputContext }, { d -> lorieView?.reloadPreferences(TermuxMainActivity.getPrefs().apply { pointerCapture.put(d.rendererPointerCapture) }); inputController?.applyDecision(d); inputModeButton?.let(::showInputMode); inputController }, { ExternalInputRelayActivity.open(this) }, ExternalInputRelayActivity::finishIfOpen)
-    private var attachingDesktopInput = false
-    private var policyOnlyRefresh = false
+    private var lastAppliedPlan: PresentationPlan? = null; private var lastAppliedController: X11InputController? = null
+    private var appliedRefreshRequest: RefreshRequest? = null; private var forceNextRelaySync = false
+    private val presentationPlanner = DesktopPresentationPlanner(readSnapshot = ::readPresentationSnapshot, loadSettings = displayCoordinator::loadSettings, applyPlan = ::applyPresentationPlan, openRelay = { ExternalInputRelayActivity.open(this) }, closeRelay = ExternalInputRelayActivity::finishIfOpen)
     private var rendererLease: RendererLease? = null
     private val rendererCleanup = RendererCleanup()
     private var inputDeviceListenerRegistered = false
@@ -296,6 +302,7 @@ class DesktopActivity : Activity() {
             .ProcessLinuxEnvironmentRegistry.get(applicationContext)
         linuxRuntime = processRuntime.linuxRuntime
         chrootRuntime = processRuntime.chrootRuntime
+        capabilityCache = processRuntime.capabilityCache
         environmentManager = processRuntime.environmentManager
         displayRequestId = intent.getLongExtra("displayRequestId", 0L)
         sessionEpoch = intent.getLongExtra("sessionGeneration", 0L)
@@ -320,7 +327,7 @@ class DesktopActivity : Activity() {
                 sessionMode = intent.getStringExtra("mode") ?: displayCoordinator.sessionMode
                 desktopEnv = intent.getStringExtra("de") ?: displayCoordinator.desktopEnv
                 if (sessionMode == "proot") {
-                    applyProotRefreshPolicy()
+                    readRawPresentationContext(actualDisplay, null, currentInputDevices()).let { applyWindowRefresh(DisplayRefreshPolicy.resolve(it.currentMode, it.supportedModes)) }
                 }
                 estimatedLoadingSeconds = if (shouldStartSession) 30 else 10
 
@@ -341,18 +348,9 @@ class DesktopActivity : Activity() {
         )
     }
 
-    @Suppress("DEPRECATION")
-    private fun applyProotRefreshPolicy() {
-        val activeDisplay = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            display ?: windowManager.defaultDisplay
-        } else {
-            windowManager.defaultDisplay
-        }
-        val currentEvidence = activeDisplay?.mode?.toEvidenceOrNull()
-        val supportedEvidence = activeDisplay?.supportedModes
-            ?.mapNotNull { it?.toEvidenceOrNull() }
-            .orEmpty()
-        val request = DisplayRefreshPolicy.resolve(currentEvidence, supportedEvidence)
+    private fun applyWindowRefresh(request: RefreshRequest) {
+        if (sessionMode != "proot" || appliedRefreshRequest == request) return
+        appliedRefreshRequest = request
         applyRefreshRequest(request) { rate, modeId ->
             window.attributes = window.attributes.apply {
                 preferredRefreshRate = rate
@@ -462,13 +460,12 @@ class DesktopActivity : Activity() {
             actualDisplay = { lorieView?.display?.displayId ?: windowManager.defaultDisplay.displayId },
         ) { if (displayCoordinator.allowsManualMoves) finishAndRemoveTask() else finish() }
         displayCoordinator.setProfileRefresher(lease) { completion ->
-            failedUiProfile = null
+            failedUiProfile = null; lastAppliedPlan = null; forceNextRelaySync = true
             explicitProfileRetry = true
             profileCompletions += completion
-            scheduleGeometry()
             placeholder.post {
                 if (!isDestroyed && !isFinishing && isCurrentRenderer()) {
-                    attachDesktopInput()
+                    if (inputController != null) { applyWindowGeometry(); if (lastAppliedPlan == null) { refreshInputPolicyOnly(); scheduleGeometry() } } else attachDesktopInput()
                 }
             }
         }
@@ -553,32 +550,28 @@ class DesktopActivity : Activity() {
         ).also { it.connect() }
     }
 
-    private fun refreshInputPolicyOnly() { policyOnlyRefresh = true; try { attachDesktopInput() } finally { policyOnlyRefresh = false } }
+    private fun refreshInputPolicyOnly() {
+        val lease = rendererLease?.takeIf { isCurrentRenderer() } ?: return
+        lorieView?.display?.displayId?.takeIf { it != lease.displayId }?.let { displayCoordinator.observeActivityEnvironment(this, sessionEpoch); displayCoordinator.onActivityMoved(lease, it); return }
+        lastAppliedPlan = null; forceNextRelaySync = false; val plan = presentationPlanner.refresh() ?: return
+        if (presentationPlanner.measuredContentSize != null) {
+            lorieView?.renderedSize?.let { displayCoordinator.reportGeometry(lease, plan.profileKind, PixelSize(it.x, it.y)) }
+            val retry = explicitProfileRetry; explicitProfileRetry = false; applyLiveProfile(force = retry)
+        }
+    }
 
     private fun attachDesktopInput() {
-        val lease = rendererLease ?: return
-        if (!isCurrentRenderer()) return
+        val lease = rendererLease?.takeIf { isCurrentRenderer() } ?: return
         lorieView?.display?.displayId?.takeIf { it != lease.displayId }?.let { displayCoordinator.observeActivityEnvironment(this, sessionEpoch); displayCoordinator.onActivityMoved(lease, it); return }
-        val policyOnly = policyOnlyRefresh
-        if (!policyOnly) { updateInputDeviceListener(); attachingDesktopInput = true; try { applyWindowGeometry() } finally { attachingDesktopInput = false } }
-        val environment = displayCoordinator.environmentForDisplay(lease.displayId) ?: return
-        val profileKind = currentProfileKind()
-        val devs = android.view.InputDevice.getDeviceIds().asSequence().mapNotNull { android.view.InputDevice.getDevice(it) }.toList()
-        val rawInput = runCatching { evidenceProbe.presentationContext(lease.displayId, PixelSize(1, 1)).input }.getOrElse {
-            fallbackInputCapabilities(devs.any { it.supportsSource(android.view.InputDevice.SOURCE_TOUCHSCREEN) }, devs.any { it.isExternal && (it.supportsSource(android.view.InputDevice.SOURCE_MOUSE) || it.supportsSource(android.view.InputDevice.SOURCE_TOUCHPAD)) }, devs.any { it.supportsSource(android.view.InputDevice.SOURCE_MOUSE) }, devs.any { it.supportsSource(android.view.InputDevice.SOURCE_TOUCHPAD) }, devs.any { !it.isVirtual && it.supportsSource(android.view.InputDevice.SOURCE_KEYBOARD) && it.keyboardType == android.view.InputDevice.KEYBOARD_TYPE_ALPHABETIC }, devs.any { it.supportsSource(android.view.InputDevice.SOURCE_STYLUS) })
-        }
-        val vc = android.view.ViewConfiguration.get(this); val fb = sanitizeScrollFactor(64f * resources.displayMetrics.density)
-        val touchIds = devs.filter { it.supportsSource(android.view.InputDevice.SOURCE_TOUCHSCREEN) }.mapTo(mutableSetOf()) { it.id }
-        currentInputContext = DesktopInputContext(lease.displayId, environment, profileKind, resources.configuration.uiMode and Configuration.UI_MODE_TYPE_MASK == Configuration.UI_MODE_TYPE_DESK, displayCoordinator.loadSettings(profileKind, lease.displayId), rawInput, devs.any { !it.isExternal && it.supportsSource(android.view.InputDevice.SOURCE_TOUCHSCREEN) }, touchIds, sanitizeScrollFactor(vc.scaledHorizontalScrollFactor, fb), sanitizeScrollFactor(vc.scaledVerticalScrollFactor, fb))
-        if (inputController == null) {
+        displayCoordinator.environmentForDisplay(lease.displayId) ?: return; updateInputDeviceListener()
+        val newlyCreated = inputController == null
+        if (newlyCreated) {
             inputController = X11InputController(
-                lorieView!!, lease.generation, 1,
+                lorieView!!, lease.generation, presentationPlanner.currentPlan?.input?.defaultInputMode ?: 1,
                 onModeChanged = { mode ->
-                    val kind = currentProfileKind()
-                    val saved = displayCoordinator.loadSettings(kind, lease.displayId)
-                        ?: DisplayProfilePolicy.defaults(kind)
-                    displayCoordinator.saveProfileSettings(kind, saved.copy(inputMode = mode))
-                    refreshInputPolicyOnly()
+                    val activePlan = presentationPlanner.currentPlan; val kind = activePlan?.profileKind ?: ProfileKind.PHONE
+                    val saved = displayCoordinator.loadSettings(kind, lease.displayId) ?: activePlan?.settings ?: DisplayProfilePolicy.defaults(kind)
+                    displayCoordinator.saveProfileSettings(kind, saved.copy(inputMode = mode)); refreshInputPolicyOnly()
                 },
                 onThreeFingerTap = ::toggleKeyboard,
                 onViewportChanged = { _, _, transform ->
@@ -589,15 +582,30 @@ class DesktopActivity : Activity() {
                     updateOverlayOffsets()
                     scheduleGeometry()
                 },
-                onDirectTouchObserved = { deviceId -> if (inputRouter.promoteDirectTouch(lease.displayId, deviceId)) refreshInputPolicyOnly() },
+                onDirectTouchObserved = { deviceId -> if (presentationPlanner.promoteDirectTouch(lease.displayId, deviceId)) refreshInputPolicyOnly() },
             )
         }
-        inputRouter.refresh()
-        if (policyOnly) return
-        addDesktopControls()
-        lorieView?.requestFocus()
-        inputController?.reacquireFocus()
-        attachingDesktopInput = true; try { applyWindowGeometry() } finally { attachingDesktopInput = false }
+        forceNextRelaySync = true; applyWindowGeometry(); if (lastAppliedController !== inputController || forceNextRelaySync) refreshInputPolicyOnly()
+        if (newlyCreated) { addDesktopControls(); lorieView?.requestFocus(); inputController?.reacquireFocus() }
+    }
+
+    private fun currentInputDevices(): List<android.view.InputDevice> = android.view.InputDevice.getDeviceIds().asSequence().mapNotNull { android.view.InputDevice.getDevice(it) }.toList()
+
+    @Suppress("DEPRECATION")
+    private fun readRawPresentationContext(displayId: Int, activeWindowSize: PixelSize?, devs: List<android.view.InputDevice>): PresentationContext = runCatching { evidenceProbe.presentationContext(displayId, activeWindowSize) }.getOrElse {
+        val target = lorieView?.display?.takeIf { it.displayId == displayId } ?: getSystemService(android.hardware.display.DisplayManager::class.java)?.getDisplay(displayId) ?: (if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) display else null)?.takeIf { it.displayId == displayId } ?: windowManager.defaultDisplay.takeIf { it.displayId == displayId }
+        val isDefault = displayId == android.view.Display.DEFAULT_DISPLAY; val cfg = (target?.let(::createDisplayContext) ?: this).resources.configuration
+        val currentMode = target?.mode?.toEvidenceOrNull(); val supported = target?.supportedModes?.mapNotNull { it?.toEvidenceOrNull() }?.distinctBy { it.modeId }.orEmpty()
+        val windowSize = activeWindowSize?.takeIf { it.width > 0 && it.height > 0 } ?: lorieView?.let { PixelSize(it.width, it.height) }?.takeIf { it.width > 0 && it.height > 0 } ?: currentMode?.let { PixelSize(it.width, it.height) } ?: resources.displayMetrics.let { PixelSize(it.widthPixels.coerceAtLeast(1), it.heightPixels.coerceAtLeast(1)) }
+        PresentationContext(displayId, target?.name ?: if (isDefault) "Built-in screen" else "External display", target?.flags ?: 0, isDefault, windowSize, cfg.densityDpi.coerceAtLeast(0), cfg.fontScale.takeIf { it.isFinite() && it > 0f } ?: 1f, cfg.uiMode and Configuration.UI_MODE_TYPE_MASK == Configuration.UI_MODE_TYPE_DESK, currentMode, supported, fallbackInputCapabilities(devs.any { it.supportsSource(android.view.InputDevice.SOURCE_TOUCHSCREEN) }, devs.any { it.isExternal && (it.supportsSource(android.view.InputDevice.SOURCE_MOUSE) || it.supportsSource(android.view.InputDevice.SOURCE_TOUCHPAD)) }, devs.any { it.supportsSource(android.view.InputDevice.SOURCE_MOUSE) }, devs.any { it.supportsSource(android.view.InputDevice.SOURCE_TOUCHPAD) }, devs.any { isTypingKeyboardDevice(it.isVirtual, it.supportsSource(android.view.InputDevice.SOURCE_KEYBOARD), it.keyboardType) }, devs.any { it.supportsSource(android.view.InputDevice.SOURCE_STYLUS) }))
+    }
+
+    private fun readPresentationSnapshot(windowSizeForDisplay: (Int) -> PixelSize?): DesktopPresentationSnapshot? {
+        val lease = rendererLease ?: return null; val displayId = lorieView?.display?.displayId ?: lease.displayId
+        if (!isCurrentRenderer() || displayId != lease.displayId) return null
+        val environment = displayCoordinator.environmentForDisplay(displayId) ?: return null
+        val devs = currentInputDevices(); val vc = android.view.ViewConfiguration.get(this); val fb = sanitizeScrollFactor(64f * resources.displayMetrics.density)
+        return DesktopPresentationSnapshot(readRawPresentationContext(displayId, windowSizeForDisplay(displayId), devs), environment, capabilityCache.current(), devs.any { !it.isExternal && it.supportsSource(android.view.InputDevice.SOURCE_TOUCHSCREEN) }, devs.filter { it.supportsSource(android.view.InputDevice.SOURCE_TOUCHSCREEN) }.mapTo(mutableSetOf()) { it.id }, sanitizeScrollFactor(vc.scaledHorizontalScrollFactor, fb), sanitizeScrollFactor(vc.scaledVerticalScrollFactor, fb))
     }
 
     private fun updateInputDeviceListener() {
@@ -623,12 +631,6 @@ class DesktopActivity : Activity() {
         )
         inputDeviceListenerRegistered = false
     }
-
-    private fun currentProfileKind(): ProfileKind = DisplayProfilePolicy.classify(
-        (lorieView?.display?.displayId ?: windowManager.defaultDisplay.displayId) == android.view.Display.DEFAULT_DISPLAY,
-        resources.configuration.smallestScreenWidthDp,
-        resources.configuration.uiMode and Configuration.UI_MODE_TYPE_MASK == Configuration.UI_MODE_TYPE_DESK,
-    )
 
     private fun scheduleGeometry() {
         if (geometryQueued || !::placeholder.isInitialized || rendererCleanup.isReleased) return
@@ -687,27 +689,19 @@ class DesktopActivity : Activity() {
             return
         }
         val remaining = remainingWindowInsets(view) ?: return
+        if (geometryQueued && ::placeholder.isInitialized) { placeholder.removeCallbacks(geometryUpdate); geometryQueued = false }
         lastWindowInsets?.let(::updateExtraKeysBar)
         val keysHeight = extraKeysBar?.takeIf { it.visibility == View.VISIBLE }?.height ?: 0
-        currentInsets = remaining.copy(bottom = remaining.bottom + keysHeight)
+        val nextInsets = remaining.copy(bottom = remaining.bottom + keysHeight)
         val content = PixelSize(
-            view.width - currentInsets.left - currentInsets.right,
-            view.height - currentInsets.top - currentInsets.bottom,
+            view.width - nextInsets.left - nextInsets.right,
+            view.height - nextInsets.top - nextInsets.bottom,
         )
         if (content.width <= 0 || content.height <= 0) return
-        val kind = currentProfileKind()
-        val displayId = view.display?.displayId ?: lease.displayId
-        val profile = DisplayProfilePolicy.resolve(
-            kind,
-            content,
-            displayCoordinator.loadSettings(kind, displayId),
-        )
-        val render = DisplayProfilePolicy.renderSize(content, profile.settings.renderPolicy) ?: return
-        applyDisplayProfile(profile)
-        view.setDesktopRenderSize(render.width, render.height)
-        view.setContentInsets(currentInsets.left, currentInsets.top, currentInsets.right, currentInsets.bottom)
+        val previousInsets = currentInsets; currentInsets = nextInsets
+        val plan = presentationPlanner.updateMeasuredWindow(content, forceNextRelaySync.also { forceNextRelaySync = false }) ?: run { currentInsets = previousInsets; return }
         val appliedRender = view.renderedSize ?: return
-        displayCoordinator.reportGeometry(lease, kind, PixelSize(appliedRender.x, appliedRender.y))
+        displayCoordinator.reportGeometry(lease, plan.profileKind, PixelSize(appliedRender.x, appliedRender.y))
         if (inputController != null && LorieView.connected()) {
             if (displayCoordinator.consumeSessionStart(lease)) {
                 shouldStartSession = true
@@ -727,26 +721,21 @@ class DesktopActivity : Activity() {
             }
             displayCoordinator.onAttached(lease, displayRequestId, content)
         }
-        updateOverlayOffsets()
         val retry = explicitProfileRetry
         explicitProfileRetry = false
         applyLiveProfile(force = retry)
     }
 
-    fun applyDisplayProfile(profile: DisplayProfile) {
-        if (currentProfile == profile) return
-        currentProfile = profile
-        TermuxMainActivity.getPrefs().apply {
-            displayResolutionMode.put(when (profile.settings.renderPolicy) {
-                RenderPolicy.NATIVE -> "native"
-                RenderPolicy.LEGACY_PHONE -> "scaled"
-                else -> "exact"
-            })
-            displayStretch.put(profile.kind == ProfileKind.PHONE && profile.settings.renderPolicy == RenderPolicy.LEGACY_PHONE)
-            scaleTouchpad.put(true)
+    private fun applyPresentationPlan(plan: PresentationPlan, contentSize: PixelSize?): ExternalDesktopInputTarget? {
+        currentProfile = plan.toDisplayProfile(); val controller = inputController
+        if (lastAppliedPlan != plan || lastAppliedController !== controller) {
+            lastAppliedPlan = plan; lastAppliedController = controller
+            val prefs = TermuxMainActivity.getPrefs().apply { displayResolutionMode.put(when (plan.settings.renderPolicy) { RenderPolicy.NATIVE -> "native"; RenderPolicy.LEGACY_PHONE -> "scaled"; else -> "exact" }); displayStretch.put(plan.presentationClass == PresentationClass.PHONE_TOUCH && plan.settings.renderPolicy == RenderPolicy.LEGACY_PHONE); scaleTouchpad.put(true); pointerCapture.put(plan.input.rendererPointerCapture) }
+            lorieView?.reloadPreferences(prefs); controller?.applyDecision(plan.input); inputModeButton?.let(::showInputMode)
         }
-        if (!attachingDesktopInput && inputController != null) refreshInputPolicyOnly()
-        inputModeButton?.let(::showInputMode)
+        applyWindowRefresh(plan.refresh)
+        if (contentSize != null) { lorieView?.setDesktopRenderSize(plan.renderSize.width, plan.renderSize.height); lorieView?.setContentInsets(currentInsets.left, currentInsets.top, currentInsets.right, currentInsets.bottom) }
+        updateOverlayOffsets(); return controller
     }
 
     private fun applyLiveProfile(force: Boolean = false) {
@@ -794,8 +783,8 @@ class DesktopActivity : Activity() {
     }
 
     private fun updateOverlayOffsets() {
-        val profile = currentProfile ?: return
-        val bottom = currentInsets.bottom + (profile.dockPx * viewportYScale).toInt() +
+        val dockPx = presentationPlanner.currentPlan?.dockPx ?: currentProfile?.dockPx ?: return
+        val bottom = currentInsets.bottom + (dockPx * viewportYScale).toInt() +
             (8 * resources.displayMetrics.density).toInt()
         for (control in listOfNotNull(controlOverlay, collapsedControl)) {
             val params = control.layoutParams as? FrameLayout.LayoutParams ?: continue
@@ -885,7 +874,7 @@ class DesktopActivity : Activity() {
         }
 
         // Sit just above XFCE's bottom dock, which is scaled up with the X11 display.
-        val dockHeight = ((currentProfile?.dockPx ?: XfceMobileProfile.DOCK_SIZE_PX) * viewportYScale).toInt()
+        val dockHeight = ((presentationPlanner.currentPlan?.dockPx ?: currentProfile?.dockPx ?: XfceMobileProfile.DOCK_SIZE_PX) * viewportYScale).toInt()
         val overlayParams = FrameLayout.LayoutParams(
             FrameLayout.LayoutParams.WRAP_CONTENT,
             FrameLayout.LayoutParams.WRAP_CONTENT,
@@ -1128,7 +1117,7 @@ class DesktopActivity : Activity() {
         val mode = sessionMode
         val environmentKind = EnvironmentKind.fromSessionMode(mode)
         val desktop = desktopEnv
-        val initialProfile = currentProfile ?: DisplayProfilePolicy.phoneDefaultProfile()
+        val initialProfile = presentationPlanner.currentPlan?.toDisplayProfile() ?: currentProfile ?: DisplayProfilePolicy.phoneDefaultProfile()
         val app = applicationContext
         val activity = java.lang.ref.WeakReference(this)
         DroidDeskService.executeSession {
@@ -1387,7 +1376,7 @@ class DesktopActivity : Activity() {
                 useTermuxEKBarBehaviour = false
             }
         }
-        currentInputContext = null; inputRouter.release(inputController)
+        lastAppliedPlan = null; lastAppliedController = null; presentationPlanner.release(inputController)
         inputController?.dispose()
         inputController = null
     }
@@ -1397,6 +1386,7 @@ class DesktopActivity : Activity() {
         ownsLorieView: Boolean,
     ) {
         unregisterInputDeviceListener()
+        appliedRefreshRequest = null; forceNextRelaySync = false
         sessionStartPending = false
         awaitingSessionStart = false
         profileRevision++

@@ -5,16 +5,26 @@ import android.view.InputDevice
 import android.view.MotionEvent
 import com.orailnoor.droiddesk.display.DisplayEnvironment
 import com.orailnoor.droiddesk.display.DisplaySettings
-import com.orailnoor.droiddesk.display.ProfileKind
+import com.orailnoor.droiddesk.display.PixelSize
 import com.orailnoor.droiddesk.display.RenderPolicy
+import com.orailnoor.droiddesk.display.capability.DisplayModeEvidence
 import com.orailnoor.droiddesk.display.capability.InputCapabilities
 import com.orailnoor.droiddesk.display.capability.PointerAssociationEvidence
 import com.orailnoor.droiddesk.display.capability.PresentationClass
+import com.orailnoor.droiddesk.display.capability.PresentationContext
 import com.orailnoor.droiddesk.display.capability.TouchEvidence
 import com.orailnoor.droiddesk.display.input.DesktopInputPolicy
 import com.orailnoor.droiddesk.display.input.ExternalInputRoute
 import com.orailnoor.droiddesk.display.input.ExternalInputRoutePreference
 import com.orailnoor.droiddesk.display.input.InputPolicyDecision
+import com.orailnoor.droiddesk.display.policy.PresentationPolicy
+import com.orailnoor.droiddesk.display.support.PresentationFixtures
+import com.orailnoor.droiddesk.runtime.CapabilityEvidence
+import com.orailnoor.droiddesk.runtime.DistributionChannel
+import com.orailnoor.droiddesk.runtime.DistributionContract
+import com.orailnoor.droiddesk.runtime.EvidenceState
+import com.orailnoor.droiddesk.runtime.RendererBackend
+import com.orailnoor.droiddesk.runtime.RuntimeCapabilities
 import com.orailnoor.droiddesk.x11.ExternalDesktopInputBridge
 import com.orailnoor.droiddesk.x11.ExternalDesktopInputTarget
 import com.orailnoor.droiddesk.x11.isDirectTouchEvent
@@ -50,7 +60,7 @@ class DesktopInputRoutingTest {
             ),
         )
 
-        val relayDecision = checkNotNull(harness.router.refresh())
+        val relayDecision = checkNotNull(harness.router.refresh()?.input)
 
         assertEquals(1, harness.contextReads)
         assertEquals(TouchInputHandler.InputMode.TRACKPAD, relayDecision.defaultInputMode)
@@ -69,7 +79,7 @@ class DesktopInputRoutingTest {
             displayId = 10,
             pointerAssociation = PointerAssociationEvidence.TARGET_DISPLAY,
         )
-        val nativeDecision = checkNotNull(harness.router.refresh())
+        val nativeDecision = checkNotNull(harness.router.refresh()?.input)
 
         assertEquals(2, harness.contextReads)
         assertEquals(ExternalInputRoute.NATIVE, nativeDecision.externalInputRoute)
@@ -99,6 +109,7 @@ class DesktopInputRoutingTest {
 
     @Test
     fun defaultDisplayInternalTouchMapsToPhoneAndLargeTouchClasses() {
+        val policy = PresentationPolicy()
         val phoneCapabilities = effectiveInputCapabilities(
             isDefaultDisplay = true,
             hasInternalTouchscreen = true,
@@ -115,11 +126,18 @@ class DesktopInputRoutingTest {
         assertEquals(TouchEvidence.CURRENT_DISPLAY, phoneCapabilities.touch)
         assertEquals(
             PresentationClass.PHONE_TOUCH,
-            resolvePresentationClass(true, ProfileKind.PHONE, phoneCapabilities.touch),
+            policy.classify(
+                PresentationFixtures.nx888jPhone.copyWithSnapshot(input = phoneCapabilities),
+            ),
         )
         assertEquals(
             PresentationClass.LARGE_TOUCH,
-            resolvePresentationClass(true, ProfileKind.WIDE, phoneCapabilities.touch),
+            policy.classify(
+                PresentationFixtures.foldableNarrowWindow.copyWithSnapshot(
+                    windowSizePx = PixelSize(1768, 2208),
+                    input = phoneCapabilities,
+                ),
+            ),
         )
 
         val externalCapabilities = effectiveInputCapabilities(
@@ -131,7 +149,9 @@ class DesktopInputRoutingTest {
         assertEquals(TouchEvidence.UNKNOWN_ASSOCIATION, externalCapabilities.touch)
         assertEquals(
             PresentationClass.EXTERNAL_POINTER,
-            resolvePresentationClass(false, ProfileKind.MONITOR, externalCapabilities.touch),
+            policy.classify(
+                PresentationFixtures.nx888jHdmi.copyWithSnapshot(input = externalCapabilities),
+            ),
         )
     }
 
@@ -548,6 +568,11 @@ class DesktopInputRoutingTest {
 
     private fun newTarget() = FakeExternalInputTarget().also(createdTargets::add)
 
+    private data class ExternalFixture(
+        val snapshot: DesktopPresentationSnapshot,
+        val savedSettings: DisplaySettings?,
+    )
+
     private fun externalSnapshot(
         displayId: Int,
         pointerAssociation: PointerAssociationEvidence,
@@ -559,49 +584,89 @@ class DesktopInputRoutingTest {
         savedSettings: DisplaySettings? = null,
         horizontalScrollFactor: Float = 48f,
         verticalScrollFactor: Float = 64f,
-    ) = DesktopInputContext(
-        displayId = displayId,
-        environment = DisplayEnvironment.OTHER_EXTERNAL,
-        profileKind = ProfileKind.MONITOR,
-        desktopUiMode = desktopUiMode,
-        savedSettings = savedSettings,
-        rawInput = InputCapabilities(
-            touch = touch,
-            pointerAssociation = pointerAssociation,
-            hasMouse = hasMouse,
-            hasTouchpad = false,
-            hasKeyboard = true,
-            hasStylus = false,
+    ) = ExternalFixture(
+        snapshot = DesktopPresentationSnapshot(
+            rawContext = PresentationContext(
+                displayId = displayId,
+                displayName = "External $displayId",
+                displayFlags = 0,
+                isDefaultDisplay = displayId == Display.DEFAULT_DISPLAY,
+                windowSizePx = PixelSize(1920, 1080),
+                densityDpi = 160,
+                fontScale = 1f,
+                isDesktopUiMode = desktopUiMode,
+                currentMode = DisplayModeEvidence(1, 1920, 1080, 60f),
+                supportedModes = listOf(DisplayModeEvidence(1, 1920, 1080, 60f)),
+                input = InputCapabilities(
+                    touch = touch,
+                    pointerAssociation = pointerAssociation,
+                    hasMouse = hasMouse,
+                    hasTouchpad = false,
+                    hasKeyboard = true,
+                    hasStylus = false,
+                ),
+            ),
+            environment = DisplayEnvironment.OTHER_EXTERNAL,
+            runtimeCapabilities = runtimeCapabilities(),
+            hasInternalTouchscreen = hasInternalTouchscreen,
+            touchscreenDeviceIds = touchscreenDeviceIds,
+            horizontalScrollFactor = horizontalScrollFactor,
+            verticalScrollFactor = verticalScrollFactor,
         ),
-        hasInternalTouchscreen = hasInternalTouchscreen,
-        touchscreenDeviceIds = touchscreenDeviceIds,
-        horizontalScrollFactor = horizontalScrollFactor,
-        verticalScrollFactor = verticalScrollFactor,
+        savedSettings = savedSettings,
     )
 
-    private inner class RouterHarness(var snapshot: DesktopInputContext?) {
+    private fun runtimeCapabilities(): RuntimeCapabilities {
+        val probed = CapabilityEvidence(EvidenceState.SUPPORTED_AND_PROBED)
+        return RuntimeCapabilities(
+            hostApiLevel = 34,
+            abi = "arm64-v8a",
+            host = probed,
+            localExecution = probed,
+            proot = probed,
+            x11 = probed,
+            audio = probed,
+            clipboard = probed,
+            chroot = CapabilityEvidence(EvidenceState.UNAVAILABLE, "Not rooted"),
+            avfFeature = CapabilityEvidence(EvidenceState.UNAVAILABLE, "Absent"),
+            avfPermission = CapabilityEvidence(EvidenceState.UNAVAILABLE, "Absent"),
+            renderer = probed,
+            rendererBackend = RendererBackend.SOFTWARE_LLVMPIPE,
+            storage = probed,
+            availableBytes = 10L * 1024 * 1024 * 1024,
+            requiredBytes = 2L * 1024 * 1024 * 1024,
+            distribution = DistributionContract(
+                channel = DistributionChannel.SIDELOAD_LOCAL_LINUX,
+                targetSdk = 28,
+                requiresAppPrivateElfExecution = true,
+            ),
+        )
+    }
+
+    private inner class RouterHarness(var snapshot: ExternalFixture?) {
         val target = newTarget()
         val appliedDecisions = mutableListOf<InputPolicyDecision>()
         val relayLifecycle = mutableListOf<String>()
         var contextReads = 0
 
-        val router = DesktopInputRouter(
-            readContext = {
+        val router = DesktopPresentationPlanner(
+            readSnapshot = {
                 contextReads++
-                snapshot
+                snapshot?.snapshot
             },
-            applyRenderer = { decision ->
-                appliedDecisions += decision
+            loadSettings = { _, _ -> snapshot?.savedSettings },
+            applyPlan = { plan, _ ->
+                appliedDecisions += plan.input
                 target
             },
             openRelay = { relayLifecycle += "open" },
             closeRelay = { relayLifecycle += "close" },
         )
 
-        fun refresh(): InputPolicyDecision = checkNotNull(router.refresh())
+        fun refresh(): InputPolicyDecision = checkNotNull(router.refresh()).input
 
         fun onDirectTouchObserved(displayId: Int, deviceId: Int): InputPolicyDecision? =
-            if (router.promoteDirectTouch(displayId, deviceId)) router.refresh() else appliedDecisions.lastOrNull()
+            if (router.promoteDirectTouch(displayId, deviceId)) router.refresh()?.input else appliedDecisions.lastOrNull()
     }
 
     private class FakeExternalInputTarget : ExternalDesktopInputTarget {
