@@ -39,6 +39,7 @@ import com.orailnoor.droiddesk.display.DesktopDisplayException
 import com.orailnoor.droiddesk.display.DesktopItemReadinessGate
 import com.orailnoor.droiddesk.display.DesktopLaunchReply
 import com.orailnoor.droiddesk.display.DesktopPlacementDiagnostics
+import com.orailnoor.droiddesk.display.InFlightDesktopOpenSpec
 import com.orailnoor.droiddesk.display.placement.DesktopOpenRequest
 import com.orailnoor.droiddesk.display.input.shouldCaptureRelayedPointer
 import com.orailnoor.droiddesk.packages.PackageStoreException
@@ -99,6 +100,95 @@ internal fun deferResolvedDesktopOpenIfNeeded(
 internal data class ProvisioningOpenCallbacks(val startService: () -> Unit, val onCompletion: (Result<Unit>) -> Unit)
 internal fun provisioningOpenCallbacks(epoch: Long, startForegroundService: () -> Unit, completeProvisioning: (Long) -> Unit, failProvisioning: (Long, Throwable) -> Unit) =
     ProvisioningOpenCallbacks({ startForegroundService(); completeProvisioning(epoch) }) { it.exceptionOrNull()?.let { err -> failProvisioning(epoch, err) } ?: completeProvisioning(epoch) }
+
+internal sealed interface DesktopItemAdmission {
+    data class InFlight(val open: InFlightDesktopOpenSpec) : DesktopItemAdmission
+    data class Epoch(val expectedEpoch: Long) : DesktopItemAdmission
+}
+internal fun admitDesktopItemLaunch(inFlight: InFlightDesktopOpenSpec?, isStopped: Boolean, hasRunningSession: Boolean, sessionGeneration: Long, beginSession: () -> Long, provisioningInFlight: Boolean = false): DesktopItemAdmission =
+    if (inFlight != null) DesktopItemAdmission.InFlight(inFlight)
+    else if (provisioningInFlight) throw DesktopDisplayException("INVALID_ARGUMENT", "Linux desktop is still provisioning")
+    else DesktopItemAdmission.Epoch(if (!isStopped && hasRunningSession) sessionGeneration else beginSession())
+
+internal fun isDesktopItemSessionLive(initialStopGeneration: Long, currentUserStopGeneration: Long, isStopped: Boolean, isRestarting: Boolean): Boolean =
+    currentUserStopGeneration == initialStopGeneration && (!isStopped || isRestarting)
+
+internal fun <S> resolveDesktopItemStatus(
+    expectedEpoch: Long, isSessionCurrent: (Long) -> Boolean, status: Result<S>, isStatusRunning: (S) -> Boolean,
+    sessionLive: Boolean, hasRunningSession: Boolean = false, isRestarting: Boolean = false, provisioningInFlight: Boolean = false,
+    inFlightOpen: () -> InFlightDesktopOpenSpec?, currentRunningOpen: (() -> InFlightDesktopOpenSpec)? = null,
+    onInFlight: (InFlightDesktopOpenSpec) -> Unit, onReady: (S, Boolean, Long?) -> Unit, onFailure: (Throwable) -> Unit,
+) {
+    if (!sessionLive || provisioningInFlight) return onFailure(DesktopDisplayException("SESSION_STOPPED", "The session was stopped before the asynchronous desktop action completed"))
+    inFlightOpen()?.let { onInFlight(it); return }
+    val currentEpoch = expectedEpoch.takeIf(isSessionCurrent)
+    if (currentEpoch == null) {
+        if (hasRunningSession && currentRunningOpen != null) return onInFlight(currentRunningOpen())
+        if (!hasRunningSession) return onFailure(DesktopDisplayException("SESSION_STOPPED", "The session was stopped before the asynchronous desktop action completed"))
+    }
+    status.fold({ onReady(it, !isStatusRunning(it) && !hasRunningSession && !isRestarting, currentEpoch) }, onFailure)
+}
+
+internal fun runDesktopItemAfterOpen(
+    openEpoch: Long, stopGeneration: Long, coordinator: DesktopDisplayCoordinator, isProvisioningActive: () -> Boolean,
+    spawnReadiness: (() -> Unit) -> Unit, waitUntilReady: () -> Boolean, executeOnSession: (() -> Unit) -> Unit,
+    executeCommand: () -> Result<Pair<Int, String>>, postToMain: (() -> Unit) -> Unit, onRejoin: (InFlightDesktopOpenSpec) -> Unit, result: MethodChannel.Result,
+) {
+    val settled = java.util.concurrent.atomic.AtomicBoolean(false)
+    val cancelled = java.util.concurrent.atomic.AtomicBoolean(false)
+    val readinessThread = java.util.concurrent.atomic.AtomicReference<Thread?>(null)
+    var observedPreserveRestart = false; var unsubscribe: () -> Unit = {}
+    fun isEpochActive() = coordinator.userStopGeneration == stopGeneration && !isProvisioningActive() && coordinator.isSessionCurrent(openEpoch)
+    fun finish(action: () -> Unit): Boolean { if (settled.compareAndSet(false, true)) { unsubscribe(); action() }; return true }
+    fun settleOnMain(failure: Throwable? = null, output: Pair<Int, String>? = null): Boolean {
+        if (settled.get()) return true
+        if (coordinator.userStopGeneration != stopGeneration || isProvisioningActive() || (coordinator.isStopped && !coordinator.isRestarting)) {
+            return finish { result.error("SESSION_STOPPED", "Desktop launch was cancelled", null) }
+        }
+        if (coordinator.isRestarting || !coordinator.isSessionCurrent(openEpoch)) {
+            val rejoin = when {
+                coordinator.isRestarting -> coordinator.inFlightOpenSpec()
+                observedPreserveRestart && coordinator.hasRunningSession ->
+                    coordinator.inFlightOpenSpec() ?: InFlightDesktopOpenSpec(coordinator.sessionMode, coordinator.desktopEnv, false, coordinator.sessionGeneration)
+                else -> null
+            }
+            return finish { if (rejoin != null) onRejoin(rejoin) else result.error("SESSION_STOPPED", "Desktop launch was cancelled", null) }
+        }
+        if (failure != null) return finish { result.error((failure as? DesktopDisplayException)?.code ?: "DESKTOP_LAUNCH_FAILED", failure.message ?: "The Linux desktop did not become ready", null) }
+        if (output != null) return finish { if (output.first != 0) result.error("DESKTOP_LAUNCH_FAILED", output.second, null) else result.success(true) }
+        if (cancelled.get()) return finish { result.error("SESSION_STOPPED", "Desktop launch was cancelled", null) }
+        return false
+    }
+    unsubscribe = coordinator.subscribe {
+        if (settled.get() || isEpochActive()) return@subscribe
+        if (coordinator.isRestarting) observedPreserveRestart = true
+        cancelled.set(true)
+        readinessThread.get()?.takeIf { it !== Thread.currentThread() }?.interrupt()
+        postToMain { settleOnMain() }
+    }
+    if (settleOnMain()) return
+    spawnReadiness {
+        val currentThread = Thread.currentThread()
+        readinessThread.set(currentThread)
+        try {
+            if (cancelled.get() || settled.get()) { postToMain { settleOnMain() }; return@spawnReadiness }
+            val readiness = DesktopItemReadinessGate(
+                isSessionCurrent = { !cancelled.get() && !settled.get() && isEpochActive() },
+                waitUntilReady = waitUntilReady,
+            ).await {
+                executeOnSession {
+                    if (cancelled.get() || settled.get() || !isEpochActive()) { postToMain { settleOnMain() }; return@executeOnSession }
+                    val launched = executeCommand()
+                    postToMain { launched.fold({ settleOnMain(output = it) }, { settleOnMain(failure = it) }) }
+                }
+            }
+            readiness.exceptionOrNull()?.let { failure -> postToMain { settleOnMain(failure = failure) } }
+        } finally {
+            readinessThread.compareAndSet(currentThread, null)
+            if (cancelled.get() || settled.get()) Thread.interrupted()
+        }
+    }
+}
 
 internal fun userStopLaunchReply(result: MethodChannel.Result, coordinator: DesktopDisplayCoordinator): MethodChannel.Result {
     val stopGeneration = coordinator.userStopGeneration; val completed = java.util.concurrent.atomic.AtomicBoolean(false); var unsubscribe: () -> Unit = {}
@@ -953,51 +1043,23 @@ class MainActivity : FlutterActivity() {
                             result.success(true)
                         }
                         "linux", "folder" -> {
-                            val reply = DesktopLaunchReply(result, displays)
-                            if (displays.isDisplayLocal) {
-                                launchLocalDesktopItem(kind, id, reply)
-                                return@setMethodCallHandler
-                            }
-                            val epoch = try {
-                                displays.beginSession()
-                            } catch (error: DesktopDisplayException) {
-                                displayFailure(error, reply)
-                                return@setMethodCallHandler
-                            }
-                            thread(name = "launch-desktop-item") {
-                                if (!displays.isSessionCurrent(epoch)) {
-                                    runOnUiThread { reply.error("SESSION_STOPPED", "Desktop launch was cancelled", null) }
-                                    return@thread
-                                }
-                                val status = environmentManager.status()
-                                val environmentKind = status.kind
-                                if (!status.running) {
-                                    runOnUiThread { openDesktop(startSession = true, expectedEpoch = epoch) }
-                                    environmentManager.waitForDesktopReady(
-                                        status.desktop,
-                                        kind = environmentKind,
-                                    )
-                                }
-                                val command = desktopItemCommand(
-                                    kind,
-                                    id,
-                                    environmentManager.paths(environmentKind),
-                                )
-                                if (!displays.isSessionCurrent(epoch)) {
-                                    runOnUiThread { reply.error("SESSION_STOPPED", "Desktop launch was cancelled", null) }
-                                    return@thread
-                                }
-                                val launched = environmentManager.execute(
-                                    ExecutionRequest.Desktop(environmentKind, command),
-                                )
-                                runOnUiThread {
-                                    if (!displays.isSessionCurrent(epoch)) {
-                                        reply.error("SESSION_STOPPED", "Desktop launch was cancelled", null)
-                                    } else if (launched.exitCode != 0) {
-                                        reply.error("DESKTOP_LAUNCH_FAILED", launched.output, null)
-                                    } else {
-                                        if (status.running) openDesktop(startSession = false, expectedEpoch = epoch)
-                                        reply.success(true)
+                            val reply = userStopLaunchReply(result, displays)
+                            val stopGeneration = displays.userStopGeneration
+                            val itemAdmission = try {
+                                admitDesktopItemLaunch(displays.inFlightOpenSpec(), displays.isStopped, displays.hasRunningSession, displays.sessionGeneration, displays::beginSession, isProvisioningActive(displays))
+                            } catch (error: DesktopDisplayException) { displayFailure(error, reply); return@setMethodCallHandler }
+                            when (itemAdmission) {
+                                is DesktopItemAdmission.InFlight -> launchDesktopItemAfterOpen(kind, id, reply, itemAdmission.open.mode, itemAdmission.open.desktopEnv, itemAdmission.open.startSession, itemAdmission.open.expectedEpoch, stopGeneration)
+                                is DesktopItemAdmission.Epoch -> thread(name = "launch-desktop-item") {
+                                    val status = if (displays.userStopGeneration == stopGeneration && !isProvisioningActive(displays)) runCatching(environmentManager::status)
+                                    else Result.failure(DesktopDisplayException("SESSION_STOPPED", "The session was stopped before the asynchronous desktop action completed"))
+                                    runOnUiThread {
+                                        resolveDesktopItemStatus(itemAdmission.expectedEpoch, displays::isSessionCurrent, status, { it.running },
+                                            isDesktopItemSessionLive(stopGeneration, displays.userStopGeneration, displays.isStopped, displays.isRestarting), displays.hasRunningSession, displays.isRestarting, isProvisioningActive(displays), displays::inFlightOpenSpec,
+                                            { InFlightDesktopOpenSpec(displays.sessionMode, displays.desktopEnv, false, displays.sessionGeneration) },
+                                            { launchDesktopItemAfterOpen(kind, id, reply, it.mode, it.desktopEnv, it.startSession, it.expectedEpoch, stopGeneration) },
+                                            { ready, startSession, epoch -> launchDesktopItemAfterOpen(kind, id, reply, ready.kind.sessionMode, ready.desktop, startSession, epoch, stopGeneration) },
+                                            { displayFailure(it, reply) })
                                     }
                                 }
                             }
@@ -1465,150 +1527,28 @@ class MainActivity : FlutterActivity() {
         )
     }
 
-    private fun openDesktop(startSession: Boolean, expectedEpoch: Long? = null) {
-        val status = environmentManager.status()
-        requestDesktop(
-            status.kind.sessionMode,
-            status.desktop,
-            startSession,
-            expectedEpoch = expectedEpoch,
-        )
-    }
-
-    private fun requestDesktop(
-        mode: String,
-        desktop: String,
-        start: Boolean,
-        result: MethodChannel.Result? = null,
-        expectedEpoch: Long? = null,
+    private fun launchDesktopItemAfterOpen(
+        kind: String, id: String, result: MethodChannel.Result, mode: String, desktop: String,
+        startSession: Boolean, expectedEpoch: Long?, stopGeneration: Long = DesktopDisplayCoordinator.shared.userStopGeneration,
     ) {
         val coordinator = DesktopDisplayCoordinator.shared
-        if (expectedEpoch != null && !coordinator.isSessionCurrent(expectedEpoch)) {
-            if (coordinator.isRestarting && expectedEpoch == coordinator.sessionGeneration) {
-                launchPreparedDesktop(expectedEpoch, result)
-                return
-            }
-            displayFailure(DesktopDisplayException("SESSION_STOPPED", "The session was stopped before launch"), result)
-            return
-        }
-        if (coordinator.isDisplayLocal && window.decorView.isAttachedToWindow) {
-            val target = try {
-                coordinator.startupTarget(window.decorView.display?.displayId
-                    ?: throw DesktopDisplayException("DISPLAY_UNAVAILABLE", "The app window has no current display"))
-            } catch (error: DesktopDisplayException) {
-                displayFailure(error, result)
-                return
-            }
-            if (coordinator.restartForEnvironmentIfNeeded(target, coordinator.sessionGeneration) { outcome ->
-                outcome.exceptionOrNull()?.let { displayFailure(it, result) } ?: result?.success(true)
-            }) return
-        }
-        try {
-            val epoch = coordinator.prepareSession(mode, desktop, start, expectedEpoch = expectedEpoch)
-            startForegroundService()
-            launchPreparedDesktop(epoch, result)
-        } catch (error: DesktopDisplayException) {
-            displayFailure(error, result)
-        }
-    }
-
-    private fun launchPreparedDesktop(epoch: Long, result: MethodChannel.Result?) {
-        val coordinator = DesktopDisplayCoordinator.shared
-        if (!coordinator.isSessionCurrent(epoch) && !coordinator.isRestarting) {
-            displayFailure(DesktopDisplayException("SESSION_STOPPED", "The Linux session was stopped"), result)
-            return
-        }
-        if (coordinator.isDisplayLocal && !window.decorView.isAttachedToWindow) {
-            window.decorView.addOnAttachStateChangeListener(object : android.view.View.OnAttachStateChangeListener {
-                override fun onViewAttachedToWindow(view: android.view.View) {
-                    view.removeOnAttachStateChangeListener(this)
-                    launchPreparedDesktop(epoch, result)
-                }
-                override fun onViewDetachedFromWindow(view: android.view.View) {}
-            })
-            return
-        }
-        val target = try {
-            if (coordinator.isDisplayLocal) {
-                coordinator.startupTarget(window.decorView.display?.displayId
-                    ?: throw DesktopDisplayException("DISPLAY_UNAVAILABLE", "The app window has no current display"))
-            } else null
-        } catch (error: DesktopDisplayException) {
-            displayFailure(error, result)
-            return
-        }
-        val completion: (Result<Unit>) -> Unit = { outcome ->
-            val error = outcome.exceptionOrNull()
-            if (error != null) displayFailure(error, result) else result?.success(true)
-        }
-        if (target != null && coordinator.restartForEnvironmentIfNeeded(target, epoch, completion)) return
-        if (!coordinator.isSessionCurrent(epoch)) {
-            completion(Result.failure(DesktopDisplayException("SESSION_STOPPED", "The Linux session was stopped")))
-            return
-        }
-        coordinator.openActive(target) { placed ->
-            if (placed.isFailure) completion(placed) else coordinator.awaitSessionReady(epoch, completion)
-        }
-    }
-
-    private fun launchLocalDesktopItem(kind: String, id: String, result: MethodChannel.Result) {
-        val coordinator = DesktopDisplayCoordinator.shared
-        val status = environmentManager.status()
-        val environmentKind = status.kind
-        requestDesktop(status.kind.sessionMode, status.desktop,
-            !status.running,
+        requestResolvedDesktopOpen(mode, desktop, startSession,
             object : MethodChannel.Result {
                 override fun success(value: Any?) {
-                    val epoch = coordinator.sessionGeneration
-                    thread(name = "local-desktop-item-ready") {
-                        val readiness = DesktopItemReadinessGate(
-                            isSessionCurrent = { coordinator.isSessionCurrent(epoch) },
-                            waitUntilReady = {
-                                environmentManager.waitForDesktopReady(
-                                    status.desktop,
-                                    kind = environmentKind,
-                                )
-                            },
-                        ).await {
-                            DroidDeskService.executeSession {
-                                if (!coordinator.isSessionCurrent(epoch)) {
-                                    mainHandler.post {
-                                        result.error("SESSION_STOPPED", "Desktop launch was cancelled", null)
-                                    }
-                                    return@executeSession
-                                }
-                                val command = desktopItemCommand(
-                                    kind,
-                                    id,
-                                    environmentManager.paths(environmentKind),
-                                )
-                                val launched = environmentManager.execute(
-                                    ExecutionRequest.Desktop(environmentKind, command),
-                                )
-                                mainHandler.post {
-                                    if (!coordinator.isSessionCurrent(epoch)) {
-                                        result.error("SESSION_STOPPED", "Desktop launch was cancelled", null)
-                                    } else if (launched.exitCode != 0) {
-                                        result.error("DESKTOP_LAUNCH_FAILED", launched.output, null)
-                                    } else result.success(true)
-                                }
-                            }
-                        }
-                        readiness.exceptionOrNull()?.let { failure ->
-                            mainHandler.post {
-                                val displayFailure = failure as? DesktopDisplayException
-                                result.error(
-                                    displayFailure?.code ?: "DESKTOP_LAUNCH_FAILED",
-                                    failure.message ?: "The Linux desktop did not become ready",
-                                    null,
-                                )
-                            }
-                        }
-                    }
+                    val openEpoch = coordinator.sessionGeneration
+                    val activeDesktop = coordinator.desktopEnv; val environmentKind = EnvironmentKind.fromSessionMode(coordinator.sessionMode)
+                    runDesktopItemAfterOpen(openEpoch, stopGeneration, coordinator, { isProvisioningActive(coordinator) },
+                        { block -> thread(name = "local-desktop-item-ready") { block() } },
+                        { environmentManager.waitForDesktopReady(activeDesktop, kind = environmentKind) },
+                        DroidDeskService::executeSession,
+                        { runCatching { environmentManager.execute(ExecutionRequest.Desktop(environmentKind, desktopItemCommand(kind, id, environmentManager.paths(environmentKind)))).let { it.exitCode to it.output } } },
+                        { mainHandler.post(it) },
+                        { launchDesktopItemAfterOpen(kind, id, result, it.mode, it.desktopEnv, it.startSession, it.expectedEpoch, stopGeneration) },
+                        result)
                 }
                 override fun error(code: String, message: String?, details: Any?) = result.error(code, message, details)
                 override fun notImplemented() = result.notImplemented()
-            })
+            }, expectedEpoch = expectedEpoch)
     }
 
     private fun desktopItemCommand(

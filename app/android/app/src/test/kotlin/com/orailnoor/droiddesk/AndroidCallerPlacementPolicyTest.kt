@@ -2024,15 +2024,951 @@ class AndroidCallerPlacementPolicyTest {
     }
 
     @Test
-    fun migratedAsyncAndProvisioningCallersEliminateLegacyHelpersAndGuardProvisioning() {
+    fun admitDesktopItemLaunchCoalescesInFlightRejectsProvisioningAndPreservesRunningEpoch() {
+        val phone = DesktopDisplay(0, "phone", "Phone", isDefault = true, eligible = true, null)
+        val tnt = DesktopDisplay(100003, "tnt", "TNT", isDefault = false, eligible = true, null)
+        val host = FakeCoordinatorHost(listOf(phone, tnt)).apply {
+            currentDisplayId = phone.id
+            running = false
+        }
+        val coordinator = DesktopDisplayCoordinator(host = host)
+
+        // 1. Cold/stopped session calls beginSession() once per admission
+        var coldBegins = 0
+        val coldAdmission = admitDesktopItemLaunch(
+            inFlight = coordinator.inFlightOpenSpec(),
+            isStopped = coordinator.isStopped,
+            hasRunningSession = coordinator.hasRunningSession,
+            sessionGeneration = coordinator.sessionGeneration,
+            beginSession = {
+                coldBegins++
+                coordinator.beginSession()
+            },
+        ) as DesktopItemAdmission.Epoch
+        assertEquals(1, coldBegins)
+        assertEquals(coordinator.sessionGeneration, coldAdmission.expectedEpoch)
+
+        // 2. In-flight open returns DesktopItemAdmission.InFlight without calling beginSession()
+        coordinator.requestOpen(
+            DesktopOpenRequest(phone.id, "proot", "xfce4", true, coldAdmission.expectedEpoch),
+            { host.running = true },
+            {},
+        )
+        val expectedInFlight = checkNotNull(coordinator.inFlightOpenSpec())
+        val inFlightAdmission = admitDesktopItemLaunch(
+            inFlight = coordinator.inFlightOpenSpec(),
+            isStopped = coordinator.isStopped,
+            hasRunningSession = coordinator.hasRunningSession,
+            sessionGeneration = coordinator.sessionGeneration,
+            beginSession = { error("in-flight open must not call beginSession") },
+        )
+        assertEquals(DesktopItemAdmission.InFlight(expectedInFlight), inFlightAdmission)
+
+        // 3. Running session preserves sessionGeneration across concurrent item launches without beginSession()
+        host.attachLatest(coordinator)
+        coordinator.sessionStarted(coldAdmission.expectedEpoch, Result.success(Unit))
+        assertNull(coordinator.inFlightOpenSpec())
+        val runningEpoch = coordinator.sessionGeneration
+        val itemA = admitDesktopItemLaunch(
+            inFlight = coordinator.inFlightOpenSpec(),
+            isStopped = coordinator.isStopped,
+            hasRunningSession = coordinator.hasRunningSession,
+            sessionGeneration = coordinator.sessionGeneration,
+            beginSession = { error("running session must not call beginSession") },
+        ) as DesktopItemAdmission.Epoch
+        val itemB = admitDesktopItemLaunch(
+            inFlight = coordinator.inFlightOpenSpec(),
+            isStopped = coordinator.isStopped,
+            hasRunningSession = coordinator.hasRunningSession,
+            sessionGeneration = coordinator.sessionGeneration,
+            beginSession = { error("concurrent running item launch must not call beginSession") },
+        ) as DesktopItemAdmission.Epoch
+        assertEquals(runningEpoch, itemA.expectedEpoch)
+        assertEquals(runningEpoch, itemB.expectedEpoch)
+        assertTrue(coordinator.isSessionCurrent(itemA.expectedEpoch))
+
+        // 4. Active provisioning rejects with INVALID_ARGUMENT without calling beginSession()
+        val provisioningError = org.junit.Assert.assertThrows(DesktopDisplayException::class.java) {
+            admitDesktopItemLaunch(
+                inFlight = null,
+                isStopped = false,
+                hasRunningSession = false,
+                sessionGeneration = coordinator.sessionGeneration,
+                beginSession = { error("active provisioning must not call beginSession") },
+                provisioningInFlight = true,
+            )
+        }
+        assertEquals("INVALID_ARGUMENT", provisioningError.code)
+
+        // 5. Stopped session (and failed-stop session where isStopped=true, hasRunningSession=true) calls beginSession()
+        coordinator.startStopping()
+        coordinator.finishStopping(IllegalStateException("teardown failed"))
+        assertTrue(coordinator.isStopped)
+        assertTrue(coordinator.hasRunningSession)
+        var failedStopBegins = 0
+        val recoveredAdmission = admitDesktopItemLaunch(
+            inFlight = coordinator.inFlightOpenSpec(),
+            isStopped = coordinator.isStopped,
+            hasRunningSession = coordinator.hasRunningSession,
+            sessionGeneration = coordinator.sessionGeneration,
+            beginSession = {
+                failedStopBegins++
+                coordinator.beginSession()
+            },
+        ) as DesktopItemAdmission.Epoch
+        assertEquals(1, failedStopBegins)
+        assertTrue(recoveredAdmission.expectedEpoch > runningEpoch)
+
+        coordinator.stop()
+        host.running = false
+        var stoppedBegins = 0
+        val postStopAdmission = admitDesktopItemLaunch(
+            inFlight = coordinator.inFlightOpenSpec(),
+            isStopped = coordinator.isStopped,
+            hasRunningSession = coordinator.hasRunningSession,
+            sessionGeneration = coordinator.sessionGeneration,
+            beginSession = {
+                stoppedBegins++
+                coordinator.beginSession()
+            },
+        ) as DesktopItemAdmission.Epoch
+        assertEquals(1, stoppedBegins)
+        assertTrue(postStopAdmission.expectedEpoch > recoveredAdmission.expectedEpoch)
+    }
+
+    @Test
+    fun resolveDesktopItemStatusHandlesUserStopProvisioningInFlightRunningAndColdStates() {
+        data class FakeStatus(val running: Boolean, val desktop: String = "xfce4")
+
+        val phone = DesktopDisplay(0, "phone", "Phone", isDefault = true, eligible = true, null)
+        val tnt = DesktopDisplay(100003, "tnt", "TNT", isDefault = false, eligible = true, null)
+        val localHost = FakeCoordinatorHost(listOf(phone, tnt)).apply {
+            currentDisplayId = phone.id
+            running = true
+        }
+        var stopCompletion: ((Result<Unit>) -> Unit)? = null
+        lateinit var local: DesktopDisplayCoordinator
+        local = DesktopDisplayCoordinator(
+            host = localHost,
+            placementStrategy = DisplayLocalRestartAdapter(
+                PlacementSelection(
+                    mode = PlacementMode.DISPLAY_LOCAL,
+                    source = PlacementSelectionSource.DEVICE_QUIRK,
+                    allowAutomaticMoves = false,
+                    reason = "item status test",
+                    tntDisplayIds = setOf(100003),
+                ),
+            ),
+            stopForEnvironmentChange = { completion ->
+                local.stop(preserveRestart = true)
+                localHost.running = false
+                stopCompletion = completion
+            },
+        )
+        local.requestOpen(DesktopOpenRequest(phone.id, "proot", "xfce4", false, null), {}, {})
+        localHost.attachLatest(local)
+
+        // 1. Running status -> startSession = false and preserves current expectedEpoch
+        val runningEpoch = local.sessionGeneration
+        val runningStopGen = local.userStopGeneration
+        var readyOutcome: Triple<FakeStatus, Boolean, Long?>? = null
+        resolveDesktopItemStatus(
+            expectedEpoch = runningEpoch,
+            isSessionCurrent = local::isSessionCurrent,
+            status = Result.success(FakeStatus(running = true)),
+            isStatusRunning = FakeStatus::running,
+            sessionLive = isDesktopItemSessionLive(
+                runningStopGen,
+                local.userStopGeneration,
+                local.isStopped,
+                local.isRestarting,
+            ),
+            hasRunningSession = local.hasRunningSession,
+            isRestarting = local.isRestarting,
+            inFlightOpen = local::inFlightOpenSpec,
+            onInFlight = { error("running idle session has no in-flight open") },
+            onReady = { status, startSession, epoch ->
+                readyOutcome = Triple(status, startSession, epoch)
+            },
+            onFailure = { error("unexpected failure: $it") },
+        )
+        assertEquals(Triple(FakeStatus(running = true), false, runningEpoch), readyOutcome)
+
+        // 2. Mid-status inFlightOpenSpec() (e.g. display-local preserveRestart teardown) joins in-flight spec
+        //    even if runtime status threw IOException during teardown!
+        localHost.currentDisplayId = tnt.id
+        local.requestOpen(DesktopOpenRequest(tnt.id, "proot", "xfce4", false, runningEpoch), {}, {})
+        assertTrue(local.isRestarting)
+        assertTrue(local.isStopped)
+        val joinedSpecs = mutableListOf<InFlightDesktopOpenSpec>()
+        resolveDesktopItemStatus(
+            expectedEpoch = runningEpoch,
+            isSessionCurrent = local::isSessionCurrent,
+            status = Result.failure<FakeStatus>(IOException("teardown closed runtime")),
+            isStatusRunning = FakeStatus::running,
+            sessionLive = isDesktopItemSessionLive(
+                runningStopGen,
+                local.userStopGeneration,
+                local.isStopped,
+                local.isRestarting,
+            ),
+            hasRunningSession = local.hasRunningSession,
+            isRestarting = local.isRestarting,
+            inFlightOpen = local::inFlightOpenSpec,
+            onInFlight = { joinedSpecs += it },
+            onReady = { _, _, _ -> error("superseded restart epoch must join in-flight open") },
+            onFailure = { error("active preserveRestart must coalesce rather than fail: $it") },
+        )
+        assertEquals(listOf(checkNotNull(local.inFlightOpenSpec())), joinedSpecs)
+
+        // Complete the restart; an item whose status read started before restart (running = false snapshot)
+        // sees hasRunningSession == true and passes startSession = false with null epoch!
+        // Complete the restart; items whose status probe ran before/during teardown (both stale snapshot and
+        // failed teardown IOException) rejoin the recovered session using coordinator's current mode, desktop, and epoch!
+        stopCompletion!!.invoke(Result.success(Unit))
+        localHost.running = true
+        localHost.attachLatest(local)
+        val recoveredTntEpoch = localHost.launches.last().sessionGeneration
+        local.sessionStarted(recoveredTntEpoch, Result.success(Unit))
+        val expectedRecoveredSpec = InFlightDesktopOpenSpec(
+            local.sessionMode,
+            local.desktopEnv,
+            startSession = false,
+            expectedEpoch = recoveredTntEpoch,
+        )
+        val postRestartRejoined = mutableListOf<InFlightDesktopOpenSpec>()
+        listOf(
+            Result.success(FakeStatus(running = false, desktop = "stale-de")),
+            Result.failure(IOException("teardown closed runtime during status")),
+        ).forEach { staleProbeResult ->
+            resolveDesktopItemStatus(
+                expectedEpoch = runningEpoch,
+                isSessionCurrent = local::isSessionCurrent,
+                status = staleProbeResult,
+                isStatusRunning = FakeStatus::running,
+                sessionLive = isDesktopItemSessionLive(
+                    runningStopGen,
+                    local.userStopGeneration,
+                    local.isStopped,
+                    local.isRestarting,
+                ),
+                hasRunningSession = local.hasRunningSession,
+                isRestarting = local.isRestarting,
+                inFlightOpen = local::inFlightOpenSpec,
+                currentRunningOpen = {
+                    InFlightDesktopOpenSpec(local.sessionMode, local.desktopEnv, false, local.sessionGeneration)
+                },
+                onInFlight = { postRestartRejoined += it },
+                onReady = { _, _, _ -> error("stale epoch after completed restart must rejoin recovered session") },
+                onFailure = { error("stale teardown probe failure after completed restart must rejoin: $it") },
+            )
+        }
+        assertEquals(listOf(expectedRecoveredSpec, expectedRecoveredSpec), postRestartRejoined)
+
+        // Genuine status failure on a CURRENT running epoch still forwards the probe error to onFailure!
+        val currentRunningProbeError = IOException("runtime socket broken")
+        val currentRunningProbeFailures = mutableListOf<Throwable>()
+        resolveDesktopItemStatus<FakeStatus>(
+            expectedEpoch = recoveredTntEpoch,
+            isSessionCurrent = local::isSessionCurrent,
+            status = Result.failure(currentRunningProbeError),
+            isStatusRunning = FakeStatus::running,
+            sessionLive = true,
+            hasRunningSession = local.hasRunningSession,
+            isRestarting = local.isRestarting,
+            inFlightOpen = local::inFlightOpenSpec,
+            currentRunningOpen = {
+                InFlightDesktopOpenSpec(local.sessionMode, local.desktopEnv, false, local.sessionGeneration)
+            },
+            onInFlight = { error("current-epoch probe error must not mask failure") },
+            onReady = { _, _, _ -> error("failed probe must not call onReady") },
+            onFailure = { currentRunningProbeFailures += it },
+        )
+        assertSame(currentRunningProbeError, currentRunningProbeFailures.single())
+
+        // 2b. Failed preserveRestart during status() (hasRunningSession == false, inFlightOpenSpec() == null,
+        //     sessionFailure == DISPLAY_UNAVAILABLE) rejects superseded epoch with SESSION_STOPPED instead of onReady!
+        val beforeFailedRestartEpoch = local.sessionGeneration
+        val beforeFailedRestartStopGen = local.userStopGeneration
+        localHost.currentDisplayId = phone.id
+        local.requestOpen(DesktopOpenRequest(phone.id, "proot", "xfce4", false, beforeFailedRestartEpoch), {}, {})
+        localHost.launchFailure = DesktopDisplayException("DISPLAY_UNAVAILABLE", "decorView detached")
+        stopCompletion!!.invoke(Result.success(Unit))
+        localHost.launchFailure = null
+        assertFalse(local.isStopped)
+        assertFalse(local.isRestarting)
+        assertFalse(local.hasRunningSession)
+        assertEquals("DISPLAY_UNAVAILABLE", local.sessionFailure?.code)
+        val failedRestartItemErrors = mutableListOf<Throwable>()
+        resolveDesktopItemStatus(
+            expectedEpoch = beforeFailedRestartEpoch,
+            isSessionCurrent = local::isSessionCurrent,
+            status = Result.success(FakeStatus(running = true)),
+            isStatusRunning = FakeStatus::running,
+            sessionLive = isDesktopItemSessionLive(
+                beforeFailedRestartStopGen,
+                local.userStopGeneration,
+                local.isStopped,
+                local.isRestarting,
+            ),
+            hasRunningSession = local.hasRunningSession,
+            isRestarting = local.isRestarting,
+            inFlightOpen = local::inFlightOpenSpec,
+            onInFlight = { error("failed restart has no in-flight open") },
+            onReady = { _, _, _ -> error("superseded failed-restart item must not open or clobber sessionFailure") },
+            onFailure = { failedRestartItemErrors += it },
+        )
+        assertEquals("SESSION_STOPPED", (failedRestartItemErrors.single() as DesktopDisplayException).code)
+        assertEquals("DISPLAY_UNAVAILABLE", local.sessionFailure?.code)
+
+        // 3. User Stop -> SESSION_STOPPED even if another restart/open is active
+        local.stop()
+        localHost.running = false
+        assertFalse(
+            isDesktopItemSessionLive(
+                runningStopGen,
+                local.userStopGeneration,
+                isStopped = false,
+                isRestarting = true,
+            ),
+        )
+        val userStopFailures = mutableListOf<Throwable>()
+        resolveDesktopItemStatus(
+            expectedEpoch = runningEpoch,
+            isSessionCurrent = local::isSessionCurrent,
+            status = Result.success(FakeStatus(running = true)),
+            isStatusRunning = FakeStatus::running,
+            sessionLive = isDesktopItemSessionLive(
+                runningStopGen,
+                local.userStopGeneration,
+                local.isStopped,
+                local.isRestarting,
+            ),
+            inFlightOpen = { error("user-stopped launch must not inspect inFlightOpenSpec") },
+            onInFlight = { error("user-stopped launch must not join in-flight open") },
+            onReady = { _, _, _ -> error("user-stopped launch must not open") },
+            onFailure = { userStopFailures += it },
+        )
+        assertEquals("SESSION_STOPPED", (userStopFailures.single() as DesktopDisplayException).code)
+
+        // 4. Provisioning supersede -> SESSION_STOPPED
+        val coldEpoch = local.beginSession()
+        val coldStopGen = local.userStopGeneration
+        val provisioningFailures = mutableListOf<Throwable>()
+        resolveDesktopItemStatus(
+            expectedEpoch = coldEpoch,
+            isSessionCurrent = { false },
+            status = Result.success(FakeStatus(running = false)),
+            isStatusRunning = FakeStatus::running,
+            sessionLive = true,
+            provisioningInFlight = true,
+            inFlightOpen = { error("provisioning supersede must reject before inFlightOpen") },
+            onInFlight = { error("provisioning supersede must not join") },
+            onReady = { _, _, _ -> error("provisioning supersede must not open") },
+            onFailure = { provisioningFailures += it },
+        )
+        assertEquals("SESSION_STOPPED", (provisioningFailures.single() as DesktopDisplayException).code)
+
+        // 5. Cold status -> startSession = true with current expectedEpoch, and forwards probe errors when idle
+        var coldOutcome: Triple<FakeStatus, Boolean, Long?>? = null
+        resolveDesktopItemStatus(
+            expectedEpoch = coldEpoch,
+            isSessionCurrent = local::isSessionCurrent,
+            status = Result.success(FakeStatus(running = false)),
+            isStatusRunning = FakeStatus::running,
+            sessionLive = isDesktopItemSessionLive(
+                coldStopGen,
+                local.userStopGeneration,
+                local.isStopped,
+                local.isRestarting,
+            ),
+            hasRunningSession = local.hasRunningSession,
+            isRestarting = local.isRestarting,
+            inFlightOpen = local::inFlightOpenSpec,
+            onInFlight = { error("cold idle session has no in-flight open") },
+            onReady = { status, startSession, epoch ->
+                coldOutcome = Triple(status, startSession, epoch)
+            },
+            onFailure = { error("unexpected cold failure: $it") },
+        )
+        assertEquals(Triple(FakeStatus(running = false), true, coldEpoch), coldOutcome)
+
+        // 5b. Superseded cold epoch when no session is running and no open is in flight (e.g. handleHomeLaunch
+        //     reserved a newer beginSession() epoch or provisioning failed) rejects with SESSION_STOPPED!
+        val newerColdEpoch = local.beginSession()
+        assertTrue(newerColdEpoch > coldEpoch)
+        val supersededColdFailures = mutableListOf<Throwable>()
+        resolveDesktopItemStatus(
+            expectedEpoch = coldEpoch,
+            isSessionCurrent = local::isSessionCurrent,
+            status = Result.success(FakeStatus(running = false)),
+            isStatusRunning = FakeStatus::running,
+            sessionLive = isDesktopItemSessionLive(
+                coldStopGen,
+                local.userStopGeneration,
+                local.isStopped,
+                local.isRestarting,
+            ),
+            hasRunningSession = local.hasRunningSession,
+            isRestarting = local.isRestarting,
+            inFlightOpen = local::inFlightOpenSpec,
+            onInFlight = { error("no open in flight") },
+            onReady = { _, _, _ -> error("superseded cold epoch must not steal newer admission") },
+            onFailure = { supersededColdFailures += it },
+        )
+        assertEquals("SESSION_STOPPED", (supersededColdFailures.single() as DesktopDisplayException).code)
+        assertTrue(local.isSessionCurrent(newerColdEpoch))
+
+        val probeError = IOException("status marker unreadable")
+        val probeFailures = mutableListOf<Throwable>()
+        resolveDesktopItemStatus<FakeStatus>(
+            expectedEpoch = newerColdEpoch,
+            isSessionCurrent = local::isSessionCurrent,
+            status = Result.failure(probeError),
+            isStatusRunning = FakeStatus::running,
+            sessionLive = true,
+            inFlightOpen = { null },
+            onInFlight = { error("unexpected in-flight") },
+            onReady = { _, _, _ -> error("failed status must not call onReady") },
+            onFailure = { probeFailures += it },
+        )
+        assertSame(probeError, probeFailures.single())
+    }
+
+    @Test
+    fun runDesktopItemAfterOpenGuardsOpenEpochRejoinsPreserveRestartAndRejectsStaleEpochs() {
+        val phone = DesktopDisplay(0, "phone", "Phone", isDefault = true, eligible = true, null)
+        val tnt = DesktopDisplay(100003, "tnt", "TNT", isDefault = false, eligible = true, null)
+        val localHost = FakeCoordinatorHost(listOf(phone, tnt)).apply {
+            currentDisplayId = phone.id
+            running = true
+        }
+        var stopCompletion: ((Result<Unit>) -> Unit)? = null
+        lateinit var local: DesktopDisplayCoordinator
+        local = DesktopDisplayCoordinator(
+            host = localHost,
+            placementStrategy = DisplayLocalRestartAdapter(
+                PlacementSelection(
+                    mode = PlacementMode.DISPLAY_LOCAL,
+                    source = PlacementSelectionSource.DEVICE_QUIRK,
+                    allowAutomaticMoves = false,
+                    reason = "post-open epoch guard test",
+                    tntDisplayIds = setOf(100003),
+                ),
+            ),
+            stopForEnvironmentChange = { completion ->
+                local.stop(preserveRestart = true)
+                localHost.running = false
+                stopCompletion = completion
+            },
+        )
+        local.requestOpen(DesktopOpenRequest(phone.id, "proot", "xfce4", false, null), {}, {})
+        localHost.attachLatest(local)
+
+        fun recordingResult(events: MutableList<String>): MethodChannel.Result =
+            userStopLaunchReply(
+                object : MethodChannel.Result {
+                    override fun success(result: Any?) {
+                        events += "success:$result"
+                    }
+                    override fun error(errorCode: String, errorMessage: String?, errorDetails: Any?) {
+                        events += "error:$errorCode"
+                    }
+                    override fun notImplemented() = error("unexpected notImplemented")
+                },
+                local,
+            )
+
+        // 1. openEpoch current -> executes command once and succeeds; non-zero exit -> DESKTOP_LAUNCH_FAILED
+        val okEvents = mutableListOf<String>()
+        var okExecutions = 0
+        runDesktopItemAfterOpen(
+            openEpoch = local.sessionGeneration,
+            stopGeneration = local.userStopGeneration,
+            coordinator = local,
+            isProvisioningActive = { false },
+            spawnReadiness = { it() },
+            waitUntilReady = { true },
+            executeOnSession = { it() },
+            executeCommand = {
+                okExecutions++
+                Result.success(0 to "")
+            },
+            postToMain = { it() },
+            onRejoin = { error("current epoch must not rejoin: $it") },
+            result = recordingResult(okEvents),
+        )
+        assertEquals(1, okExecutions)
+        assertEquals(listOf("success:true"), okEvents)
+
+        val failExitEvents = mutableListOf<String>()
+        runDesktopItemAfterOpen(
+            openEpoch = local.sessionGeneration,
+            stopGeneration = local.userStopGeneration,
+            coordinator = local,
+            isProvisioningActive = { false },
+            spawnReadiness = { it() },
+            waitUntilReady = { true },
+            executeOnSession = { it() },
+            executeCommand = { Result.success(1 to "gtk-launch failed") },
+            postToMain = { it() },
+            onRejoin = { error("failed command on current epoch must not rejoin") },
+            result = recordingResult(failExitEvents),
+        )
+        assertEquals(listOf("error:DESKTOP_LAUNCH_FAILED"), failExitEvents)
+
+        // 2. Mid-readiness preserveRestart (waitUntilReady returns false during teardown) AND queued pre-executeSession
+        //    preserveRestart -> 0 executions on torn-down epoch, rejoins via inFlightOpenSpec() on main thread,
+        //    and executes once after restart completes on the new openEpoch!
+        val restartEvents = mutableListOf<String>()
+        val restartReply = recordingResult(restartEvents)
+        val restartMainQueue = ArrayDeque<() -> Unit>()
+        var readinessTask: (() -> Unit)? = null
+        val restartExecutedEpochs = mutableListOf<Long>()
+        val initialPhoneEpoch = local.sessionGeneration
+        val initialStopGen = local.userStopGeneration
+
+        fun launchOnCurrentOrRejoin(spec: InFlightDesktopOpenSpec) {
+            forwardResolvedDesktopOpen(
+                currentDisplayId = localHost.currentDisplayId,
+                mode = spec.mode,
+                desktopEnv = spec.desktopEnv,
+                startSession = spec.startSession,
+                expectedEpoch = spec.expectedEpoch,
+                startService = { localHost.running = true },
+                isRestarting = { local.isRestarting },
+                requestOpen = local::requestOpen,
+            ) { outcome ->
+                outcome.exceptionOrNull()?.let { err ->
+                    restartReply.error((err as? DesktopDisplayException)?.code ?: "DISPLAY_UNAVAILABLE", err.message, null)
+                    return@forwardResolvedDesktopOpen
+                }
+                val newOpenEpoch = local.sessionGeneration
+                runDesktopItemAfterOpen(
+                    openEpoch = newOpenEpoch,
+                    stopGeneration = initialStopGen,
+                    coordinator = local,
+                    isProvisioningActive = { false },
+                    spawnReadiness = { it() },
+                    waitUntilReady = { true },
+                    executeOnSession = { it() },
+                    executeCommand = {
+                        restartExecutedEpochs += local.sessionGeneration
+                        Result.success(0 to "")
+                    },
+                    postToMain = { it() },
+                    onRejoin = ::launchOnCurrentOrRejoin,
+                    result = restartReply,
+                )
+            }
+        }
+
+        runDesktopItemAfterOpen(
+            openEpoch = initialPhoneEpoch,
+            stopGeneration = initialStopGen,
+            coordinator = local,
+            isProvisioningActive = { false },
+            spawnReadiness = { readinessTask = it },
+            waitUntilReady = {
+                // Mid-readiness: user docks to TNT -> preserveRestart tears down Phone session!
+                localHost.currentDisplayId = tnt.id
+                local.requestOpen(DesktopOpenRequest(tnt.id, "proot", "xfce4", false, initialPhoneEpoch), {}, {})
+                false
+            },
+            executeOnSession = { error("torn-down epoch must not enter executeOnSession") },
+            executeCommand = { error("torn-down epoch must not execute command") },
+            postToMain = restartMainQueue::addLast,
+            onRejoin = ::launchOnCurrentOrRejoin,
+            result = restartReply,
+        )
+        readinessTask!!.invoke()
+        assertTrue(restartExecutedEpochs.isEmpty())
+        assertTrue(restartEvents.isEmpty())
+        assertTrue(restartMainQueue.isNotEmpty())
+
+        // Drain mainHandler -> rejoins TNT preserveRestart once even if both subscribe and readiness posted
+        var rejoinCalls = 0
+        while (restartMainQueue.isNotEmpty()) restartMainQueue.removeFirst().invoke()
+        assertTrue(restartExecutedEpochs.isEmpty())
+        assertTrue(restartEvents.isEmpty())
+
+        // Complete TNT restart -> rejoined launch captures new TNT openEpoch and executes once!
+        stopCompletion!!.invoke(Result.success(Unit))
+        localHost.running = true
+        localHost.attachLatest(local)
+        val tntEpoch = localHost.launches.last().sessionGeneration
+        local.sessionStarted(tntEpoch, Result.success(Unit))
+        assertEquals(listOf(tntEpoch), restartExecutedEpochs)
+        assertEquals(listOf("success:true"), restartEvents)
+
+        // 2b. preserveRestart starts AND calls sessionStarted BEFORE waitUntilReady returns (isRestarting == false,
+        //     inFlightOpenSpec() == null when readiness unblocks) -> still rejoins the restarted session once!
+        val settledRestartEvents = mutableListOf<String>()
+        val settledRestartReply = recordingResult(settledRestartEvents)
+        val settledRestartMainQueue = ArrayDeque<() -> Unit>()
+        var settledReadinessTask: (() -> Unit)? = null
+        val settledRestartExecutedEpochs = mutableListOf<Long>()
+        val settledRestartStopGen = local.userStopGeneration
+
+        fun rejoinCompletedRestart(spec: InFlightDesktopOpenSpec) {
+            rejoinCalls++
+            forwardResolvedDesktopOpen(
+                currentDisplayId = localHost.currentDisplayId,
+                mode = spec.mode,
+                desktopEnv = spec.desktopEnv,
+                startSession = spec.startSession,
+                expectedEpoch = spec.expectedEpoch,
+                startService = { localHost.running = true },
+                isRestarting = { local.isRestarting },
+                requestOpen = local::requestOpen,
+            ) { outcome ->
+                assertTrue(outcome.isSuccess)
+                runDesktopItemAfterOpen(
+                    openEpoch = local.sessionGeneration,
+                    stopGeneration = settledRestartStopGen,
+                    coordinator = local,
+                    isProvisioningActive = { false },
+                    spawnReadiness = { it() },
+                    waitUntilReady = { true },
+                    executeOnSession = { it() },
+                    executeCommand = {
+                        settledRestartExecutedEpochs += local.sessionGeneration
+                        Result.success(0 to "")
+                    },
+                    postToMain = { it() },
+                    onRejoin = { error("unexpected second rejoin: $it") },
+                    result = settledRestartReply,
+                )
+            }
+        }
+
+        runDesktopItemAfterOpen(
+            openEpoch = tntEpoch,
+            stopGeneration = settledRestartStopGen,
+            coordinator = local,
+            isProvisioningActive = { false },
+            spawnReadiness = { settledReadinessTask = it },
+            waitUntilReady = {
+                // Mid-readiness: preserveRestart back to Phone starts AND completely settles before waitUntilReady returns!
+                localHost.currentDisplayId = phone.id
+                local.requestOpen(DesktopOpenRequest(phone.id, "proot", "xfce4", false, tntEpoch), {}, {})
+                stopCompletion!!.invoke(Result.success(Unit))
+                localHost.running = true
+                localHost.attachLatest(local)
+                local.sessionStarted(localHost.launches.last().sessionGeneration, Result.success(Unit))
+                assertFalse(local.isRestarting)
+                assertNull(local.inFlightOpenSpec())
+                true
+            },
+            executeOnSession = { error("stale TNT readiness must not execute directly without rejoining Phone") },
+            executeCommand = { error("stale TNT readiness must not execute command") },
+            postToMain = settledRestartMainQueue::addLast,
+            onRejoin = ::rejoinCompletedRestart,
+            result = settledRestartReply,
+        )
+        settledReadinessTask!!.invoke()
+        while (settledRestartMainQueue.isNotEmpty()) settledRestartMainQueue.removeFirst().invoke()
+        assertEquals(1, rejoinCalls)
+        localHost.attachLatest(local)
+        val fastPhoneEpoch = local.sessionGeneration
+        assertEquals(listOf(fastPhoneEpoch), settledRestartExecutedEpochs)
+        assertEquals(listOf("success:true"), settledRestartEvents)
+
+        // Move back to TNT so scenario 2c starts from TNT just like before
+        localHost.currentDisplayId = tnt.id
+        local.requestOpen(DesktopOpenRequest(tnt.id, "proot", "xfce4", false, fastPhoneEpoch), {}, {})
+        stopCompletion!!.invoke(Result.success(Unit))
+        localHost.running = true
+        localHost.attachLatest(local)
+        val tntEpochForPreExec = localHost.launches.last().sessionGeneration
+        local.sessionStarted(tntEpochForPreExec, Result.success(Unit))
+
+        // 2c. preserveRestart starts AFTER waitUntilReady passed, while queued on executeOnSession before executeCommand!
+        val queuedSessionTasks = ArrayDeque<() -> Unit>()
+        val queuedMainTasks = ArrayDeque<() -> Unit>()
+        val preExecRestartEvents = mutableListOf<String>()
+        val preExecRejoinedSpecs = mutableListOf<InFlightDesktopOpenSpec>()
+        runDesktopItemAfterOpen(
+            openEpoch = tntEpochForPreExec,
+            stopGeneration = local.userStopGeneration,
+            coordinator = local,
+            isProvisioningActive = { false },
+            spawnReadiness = { it() },
+            waitUntilReady = { true },
+            executeOnSession = queuedSessionTasks::addLast,
+            executeCommand = { error("queued executeOnSession must abort before executeCommand on preserveRestart") },
+            postToMain = queuedMainTasks::addLast,
+            onRejoin = { preExecRejoinedSpecs += it },
+            result = recordingResult(preExecRestartEvents),
+        )
+        assertEquals(1, queuedSessionTasks.size)
+        localHost.currentDisplayId = phone.id
+        local.requestOpen(DesktopOpenRequest(phone.id, "proot", "xfce4", false, tntEpochForPreExec), {}, {})
+        assertTrue(local.isRestarting)
+        queuedSessionTasks.removeFirst().invoke()
+        while (queuedMainTasks.isNotEmpty()) queuedMainTasks.removeFirst().invoke()
+        assertEquals(listOf(checkNotNull(local.inFlightOpenSpec())), preExecRejoinedSpecs)
+        assertTrue(preExecRestartEvents.isEmpty())
+
+        // Settle the phone restart before next scenario
+        stopCompletion!!.invoke(Result.success(Unit))
+        localHost.running = true
+        localHost.attachLatest(local)
+        val settledPhoneEpoch = localHost.launches.last().sessionGeneration
+        local.sessionStarted(settledPhoneEpoch, Result.success(Unit))
+
+        // 3. Non-restart cold startup replacement (isRestarting == false, inFlightOpenSpec() != null with startSession = true)
+        //    -> does NOT rejoin and does NOT execute; fails cleanly with SESSION_STOPPED!
+        val replacedSessionQueue = ArrayDeque<() -> Unit>()
+        val replacedMainQueue = ArrayDeque<() -> Unit>()
+        val replacedEvents = mutableListOf<String>()
+        runDesktopItemAfterOpen(
+            openEpoch = settledPhoneEpoch,
+            stopGeneration = local.userStopGeneration,
+            coordinator = local,
+            isProvisioningActive = { false },
+            spawnReadiness = { it() },
+            waitUntilReady = { true },
+            executeOnSession = replacedSessionQueue::addLast,
+            executeCommand = { error("replaced epoch without preserveRestart must not execute") },
+            postToMain = replacedMainQueue::addLast,
+            onRejoin = { error("non-restart cold startup must not rejoin: $it") },
+            result = recordingResult(replacedEvents),
+        )
+        // Cold non-restart startup replaces settledPhoneEpoch without userStopGeneration advancing
+        val coldReplacementEpoch = local.beginSession()
+        localHost.running = false
+        local.requestOpen(
+            DesktopOpenRequest(phone.id, "proot", "xfce4", true, coldReplacementEpoch),
+            { localHost.running = true },
+            {},
+        )
+        assertFalse(local.isRestarting)
+        assertEquals(true, local.inFlightOpenSpec()?.startSession)
+        replacedSessionQueue.removeFirst().invoke()
+        while (replacedMainQueue.isNotEmpty()) replacedMainQueue.removeFirst().invoke()
+        assertEquals(listOf("error:SESSION_STOPPED"), replacedEvents)
+
+        // Finish cold replacement so we have a clean running session for scenarios 4 & 5
+        localHost.attachLatest(local)
+        local.sessionStarted(coldReplacementEpoch, Result.success(Unit))
+
+        // 4. Provisioning starts mid-readiness -> 0 executions, fails with SESSION_STOPPED
+        var provisioningActive = false
+        val provEvents = mutableListOf<String>()
+        val provMainQueue = ArrayDeque<() -> Unit>()
+        runDesktopItemAfterOpen(
+            openEpoch = coldReplacementEpoch,
+            stopGeneration = local.userStopGeneration,
+            coordinator = local,
+            isProvisioningActive = { provisioningActive },
+            spawnReadiness = { it() },
+            waitUntilReady = {
+                local.beginSession()
+                provisioningActive = true
+                true
+            },
+            executeOnSession = { error("provisioning supersede must not enter executeOnSession") },
+            executeCommand = { error("provisioning supersede must not execute command") },
+            postToMain = provMainQueue::addLast,
+            onRejoin = { error("provisioning supersede must not rejoin") },
+            result = recordingResult(provEvents),
+        )
+        provMainQueue.removeFirst().invoke()
+        assertEquals(listOf("error:SESSION_STOPPED"), provEvents)
+
+        // 5. User Stop mid-readiness -> 0 executions, fails with SESSION_STOPPED even if new restart starts later
+        local.requestOpen(DesktopOpenRequest(phone.id, "proot", "xfce4", true, local.sessionGeneration), { localHost.running = true }, {})
+        val preStopEpoch = local.sessionGeneration
+        localHost.attachLatest(local)
+        local.sessionStarted(preStopEpoch, Result.success(Unit))
+        val preStopGen = local.userStopGeneration
+        val stopEvents = mutableListOf<String>()
+        val stopMainQueue = ArrayDeque<() -> Unit>()
+        runDesktopItemAfterOpen(
+            openEpoch = preStopEpoch,
+            stopGeneration = preStopGen,
+            coordinator = local,
+            isProvisioningActive = { false },
+            spawnReadiness = { it() },
+            waitUntilReady = {
+                local.stop()
+                localHost.running = false
+                true
+            },
+            executeOnSession = { error("user-stopped session must not enter executeOnSession") },
+            executeCommand = { error("user-stopped session must not execute command") },
+            postToMain = stopMainQueue::addLast,
+            onRejoin = { error("user-stopped session must never rejoin") },
+            result = recordingResult(stopEvents),
+        )
+        if (stopMainQueue.isNotEmpty()) stopMainQueue.removeFirst().invoke()
+        assertEquals(listOf("error:SESSION_STOPPED"), stopEvents)
+
+        // 6. Real background readiness poller blocked in sleep is interrupted immediately on coordinator invalidation!
+        local.requestOpen(DesktopOpenRequest(phone.id, "proot", "xfce4", true, null), { localHost.running = true }, {})
+        val bgEpoch = local.sessionGeneration
+        localHost.attachLatest(local)
+        local.sessionStarted(bgEpoch, Result.success(Unit))
+        val enteredSleep = java.util.concurrent.CountDownLatch(1)
+        val exitedReadiness = java.util.concurrent.CountDownLatch(1)
+        val bgMainQueue = java.util.concurrent.ConcurrentLinkedQueue<() -> Unit>()
+        val bgEvents = java.util.concurrent.CopyOnWriteArrayList<String>()
+        var bgThread: Thread? = null
+        runDesktopItemAfterOpen(
+            openEpoch = bgEpoch,
+            stopGeneration = local.userStopGeneration,
+            coordinator = local,
+            isProvisioningActive = { false },
+            spawnReadiness = { block ->
+                bgThread = Thread {
+                    try {
+                        block()
+                    } finally {
+                        exitedReadiness.countDown()
+                    }
+                }.apply { start() }
+            },
+            waitUntilReady = {
+                enteredSleep.countDown()
+                Thread.sleep(10_000)
+                true
+            },
+            executeOnSession = { error("interrupted readiness poller must not execute session") },
+            executeCommand = { error("interrupted readiness poller must not execute command") },
+            postToMain = bgMainQueue::add,
+            onRejoin = { error("stopped background readiness must not rejoin") },
+            result = recordingResult(bgEvents),
+        )
+        assertTrue(enteredSleep.await(2, java.util.concurrent.TimeUnit.SECONDS))
+        local.stop()
+        localHost.running = false
+        assertTrue("background readiness thread must be interrupted promptly", exitedReadiness.await(2, java.util.concurrent.TimeUnit.SECONDS))
+        bgThread!!.join(2_000)
+        while (bgMainQueue.isNotEmpty()) bgMainQueue.poll()?.invoke()
+        assertEquals(listOf("error:SESSION_STOPPED"), bgEvents.toList())
+
+        // 7. Interruption DURING an active readiness probe (Process.waitFor inside awaitDesktopProbe, not Thread.sleep)
+        //    destroys the probe process and terminates the readiness loop without running another probe iteration!
+        local.requestOpen(DesktopOpenRequest(phone.id, "proot", "xfce4", true, null), { localHost.running = true }, {})
+        val probeInterruptEpoch = local.sessionGeneration
+        localHost.attachLatest(local)
+        local.sessionStarted(probeInterruptEpoch, Result.success(Unit))
+        val enteredProbeWait = java.util.concurrent.CountDownLatch(1)
+        val exitedProbeReadiness = java.util.concurrent.CountDownLatch(1)
+        val probeDestroyed = java.util.concurrent.atomic.AtomicBoolean(false)
+        val probeIterations = java.util.concurrent.atomic.AtomicInteger(0)
+        val probeMainQueue = java.util.concurrent.ConcurrentLinkedQueue<() -> Unit>()
+        val probeEvents = java.util.concurrent.CopyOnWriteArrayList<String>()
+        var probeThread: Thread? = null
+        runDesktopItemAfterOpen(
+            openEpoch = probeInterruptEpoch,
+            stopGeneration = local.userStopGeneration,
+            coordinator = local,
+            isProvisioningActive = { false },
+            spawnReadiness = { block ->
+                probeThread = Thread {
+                    try {
+                        block()
+                    } finally {
+                        exitedProbeReadiness.countDown()
+                    }
+                }.apply { start() }
+            },
+            waitUntilReady = {
+                val deadline = System.currentTimeMillis() + 10_000L
+                var ready = false
+                while (System.currentTimeMillis() < deadline && !ready) {
+                    ready = com.orailnoor.droiddesk.runtime.awaitDesktopProbe {
+                        probeIterations.incrementAndGet()
+                        object : Process() {
+                            override fun getOutputStream() = java.io.OutputStream.nullOutputStream()
+                            override fun getInputStream() = java.io.InputStream.nullInputStream()
+                            override fun getErrorStream() = java.io.InputStream.nullInputStream()
+                            override fun waitFor(): Int {
+                                enteredProbeWait.countDown()
+                                Thread.sleep(10_000)
+                                return 1
+                            }
+                            override fun exitValue(): Int = 1
+                            override fun destroy() {
+                                probeDestroyed.set(true)
+                            }
+                            override fun destroyForcibly(): Process {
+                                probeDestroyed.set(true)
+                                return this
+                            }
+                        }
+                    }
+                    if (!ready) Thread.sleep(150)
+                }
+                ready
+            },
+            executeOnSession = { error("probe-interrupted readiness must not enter executeOnSession") },
+            executeCommand = { error("probe-interrupted readiness must not execute command") },
+            postToMain = probeMainQueue::add,
+            onRejoin = { error("stopped probe-interrupted readiness must not rejoin") },
+            result = recordingResult(probeEvents),
+        )
+        assertTrue(enteredProbeWait.await(2, java.util.concurrent.TimeUnit.SECONDS))
+        local.stop()
+        localHost.running = false
+        assertTrue("readiness interrupted during Process.waitFor must exit promptly", exitedProbeReadiness.await(2, java.util.concurrent.TimeUnit.SECONDS))
+        probeThread!!.join(2_000)
+        assertTrue(probeDestroyed.get())
+        assertEquals(1, probeIterations.get())
+        while (probeMainQueue.isNotEmpty()) probeMainQueue.poll()?.invoke()
+        assertEquals(listOf("error:SESSION_STOPPED"), probeEvents.toList())
+    }
+
+    @Test
+    fun productionSourcesEliminateAllLegacyPlacementAndOpenHelpersAndStayStateless() {
         val mainSource = readSource(MAIN_ACTIVITY)
         val serviceSource = readSource(DROID_DESK_SERVICE)
+        val forbidden = listOf(
+            Regex("""\bBuild\.DEVICE\b"""),
+            Regex("""\b100003\b"""),
+            Regex("""\bdisplayLocalMode\b"""),
+            Regex("""\.isDisplayLocal\b"""),
+            Regex("""\bstartupTarget\s*\("""),
+            Regex("""\brestartForEnvironmentIfNeeded\s*\("""),
+            Regex("""\bopenActive\s*\("""),
+            Regex("""\bprepareSession\s*\("""),
+            Regex("""\bopenDesktop\s*\("""),
+            Regex("""\brequestDesktop\s*\("""),
+            Regex("""\blaunchPreparedDesktop\s*\("""),
+            Regex("""\blaunchLocalDesktopItem\s*\("""),
+            Regex("""\bsessionStarted\b"""),
+            Regex("""\bActiveDesktopOpenTracker\b"""),
+            Regex("""\bopenTracker\b"""),
+            Regex("""\bactiveOpenFor\b"""),
+        )
+
+        mapOf(
+            "MainActivity.kt" to mainSource,
+            "DroidDeskService.kt" to serviceSource,
+        ).forEach { (fileName, source) ->
+            forbidden.forEach { pattern ->
+                assertFalse(
+                    "$fileName must not contain ${pattern.pattern}",
+                    pattern.containsMatchIn(source),
+                )
+            }
+        }
+
         val onCreateBody = functionBody(mainSource, "override fun onCreate(savedInstanceState: Bundle?)")
         val externalAutoBody = functionBody(mainSource, "private fun maybeAutoStartExternalDesktop()")
         val prefAutoBody = functionBody(mainSource, "private fun maybeAutoStartDesktop(launchIntent: Intent)")
         val onDestroyBody = functionBody(mainSource, "override fun onDestroy()")
         val homeLaunchBody = functionBody(mainSource, "private fun handleHomeLaunch(homeIntent: Intent)")
         val autoSetupBody = functionBody(mainSource, "private fun runAutoChrootSetup()")
+        val itemLaunchScope = sourceBetween(
+            mainSource,
+            "\"launchDesktopItem\" -> {",
+            "// ── In-app updates ──",
+        )
+        val itemAfterOpen = functionBody(mainSource, "private fun launchDesktopItemAfterOpen(")
+        val postOpenHelper = functionBody(mainSource, "internal fun runDesktopItemAfterOpen(")
         val startLinuxScope = sourceBetween(
             mainSource,
             "\"startLinux\" -> {",
@@ -2045,45 +2981,6 @@ class AndroidCallerPlacementPolicyTest {
         )
         val resolvedOpen = functionBody(mainSource, "private fun requestResolvedDesktopOpen(")
         val companionBody = functionBody(mainSource, "companion object")
-
-        val forbidden = listOf(
-            Regex("""\bBuild\.DEVICE\b"""),
-            Regex("""\b100003\b"""),
-            Regex("""\bdisplayLocalMode\b"""),
-            Regex("""\.isDisplayLocal\b"""),
-            Regex("""\bstartupTarget\s*\("""),
-            Regex("""\brestartForEnvironmentIfNeeded\s*\("""),
-            Regex("""\bopenActive\s*\("""),
-            Regex("""\bprepareSession\s*\("""),
-            Regex("""\brequestDesktop\s*\("""),
-            Regex("""\blaunchPreparedDesktop\s*\("""),
-            Regex("""\blaunchLocalDesktopItem\s*\("""),
-            Regex("""\bopenDesktop\s*\("""),
-            Regex("""\bsessionStarted\b"""),
-            Regex("""\bActiveDesktopOpenTracker\b"""),
-            Regex("""\bopenTracker\b"""),
-            Regex("""\bactiveOpenFor\b"""),
-        )
-
-        mapOf(
-            "MainActivity.onCreate" to onCreateBody,
-            "MainActivity.maybeAutoStartExternalDesktop" to externalAutoBody,
-            "MainActivity.maybeAutoStartDesktop" to prefAutoBody,
-            "MainActivity.onDestroy" to onDestroyBody,
-            "MainActivity.handleHomeLaunch" to homeLaunchBody,
-            "MainActivity.runAutoChrootSetup" to autoSetupBody,
-            "MainActivity.startLinux" to startLinuxScope,
-            "MainActivity.launchDesktopActivity" to manualLaunchScope,
-            "MainActivity.requestResolvedDesktopOpen" to resolvedOpen,
-            "DroidDeskService.kt" to serviceSource,
-        ).forEach { (scopeName, source) ->
-            forbidden.forEach { pattern ->
-                assertFalse(
-                    "$scopeName must not contain ${pattern.pattern}",
-                    pattern.containsMatchIn(source),
-                )
-            }
-        }
 
         assertTrue(companionBody.contains("provisioningEpoch"))
         assertTrue(onCreateBody.contains("!DesktopDisplayCoordinator.shared.allowsManualMoves"))
@@ -2100,6 +2997,21 @@ class AndroidCallerPlacementPolicyTest {
         assertTrue(manualLaunchScope.contains("isProvisioningActive(displays)"))
         assertTrue(startLinuxScope.contains("userStopLaunchReply(result, displays)"))
         assertFalse(startLinuxScope.contains("DesktopLaunchReply("))
+        assertTrue(itemLaunchScope.contains("userStopLaunchReply(result, displays)"))
+        assertFalse(itemLaunchScope.contains("DesktopLaunchReply("))
+        assertTrue(itemLaunchScope.contains("admitDesktopItemLaunch("))
+        assertTrue(itemLaunchScope.contains("resolveDesktopItemStatus("))
+        assertTrue(itemLaunchScope.contains("isProvisioningActive(displays)"))
+        assertTrue(itemLaunchScope.contains("displays.inFlightOpenSpec()"))
+        assertTrue(itemLaunchScope.contains("displays.userStopGeneration"))
+        assertTrue(itemLaunchScope.contains("launchDesktopItemAfterOpen("))
+        assertTrue(itemAfterOpen.contains("requestResolvedDesktopOpen("))
+        assertTrue(itemAfterOpen.contains("val openEpoch = coordinator.sessionGeneration"))
+        assertTrue(itemAfterOpen.contains("runDesktopItemAfterOpen("))
+        assertTrue(itemAfterOpen.contains("DroidDeskService::executeSession"))
+        assertTrue(postOpenHelper.contains("DesktopItemReadinessGate("))
+        assertTrue(postOpenHelper.contains("coordinator.isSessionCurrent(openEpoch)"))
+        assertTrue(postOpenHelper.contains("coordinator.inFlightOpenSpec()"))
         assertTrue(autoSetupBody.contains("inFlightOpenSpec()"))
         assertTrue(autoSetupBody.contains("isProvisioningActive(coordinator)"))
         assertTrue(autoSetupBody.contains("provisioningOpenCallbacks("))
