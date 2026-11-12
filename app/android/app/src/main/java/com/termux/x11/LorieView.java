@@ -351,7 +351,8 @@ public class LorieView extends SurfaceView implements InputStub {
     private static boolean hardwareKbdScancodesWorkaround = false;
     private final InputMethodManager mIMM = (InputMethodManager)getContext().getSystemService(Context.INPUT_METHOD_SERVICE);
     private Callback mCallback;
-    private boolean rendererReleased;
+    private boolean rendererReleased, surfaceReady, contentInsetsCommitted;
+    private int committedWidth, committedHeight;
 
     private boolean isRendererOwner() {
         return !rendererReleased && MainActivity.getInstance().getLorieView() == this;
@@ -624,8 +625,9 @@ public class LorieView extends SurfaceView implements InputStub {
             holder.setFormat(PixelFormat.BGRA_8888);
             Log.i("LorieView", "surfaceCreated called!");
             MainActivity.handler.post(() -> {
-                if (isRendererOwner()) {
-                    LorieView.this.surfaceChanged(holder.getSurface());
+                Surface surface = holder.getSurface();
+                if (isRendererOwner() && surfaceReady && surface != null && surface.isValid()) {
+                    LorieView.this.surfaceChanged(surface);
                     updateViewport();
                 }
             });
@@ -633,8 +635,11 @@ public class LorieView extends SurfaceView implements InputStub {
 
         @Override public void surfaceChanged(@NonNull SurfaceHolder holder, int f, int width, int height) {
             if (!isRendererOwner()) return;
+            Surface surface = holder.getSurface();
+            surfaceReady = width > 0 && height > 0 && surface != null && surface.isValid();
+            if (!surfaceReady) { LorieView.this.surfaceChanged(null); return; }
             Log.i("LorieView", "surfaceChanged called with width=" + width + ", height=" + height);
-            LorieView.this.surfaceChanged(holder.getSurface());
+            LorieView.this.surfaceChanged(surface);
             width = getMeasuredWidth();
             height = getMeasuredHeight();
 
@@ -643,6 +648,7 @@ public class LorieView extends SurfaceView implements InputStub {
         }
 
         @Override public void surfaceDestroyed(@NonNull SurfaceHolder holder) {
+            surfaceReady = false;
             if (isRendererOwner()) LorieView.this.surfaceChanged(null);
         }
     };
@@ -706,6 +712,7 @@ public class LorieView extends SurfaceView implements InputStub {
 
     public void releaseRenderer() {
         if (rendererReleased) return;
+        surfaceReady = contentInsetsCommitted = false; committedWidth = committedHeight = 0;
         if (isRendererOwner()) surfaceChanged(null);
         rendererReleased = true;
         keyReleaseHandler.removeCallbacksAndMessages(null);
@@ -799,7 +806,8 @@ public class LorieView extends SurfaceView implements InputStub {
     public void setDesktopRenderSize(int width, int height) {
         if (width <= 0 || height <= 0)
             throw new IllegalArgumentException("Desktop render size must be positive");
-        if (desktopRenderSize != null && desktopRenderSize.x == width && desktopRenderSize.y == height)
+        if (desktopRenderSize != null && desktopRenderSize.x == width && desktopRenderSize.y == height
+                && (!connected() || (lastSentWidth == p.x && lastSentHeight == p.y)))
             return;
         desktopRenderSize = new Point(width, height);
         updateViewport();
@@ -808,6 +816,14 @@ public class LorieView extends SurfaceView implements InputStub {
     public void clearDesktopRenderSize() {
         desktopRenderSize = null;
         updateViewport();
+    }
+
+    public boolean hasValidSurface() { Surface s = getHolder().getSurface(); return isRendererOwner() && surfaceReady && s != null && s.isValid(); }
+    public boolean hasCommittedGeometry() {
+        return isRendererOwner() && desktopRenderSize != null && desktopRenderSize.x > 0 && desktopRenderSize.y > 0 && contentInsetsCommitted
+                && committedWidth > Math.max(0, contentInsets.left + contentInsets.right) && committedHeight > Math.max(0, contentInsets.top + contentInsets.bottom)
+                && getWidth() == committedWidth && getHeight() == committedHeight && getMeasuredWidth() == committedWidth && getMeasuredHeight() == committedHeight
+                && viewport.width() > 0 && viewport.height() > 0 && p.x > 0 && p.y > 0 && (!connected() || (lastSentWidth == p.x && lastSentHeight == p.y));
     }
 
     @Nullable
@@ -839,8 +855,11 @@ public class LorieView extends SurfaceView implements InputStub {
     }
 
     public void setContentInsets(int left, int top, int right, int bottom) {
-        if (contentInsets.left == left && contentInsets.top == top && contentInsets.right == right && contentInsets.bottom == bottom)
-            return;
+        int w = getWidth(), h = getHeight();
+        boolean changed = !contentInsetsCommitted || committedWidth != w || committedHeight != h || getMeasuredWidth() != w || getMeasuredHeight() != h
+                || contentInsets.left != left || contentInsets.top != top || contentInsets.right != right || contentInsets.bottom != bottom;
+        contentInsetsCommitted = true; committedWidth = w; committedHeight = h;
+        if (!changed && (!connected() || (lastSentWidth == p.x && lastSentHeight == p.y))) return;
 
         contentInsets.set(left, top, right, bottom);
         updateViewport();
