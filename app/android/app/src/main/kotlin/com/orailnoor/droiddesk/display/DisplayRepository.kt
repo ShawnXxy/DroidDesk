@@ -102,9 +102,9 @@ internal fun stableDisplaySettingsKey(
     manufacturerPnpId: String?,
     productId: String?,
     @Suppress("UNUSED_PARAMETER")
-    width: Int,
+    width: Int = 0,
     @Suppress("UNUSED_PARAMETER")
-    height: Int,
+    height: Int = 0,
 ): String {
     if (isDefault) return "default"
     val parts = listOf(
@@ -251,7 +251,6 @@ private class AndroidDisplaySource(private val context: Context) : DesktopDispla
             val allowed = isDefault ||
                 supported && isActivityStartAllowedOnDisplay(context, display.displayId)
             val productIdentity = displayProductIdentityForSdk(Build.VERSION.SDK_INT, display)
-            val mode = display.mode
             DisplayCandidate(
                 display.displayId, display.name, isDefault, display.isValid,
                 display.flags and Display.FLAG_PRIVATE != 0, display.state == Display.STATE_ON,
@@ -265,8 +264,6 @@ private class AndroidDisplaySource(private val context: Context) : DesktopDispla
                     name = display.name,
                     manufacturerPnpId = productIdentity?.manufacturerPnpId,
                     productId = productIdentity?.productId,
-                    width = mode.physicalWidth,
-                    height = mode.physicalHeight,
                 ),
             )
         }

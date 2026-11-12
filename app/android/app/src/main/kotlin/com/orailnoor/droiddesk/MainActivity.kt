@@ -742,8 +742,8 @@ class MainActivity : FlutterActivity() {
                     val reply = DesktopLaunchReply(result, displays)
                     try {
                         val update = com.orailnoor.droiddesk.display
-                            .parseDisplaySettingsUpdate(call.arguments)
-                        displays.saveSettingsFor(update.displayKey, update.settings) {
+                            .parseScopedDisplaySettingsUpdate(call.arguments)
+                        displays.saveSettingsFor(update) {
                             replyDisplayState(reply, it)
                         }
                     } catch (error: DesktopDisplayException) {

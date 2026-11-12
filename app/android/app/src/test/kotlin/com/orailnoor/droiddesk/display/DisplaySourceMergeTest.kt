@@ -4,6 +4,7 @@ import com.orailnoor.droiddesk.display.capability.AndroidInputDeviceSnapshot
 import com.orailnoor.droiddesk.display.capability.AndroidPresentationDisplaySnapshot
 import com.orailnoor.droiddesk.display.capability.AndroidPresentationEvidencePlatform
 import com.orailnoor.droiddesk.display.capability.AndroidPresentationEvidenceProbe
+import com.orailnoor.droiddesk.display.capability.PresentationClass
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
@@ -277,6 +278,217 @@ class DisplaySourceMergeTest {
         )
     }
 
+    @Test
+    fun stableSettingsKeyIsIndependentOfDisplayMode() {
+        val fourKKey = stableDisplaySettingsKey(
+            isDefault = false,
+            name = "DELL U2723QE",
+            manufacturerPnpId = "DEL",
+            productId = "42313",
+            width = 3840,
+            height = 2160,
+        )
+        val fhdKey = stableDisplaySettingsKey(
+            isDefault = false,
+            name = "DELL U2723QE",
+            manufacturerPnpId = "DEL",
+            productId = "42313",
+            width = 1920,
+            height = 1080,
+        )
+        val portraitKey = stableDisplaySettingsKey(
+            isDefault = false,
+            name = "DELL U2723QE",
+            manufacturerPnpId = "DEL",
+            productId = "42313",
+            width = 1080,
+            height = 1920,
+        )
+        val store = DisplaySettingsStore(
+            preferences = InMemoryDisplayPreferences(),
+            legacyInputMode = { null },
+            diagnostic = {},
+        )
+        val saved = DisplaySettings(
+            renderPolicy = RenderPolicy.CAP_1440,
+            uiScalePercent = 150,
+            inputMode = 2,
+            inputRoute = com.orailnoor.droiddesk.display.input.ExternalInputRoutePreference.PHONE_RELAY,
+        )
+
+        store.save(
+            key = DisplaySettingsKey(PresentationClass.EXTERNAL_POINTER, fourKKey),
+            scope = DisplaySettingsScope.THIS_DISPLAY,
+            settings = saved,
+        )
+
+        assertEquals("external:3:DEL|5:42313|12:DELL U2723QE", fourKKey)
+        assertEquals(fourKKey, fhdKey)
+        assertEquals(fourKKey, portraitKey)
+        assertEquals(
+            saved,
+            store.load(DisplaySettingsKey(PresentationClass.EXTERNAL_POINTER, fhdKey)),
+        )
+    }
+
+    @Test
+    fun connectionKeyChangesDoNotChangeTheStableSettingsKey() {
+        val productKey = "external:3:RTK|3:447|7:RTK FHD"
+        val source = MutableDisplaySource(
+            listOf(DisplayCandidate(id = 5, name = "RTK FHD", isDefault = false, settingsKey = productKey)),
+        )
+        val repository = DisplayRepository(source)
+        val store = DisplaySettingsStore(
+            preferences = InMemoryDisplayPreferences(),
+            legacyInputMode = { null },
+            diagnostic = {},
+        )
+        repository.start {}
+        val first = repository.snapshot().single()
+        val saved = DisplaySettings(
+            renderPolicy = RenderPolicy.CAP_1080,
+            uiScalePercent = 125,
+            inputMode = 1,
+            inputRoute = com.orailnoor.droiddesk.display.input.ExternalInputRoutePreference.NATIVE,
+        )
+        store.save(
+            key = DisplaySettingsKey(PresentationClass.EXTERNAL_POINTER, first.settingsKey),
+            scope = DisplaySettingsScope.THIS_DISPLAY,
+            settings = saved,
+        )
+
+        source.replace(emptyList(), removedId = 5)
+        source.replace(
+            listOf(DisplayCandidate(id = 9, name = "RTK FHD", isDefault = false, settingsKey = productKey)),
+        )
+        val second = repository.snapshot().single()
+
+        assertNotEquals(first.key, second.key)
+        assertNotEquals(first.id, second.id)
+        assertEquals(productKey, first.settingsKey)
+        assertEquals(first.settingsKey, second.settingsKey)
+        assertEquals(
+            saved,
+            store.load(DisplaySettingsKey(PresentationClass.EXTERNAL_POINTER, second.settingsKey)),
+        )
+    }
+
+    @Test
+    fun simultaneousIdenticalMonitorsCannotOverwriteEachOther() {
+        val productKey = "external:3:RTK|3:447|7:RTK FHD"
+        val source = MutableDisplaySource(
+            listOf(
+                DisplayCandidate(id = 5, name = "RTK FHD", isDefault = false, settingsKey = productKey),
+                DisplayCandidate(id = 6, name = "RTK FHD", isDefault = false, settingsKey = productKey),
+            ),
+        )
+        val repository = DisplayRepository(source)
+        val store = DisplaySettingsStore(
+            preferences = InMemoryDisplayPreferences(),
+            legacyInputMode = { null },
+            diagnostic = {},
+        )
+        val displays = repository.snapshot().associateBy(DesktopDisplay::id)
+        val primarySettings = DisplaySettings(
+            renderPolicy = RenderPolicy.CAP_1440,
+            uiScalePercent = 150,
+            inputMode = 1,
+            inputRoute = com.orailnoor.droiddesk.display.input.ExternalInputRoutePreference.PHONE_RELAY,
+        )
+        val secondarySettings = DisplaySettings(
+            renderPolicy = RenderPolicy.NATIVE,
+            uiScalePercent = 125,
+            inputMode = 2,
+            inputRoute = com.orailnoor.droiddesk.display.input.ExternalInputRoutePreference.NATIVE,
+        )
+
+        store.save(
+            key = DisplaySettingsKey(PresentationClass.EXTERNAL_POINTER, displays.getValue(5).settingsKey),
+            scope = DisplaySettingsScope.THIS_DISPLAY,
+            settings = primarySettings,
+        )
+        store.save(
+            key = DisplaySettingsKey(PresentationClass.EXTERNAL_POINTER, displays.getValue(6).settingsKey),
+            scope = DisplaySettingsScope.THIS_DISPLAY,
+            settings = secondarySettings,
+        )
+
+        assertEquals(
+            primarySettings,
+            store.load(DisplaySettingsKey(PresentationClass.EXTERNAL_POINTER, displays.getValue(5).settingsKey)),
+        )
+        assertEquals(
+            secondarySettings,
+            store.load(DisplaySettingsKey(PresentationClass.EXTERNAL_POINTER, displays.getValue(6).settingsKey)),
+        )
+    }
+
+    @Test
+    fun presentationEvidenceUsesTheRepositorySettingsKey() {
+        val productKey = "external:3:WAC|4:1001|12:Wacom Cintiq"
+        val source = MutableDisplaySource(
+            listOf(
+                DisplayCandidate(id = 5, name = "Wacom Cintiq", isDefault = false, settingsKey = productKey),
+                DisplayCandidate(id = 6, name = "Wacom Cintiq", isDefault = false, settingsKey = productKey),
+            ),
+        )
+        val repository = DisplayRepository(source)
+        val mode = com.orailnoor.droiddesk.display.capability.DisplayModeEvidence(1, 1920, 1080, 60f)
+        val probe = AndroidPresentationEvidenceProbe(
+            displayRepository = repository,
+            platform = object : AndroidPresentationEvidencePlatform {
+                override val supportsSecondaryActivities: Boolean = true
+                override fun isActivityStartAllowedOnDisplay(displayId: Int): Boolean = true
+                override fun displaySnapshot(displayId: Int) = AndroidPresentationDisplaySnapshot(
+                    displayFlags = 0,
+                    densityDpi = 160,
+                    fontScale = 1f,
+                    isDesktopUiMode = true,
+                    currentMode = mode,
+                    supportedModes = listOf(mode),
+                )
+                override fun inputDevices() = listOf(
+                    AndroidInputDeviceSnapshot(
+                        isExternal = true,
+                        hasTouchscreen = true,
+                        associationKnown = true,
+                        associatedDisplayId = 6,
+                    ),
+                )
+            },
+        )
+        val policy = com.orailnoor.droiddesk.display.policy.PresentationPolicy()
+        val store = DisplaySettingsStore(
+            preferences = InMemoryDisplayPreferences(),
+            legacyInputMode = { null },
+            diagnostic = {},
+        )
+        val snapshot = repository.snapshot().associateBy(DesktopDisplay::id)
+        val secondClass = policy.classify(probe.presentationContext(6))
+        val secondIdentity = probe.displayIdentity(6)
+        val saved = DisplaySettings(
+            renderPolicy = RenderPolicy.NATIVE,
+            uiScalePercent = 125,
+            inputMode = 3,
+            inputRoute = com.orailnoor.droiddesk.display.input.ExternalInputRoutePreference.NATIVE,
+        )
+
+        store.save(
+            key = DisplaySettingsKey(secondClass, secondIdentity.settingsKey),
+            scope = DisplaySettingsScope.THIS_DISPLAY,
+            settings = saved,
+        )
+
+        assertEquals(PresentationClass.EXTERNAL_TOUCH, secondClass)
+        assertEquals(snapshot.getValue(6).settingsKey, secondIdentity.settingsKey)
+        assertNotEquals(productKey, secondIdentity.settingsKey)
+        assertNull(store.load(DisplaySettingsKey(PresentationClass.EXTERNAL_TOUCH, snapshot.getValue(5).settingsKey)))
+        assertEquals(
+            saved,
+            store.load(DisplaySettingsKey(PresentationClass.EXTERNAL_TOUCH, secondIdentity.settingsKey)),
+        )
+    }
+
     private data class FakeDisplay(val id: Int)
 
     private object EmptyAndroidPresentationEvidencePlatform :
@@ -308,6 +520,18 @@ class DisplaySourceMergeTest {
         fun replace(next: List<DisplayCandidate>, removedId: Int? = null) {
             displays = next
             listener?.invoke(removedId)
+        }
+    }
+
+    private class InMemoryDisplayPreferences : DisplayPreferences {
+        private val values = mutableMapOf<String, Any>()
+
+        override fun read(key: String): Any? = values[key]
+
+        override fun write(changes: Map<String, Any?>) {
+            changes.forEach { (key, value) ->
+                if (value == null) values.remove(key) else values[key] = value
+            }
         }
     }
 }
