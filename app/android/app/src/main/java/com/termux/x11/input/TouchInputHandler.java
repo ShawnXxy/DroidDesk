@@ -78,6 +78,26 @@ public class TouchInputHandler {
         int CLOCKWISE = 3;
     }
 
+    public static final float DEFAULT_SCROLL_SCALE = -100f;
+
+    public static final class WheelScroller {
+        private float horizontalScale = DEFAULT_SCROLL_SCALE, verticalScale = DEFAULT_SCROLL_SCALE;
+        public void setScales(float horizontalScale, float verticalScale) {
+            this.horizontalScale = Float.isFinite(horizontalScale) && horizontalScale != 0f ? horizontalScale : DEFAULT_SCROLL_SCALE;
+            this.verticalScale = Float.isFinite(verticalScale) && verticalScale != 0f ? verticalScale : DEFAULT_SCROLL_SCALE;
+        }
+        public void dispatch(InputEventSender sender, float axisX, float axisY) {
+            sender.sendMouseWheelEvent(Float.isFinite(axisX) && axisX != 0f ? axisX * horizontalScale : 0f, Float.isFinite(axisY) && axisY != 0f ? axisY * verticalScale : 0f);
+        }
+    }
+
+    private final WheelScroller mWheelScroller = new WheelScroller();
+
+    public void setScrollScales(float horizontalScale, float verticalScale) {
+        mWheelScroller.setScales(horizontalScale, verticalScale);
+        if (mTouchpadHandler != null) mTouchpadHandler.setScrollScales(horizontalScale, verticalScale);
+    }
+
     private final RenderData mRenderData;
     private final GestureDetector mScroller;
     private final TapGestureDetector mTapDetector;
@@ -385,10 +405,7 @@ public class TouchInputHandler {
                     break;
 
                 case MotionEvent.ACTION_SCROLL:
-                    float scrollY = -100 * event.getAxisValue(MotionEvent.AXIS_VSCROLL);
-                    float scrollX = -100 * event.getAxisValue(MotionEvent.AXIS_HSCROLL);
-
-                    mInjector.sendMouseWheelEvent(scrollX, scrollY);
+                    mWheelScroller.dispatch(mInjector, event.getAxisValue(MotionEvent.AXIS_HSCROLL), event.getAxisValue(MotionEvent.AXIS_VSCROLL));
                     return true;
 
                 case MotionEvent.ACTION_POINTER_DOWN:
@@ -898,10 +915,7 @@ public class TouchInputHandler {
         @SuppressLint("ClickableViewAccessibility")
         boolean onTouch(View v, MotionEvent e) {
             if (e.getAction() == MotionEvent.ACTION_SCROLL) {
-                float scrollY = -100 * e.getAxisValue(MotionEvent.AXIS_VSCROLL);
-                float scrollX = -100 * e.getAxisValue(MotionEvent.AXIS_HSCROLL);
-
-                mInjector.sendMouseWheelEvent(scrollX, scrollY);
+                mWheelScroller.dispatch(mInjector, e.getAxisValue(MotionEvent.AXIS_HSCROLL), e.getAxisValue(MotionEvent.AXIS_VSCROLL));
                 return true;
             }
 

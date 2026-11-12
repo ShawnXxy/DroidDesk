@@ -5,7 +5,6 @@ import android.app.ActivityOptions
 import android.content.Context
 import android.content.Intent
 import android.graphics.Color
-import android.os.Build
 import android.os.Bundle
 import android.view.Display
 import android.view.Gravity
@@ -32,7 +31,21 @@ internal fun shouldLaunchInputRelay(
     hasWindowFocus: Boolean,
 ): Boolean = !hasActivity || isFinishing || isDestroyed || !hasWindowFocus
 
+internal class RelayPointerCaptureController(
+    private val shouldCapture: () -> Boolean, private val hasWindowFocus: () -> Boolean, private val hasPointerCapture: () -> Boolean,
+    private val requestPointerCapture: () -> Unit, private val releasePointerCapture: () -> Unit, private val scheduleRetry: () -> Unit, private val cancelRetry: () -> Unit,
+) {
+    private var disposed = false
+    fun sync() { cancelRetry(); if (disposed || !shouldCapture()) { if (hasPointerCapture()) releasePointerCapture() } else if (hasWindowFocus() && !hasPointerCapture()) requestPointerCapture() }
+    fun onWindowFocusChanged(hasFocus: Boolean) = if (hasFocus) sync() else cancelRetry()
+    fun onPointerCaptureChanged(hasCapture: Boolean) { cancelRetry(); if (disposed || !shouldCapture()) { if (hasCapture || hasPointerCapture()) releasePointerCapture() } else if (!hasCapture) scheduleRetry() }
+    fun dispose() { disposed = true; cancelRetry(); if (hasPointerCapture()) releasePointerCapture() }
+}
+
 class ExternalInputRelayActivity : Activity() {
+    private var captureController: RelayPointerCaptureController? = null
+    private val retryCapture = Runnable { captureController?.sync() }
+
     companion object {
         private var current = WeakReference<ExternalInputRelayActivity>(null)
 
@@ -44,7 +57,7 @@ class ExternalInputRelayActivity : Activity() {
                     isDestroyed = activity?.isDestroyed == true,
                     hasWindowFocus = activity?.hasWindowFocus() == true,
                 )
-            ) return
+            ) { activity?.captureController?.sync(); return }
             val intent = Intent(context, ExternalInputRelayActivity::class.java).apply {
                 flags = Intent.FLAG_ACTIVITY_NEW_TASK
             }
@@ -55,13 +68,14 @@ class ExternalInputRelayActivity : Activity() {
         }
 
         fun finishIfOpen() {
-            current.get()?.finishAndRemoveTask()
+            current.get()?.let { ExternalDesktopInputBridge.onCaptureChanged = null; it.captureController?.dispose(); it.finishAndRemoveTask() }
             current.clear()
         }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        if (!ExternalDesktopInputBridge.isAttached()) { finishAndRemoveTask(); return }
         current = WeakReference(this)
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         val relayView = TextView(this).apply {
@@ -85,27 +99,30 @@ class ExternalInputRelayActivity : Activity() {
             }
         }
         setContentView(relayView)
+        val decor = window.decorView
+        captureController = RelayPointerCaptureController(
+            ExternalDesktopInputBridge::shouldCapturePointer, ::hasWindowFocus,
+            decor::hasPointerCapture, decor::requestPointerCapture, decor::releasePointerCapture,
+            { decor.postDelayed(retryCapture, 100) }, { decor.removeCallbacks(retryCapture) },
+        ).also { ExternalDesktopInputBridge.onCaptureChanged = it::sync; it.sync() }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        if (!ExternalDesktopInputBridge.isAttached()) finishAndRemoveTask() else maintainPointerCapture()
     }
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {
         super.onWindowFocusChanged(hasFocus)
-        if (hasFocus) maintainPointerCapture()
+        captureController?.onWindowFocusChanged(hasFocus)
     }
 
     override fun onPointerCaptureChanged(hasCapture: Boolean) {
         super.onPointerCaptureChanged(hasCapture)
-        if (!hasCapture) window.decorView.postDelayed(::maintainPointerCapture, 100)
+        captureController?.onPointerCaptureChanged(hasCapture)
     }
 
-    private fun maintainPointerCapture() {
-        if (
-            Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
-            hasWindowFocus() &&
-            !window.decorView.hasPointerCapture()
-        ) {
-            window.decorView.requestPointerCapture()
-        }
-    }
+    private fun maintainPointerCapture() { captureController?.sync() }
 
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
         if (
@@ -142,7 +159,8 @@ class ExternalInputRelayActivity : Activity() {
     }
 
     override fun onDestroy() {
-        if (current.get() === this) current.clear()
+        captureController?.dispose()
+        if (current.get() === this) { current.clear(); ExternalDesktopInputBridge.onCaptureChanged = null }
         super.onDestroy()
     }
 }
