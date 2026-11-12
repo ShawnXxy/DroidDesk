@@ -22,6 +22,12 @@ object XfceDisplayProfile {
         end
     """.trimIndent()
 
+    private fun windowFittingMode(profile: DisplayProfile): String =
+        if (profile.autoMaximize) ProfileKind.PHONE.wireName else if (profile.kind == ProfileKind.PHONE) "windowed" else profile.kind.wireName
+
+    private fun panelIconSize(profile: DisplayProfile): Int =
+        if (profile.kind == ProfileKind.PHONE && profile.settings.uiScalePercent == null) 60 else (profile.dockPx * 2.0 / 3.0).roundToInt()
+
     fun buildStageScript(profile: DisplayProfile): String {
         require(profile.dpi > 0 && profile.cursorPx > 0 && profile.dockPx > 0)
         return buildString {
@@ -31,7 +37,7 @@ object XfceDisplayProfile {
                 config="${'$'}{XDG_CONFIG_HOME:-${'$'}HOME/.config}"
                 managed="${'$'}config/droiddesk"
                 mkdir -p "${'$'}managed" "${'$'}config/devilspie2" "${'$'}config/autostart"
-                printf '%s\n' '${profile.kind.wireName}' > "${'$'}managed/.display-profile.${'$'}${'$'}"
+                printf '%s\n' '${windowFittingMode(profile)}' > "${'$'}managed/.display-profile.${'$'}${'$'}"
                 mv "${'$'}managed/.display-profile.${'$'}${'$'}" "${'$'}managed/display-profile"
                 cat > "${'$'}config/devilspie2/.droiddesk-maximize.${'$'}${'$'}.tmp" <<'DROIDDESK_LUA'
             """.trimIndent())
@@ -58,11 +64,7 @@ object XfceDisplayProfile {
     }
 
     fun buildApplyScript(profile: DisplayProfile): String {
-        val iconSize = if (profile.kind == ProfileKind.PHONE && profile.settings.uiScalePercent == null) {
-            60
-        } else {
-            (profile.dockPx * 2.0 / 3.0).roundToInt()
-        }
+        val iconSize = panelIconSize(profile)
         return buildStageScript(profile) + """
             : "${'$'}{DBUS_SESSION_BUS_ADDRESS:?Desktop session bus is unavailable}"
             command -v xfconf-query >/dev/null
@@ -96,7 +98,7 @@ object XfceDisplayProfile {
                   exit 1
                 fi
               fi
-            elif [ '${profile.kind.wireName}' = 'phone' ]; then
+            elif [ '${windowFittingMode(profile)}' = '${ProfileKind.PHONE.wireName}' ]; then
               echo "The phone window-fitting helper devilspie2 is unavailable" >&2
               exit 1
             fi
@@ -106,5 +108,6 @@ object XfceDisplayProfile {
     fun sameUi(first: DisplayProfile?, second: DisplayProfile): Boolean =
         first != null && first.kind == second.kind && first.dpi == second.dpi &&
             first.cursorPx == second.cursorPx && first.dockPx == second.dockPx &&
-            first.autoMaximize == second.autoMaximize
+            first.autoMaximize == second.autoMaximize &&
+            panelIconSize(first) == panelIconSize(second)
 }
