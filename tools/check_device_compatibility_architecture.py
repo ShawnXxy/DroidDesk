@@ -209,7 +209,7 @@ def _norm_delay(expr: str) -> str:
     s, changed = s.strip(), True
     while changed: s, changed = ((m.group(1) or m.group(2)).strip(), True) if (m := re.match(r"^(?:\(\s*(?:long|int)\s*\)\s*(.+)|(.+?)\s*\.\s*to(?:Long|Int)\s*\(\s*\))$", s)) else ((s[1:-1].strip(), True) if s.startswith("(") and balanced_end(s, 0, "(", ")") == len(s) else (s, False))
     return s
-def find_250ms_post_delayed(code_only: str) -> list[int]:
+def find_250ms_post_delayed(code_only: str, is_kotlin: bool = True) -> list[int]:
     if not re.search(r"\bpostDelayed\s*\(", code_only): return []
     hits, lit_250, qual_ident = [], re.compile(r"(?i)250(?:_?l)?|0x0*fal?"), re.compile(r"[A-Za-z_]\w*(?:\s*\.\s*[A-Za-z_]\w*)*")
     blocks = [(bm.start(), balanced_end(code_only, bm.start(), "{", "}") or len(code_only)) for bm in re.finditer(r"\{", code_only)]
@@ -271,15 +271,19 @@ def find_250ms_post_delayed(code_only: str) -> list[int]:
         for ch in code_only[match.end() : end - 1]: paren += (ch == "(") - (ch == ")"); brace = max(0, brace + (ch == "{") - (ch == "}")); args.append([]) if ch == "," and paren == 0 and brace == 0 else args[-1].append(ch)
         rest, recv = code_only[end:], (recv_m.group(1) if (recv_m := re.search(r"([A-Za-z_]\w*)\s*(?:\?\.|\.)\s*$", code_only[: match.start()])) else "")
         trail_end = balanced_end(code_only, end + (ws := len(rest) - len(rest.lstrip())), "{", "}") if rest.startswith("{", len(rest) - len(rest.lstrip())) else None
-        arg_texts = ["".join(p).strip() for p in args if "".join(p).strip()]
-        cb_args = [unwrap_cb(p) for p in [*[p for p in arg_texts if not is_250_at(match.start(), p)], *([code_only[end + ws : trail_end]] if trail_end else [])]]
+        arg_texts, trail, named = ["".join(p).strip() for p in args if "".join(p).strip()], (code_only[end + ws : trail_end] if trail_end else ""), (lambda a: re.match(r"^([A-Za-z_]\w*)\s*=(?!=)\s*([\s\S]*)$", a) if is_kotlin else None)
+        un_last, compat = (unwrap_cb(arg_texts[-1]) if arg_texts else ""), (recv == "HandlerCompat" or (not recv and bool(re.search(r"\bimport\s+(?:static\s+)?androidx\s*\.\s*core\s*\.\s*os\s*\.\s*HandlerCompat\s*\.\s*(?:postDelayed\b|\*)", code_only))))
+        is_ktx = not compat and is_kotlin and (bool(trail) or any((m := named(a)) and m.group(1) in {"delayInMillis", "action"} for a in arg_texts) or (bool(arg_texts) and not named(arg_texts[0]) and (bool(re.match(r"^(?:\d|0[xX])", _norm_delay(arg_texts[0]))) or is_250_at(match.start(), arg_texts[0]))) or (len(arg_texts) >= 2 and not named(arg_texts[-1]) and (is_inline_cb(un_last) or bool(re.match(r"^(?:::|this::)", un_last)))))
+        slots = ("h", "r", "token", "delayMillis") if compat else (("delayInMillis", "token", "action") if is_ktx else (("r", "token", "delayMillis") if len(arg_texts) >= 3 or any((m := named(a)) and m.group(1) == "token" for a in arg_texts) else ("r", "delayMillis")))
+        bound = [(m.group(1), m.group(2).strip()) if (m := named(a)) else (slots[min(i, len(slots) - 1)], a) for i, a in enumerate(arg_texts)] + ([("action", trail)] if trail else [])
+        delay_args, cb_args = [v for k, v in bound if k in {"delayMillis", "delayInMillis"}], [unwrap_cb(v) for k, v in bound if k in {"r", "action", "runnable"}]
         cb_ok, cb_idents = bool(cb_args) and all(is_inline_cb(p) or ident_re.match(p) for p in cb_args), [m.group(1) for p in cb_args if (m := ident_re.match(p))]
         resolved = [_decl_bodies(code_only, name) for name in cb_idents]
         chunks, seen, bad_callee = [*cb_args, *(b for g in resolved if g for b in g)], set(cb_idents) | skip_calls, any(not g for g in resolved)
         for _ in range(4):
             callees = {next(g for g in m.groups() if g) for c in chunks for m in callee_re.finditer(c) if not (m.group(1) and re.search(r"\b(?:fun|void)\s+$", c[max(0, m.start() - 20) : m.start()]))} - seen; seen.update(callees)
             for name in callees: chunks.extend(res) if (res := _decl_bodies(code_only, name)) else (bad_callee := True)
-        if any(is_250_at(match.start(), p) for p in arg_texts) and not (cb_ok and not bad_callee and (_is_cosmetic_ident(recv) or any(_is_cosmetic_ident(c) for c in cb_idents)) and not STARTUP_WORDS.intersection(_ident_words(ANIM_START.sub(r"\1\2", " ".join(chunks))))): hits.append(match.start())
+        if any(is_250_at(match.start(), p) for p in delay_args) and not (cb_ok and not bad_callee and (_is_cosmetic_ident(recv) or any(_is_cosmetic_ident(c) for c in cb_idents)) and not STARTUP_WORDS.intersection(_ident_words(ANIM_START.sub(r"\1\2", " ".join(chunks))))): hits.append(match.start())
     return hits
 def _arity_range(ps: str) -> tuple[int, int]: items = [p.strip() for p in _split_top_commas(ps) if p.strip()]; return (sum(1 for p in items if "=" not in p and not p.startswith("vararg ")), 99 if any(p.startswith("vararg ") or "..." in p for p in items) else len(items))
 def _members_in_body(sh: str) -> set[tuple[str, int, int]]:
@@ -366,8 +370,7 @@ def main() -> int:
         add(rel, code_only, DISPLAY_ENV_POLICY, "display-local branching leakage")
         if not rel.startswith(f"{ANDROID_MAIN}/"): continue
         if rel == MAIN_ACTIVITY:
-            masked = list(code_only)
-            for allow in MAIN_DEVICE_INFO_ALLOW.finditer(no_comments): masked[allow.start() : allow.end()] = list(_blank(code_only[allow.start() : allow.end()]))
+            masked = list(code_only); [masked.__setitem__(slice(allow.start(), allow.end()), list(_blank(code_only[allow.start() : allow.end()]))) for allow in MAIN_DEVICE_INFO_ALLOW.finditer(no_comments)]
             add(rel, "".join(masked), BUILD_IDENTITY, "oem identity leakage")
         elif rel not in {QUIRK_CATALOG, PLACEMENT_SELECTOR}: add(rel, code_only, BUILD_IDENTITY, "oem identity leakage")
         if rel not in LOCAL_ALLOWED and not rel.startswith(f"{KOTLIN_ROOT}/display/placement/"): add(rel, code_only, DISPLAY_LOCAL_CALLER, "display-local branching leakage"); add(rel, no_comments, DISPLAY_LOCAL_WIRE, "display-local branching leakage")
@@ -375,14 +378,12 @@ def main() -> int:
         if rel != COORDINATOR and not rel.startswith(f"{KOTLIN_ROOT}/display/placement/"): add(rel, code_only, PLACEMENT_INTERNAL, "misplaced input/placement policy")
         if rel not in {PRESENTATION_POLICY, DISPLAY_PROFILE}: violations.extend(f"{rel}:{line_no(code_only, off)}: misplaced input/placement policy ({snip})" for off, snip in _policy_calls(code_only, "DisplayProfilePolicy", "classify|resolve|renderSize", t_idx))
         if rel.startswith(f"{TERMUX_X11}/input/"): violations.extend(f"{rel}:{line_no(code_only, off)}: fixed pointer array ({snip})" for off, snip in find_fixed_pointers(code_only))
-        if rel == MAIN_ACTIVITY or rel.startswith(startup_prefixes): violations.extend(f"{rel}:{line_no(code_only, off)}: 250 ms startup delay (postDelayed 250)" for off in find_250ms_post_delayed(code_only))
+        if rel == MAIN_ACTIVITY or rel.startswith(startup_prefixes): violations.extend(f"{rel}:{line_no(code_only, off)}: 250 ms startup delay (postDelayed 250)" for off in find_250ms_post_delayed(code_only, rel.endswith(".kt")))
         if rel != REFRESH_POLICY:
             allowed = allowed_refresh_assigns(code_only) if rel == DESKTOP_ACTIVITY else set()
             violations.extend([*(f"{rel}:{line_no(code_only, off)}: direct refresh-mode selection ({snip})" for off, snip in find_refresh_selections(rel, code_only)), *(f"{rel}:{line_no(code_only, m.start())}: direct refresh-mode selection ({m.group(0).strip()})" for m in WINDOW_REFRESH_ASSIGN.finditer(code_only) if m.start() not in allowed)])
         add(rel, code_only, SMALLEST_SW_DP, "smallestScreenWidthDp profile classification")
     sender_tracked = INPUT_SENDER in lexed and bool(ACTIVE_POINTER_TRACKER.search(IMPORT_LINE.sub("", lexed[INPUT_SENDER][1])))
-    if INPUT_SENDER in lexed and not sender_tracked: violations.append(f"{INPUT_SENDER}:1: fixed pointer array (missing ActivePointerTracker)")
-    if TOUCH_HANDLER in lexed and not (ACTIVE_POINTER_TRACKER.search(tb := IMPORT_LINE.sub("", lexed[TOUCH_HANDLER][1])) or (sender_tracked and INPUT_EVENT_SENDER.search(tb))): violations.append(f"{TOUCH_HANDLER}:1: fixed pointer array (missing ActivePointerTracker)")
-    if DESKTOP_ACTIVITY in lexed and not READINESS_GATE.search(IMPORT_LINE.sub("", lexed[DESKTOP_ACTIVITY][1])): violations.append(f"{DESKTOP_ACTIVITY}:1: 250 ms startup delay (missing DesktopReadinessGate)")
+    for cond, msg in ((INPUT_SENDER in lexed and not sender_tracked, f"{INPUT_SENDER}:1: fixed pointer array (missing ActivePointerTracker)"), (TOUCH_HANDLER in lexed and not (ACTIVE_POINTER_TRACKER.search(tb := IMPORT_LINE.sub("", lexed[TOUCH_HANDLER][1])) or (sender_tracked and INPUT_EVENT_SENDER.search(tb))), f"{TOUCH_HANDLER}:1: fixed pointer array (missing ActivePointerTracker)"), (DESKTOP_ACTIVITY in lexed and not READINESS_GATE.search(IMPORT_LINE.sub("", lexed[DESKTOP_ACTIVITY][1])), f"{DESKTOP_ACTIVITY}:1: 250 ms startup delay (missing DesktopReadinessGate)")): (violations.append(msg) if cond else None)
     print("Device compatibility architecture violations:\n" + "\n".join(f"- {v}" for v in violations) if violations else "Device compatibility architecture: OK"); return 1 if violations else 0
 if __name__ == "__main__": raise SystemExit(main())

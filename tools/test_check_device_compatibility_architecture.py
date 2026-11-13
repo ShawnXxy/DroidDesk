@@ -164,6 +164,7 @@ class DeviceCompatibilityArchitectureGuardTest(unittest.TestCase):
                     "        run { val outerRate = 30; require(outerRate <= 60) }\n"
                     "    }\n"
                     "    fun timeoutOk(delayMillis: Long) = handler.postDelayed(timeoutTask, delayMillis)\n"
+                    "    fun tokenThreeArgOk(runnable: Runnable, tok: Any) { handler.postDelayed(runnable, 250, 1000L); handler.postDelayed(1000L, 250) { launchSession() }; handler.postDelayed(token = 250, delayInMillis = 1000L) { launchSession() }; collapsedFadeHandler.postDelayed(fadeTyped, tok, 250L) }\n"
                     "    fun namedFade() = collapsedFadeHandler.postDelayed(::fadeCollapsedControl, delayMillis = 250L)\n"
                     "    fun samFade() = collapsedFadeHandler.postDelayed(Runnable { hideOverlay() }, 250)\n"
                     "    fun objInlineFade() = collapsedFadeHandler.postDelayed(object : Runnable { override fun run() { hideOverlay() } }, 250)\n"
@@ -199,9 +200,11 @@ class DeviceCompatibilityArchitectureGuardTest(unittest.TestCase):
                     "}\n"
                 ),
                 f"{TERMUX_X11}/LorieView.java": (
+                    "import static androidx.core.os.HandlerCompat.postDelayed;\n"
                     "public class LorieView {\n"
                     "    Object modes(android.view.Display d) { float r = d.getMode().getRefreshRate(); return d.getSupportedModes(); }\n"
                     "    void non250Loop(android.os.Handler h, Runnable r) { for (long d : new long[] {4 * 250, 1000}) h.postDelayed(r, d); }\n"
+                    "    void compatOk(android.os.Handler h, Runnable r) { android.os.Handler out; HandlerCompat.postDelayed(out = h, r, 250, 1000L); postDelayed(h, r, 250, 1000L); }\n"
                     "}\n"
                 ),
                 "app/lib/screens/display_settings_screen.dart": (
@@ -681,6 +684,18 @@ class DeviceCompatibilityArchitectureGuardTest(unittest.TestCase):
             (
                 f"{ANDROID_KOTLIN}/view/DesktopActivity.kt",
                 "class DesktopActivity { val g = DesktopReadinessGate {}; fun chain(a: Long = 250L, b: Long = a) { handler.postDelayed({ launchSession() }, b) } }",
+            ),
+            (
+                f"{ANDROID_KOTLIN}/view/DesktopActivity.kt",
+                "class DesktopActivity { val g = DesktopReadinessGate {}; fun tokBad(r: Runnable, tok: Any) { handler.postDelayed(r, tok, 250L) } }",
+            ),
+            (
+                f"{ANDROID_KOTLIN}/view/DesktopActivity.kt",
+                "class DesktopActivity { val g = DesktopReadinessGate {}; fun ktxBad(tok: Any) { handler.postDelayed(250L, tok) { launchSession() } } }",
+            ),
+            (
+                f"{TERMUX_X11}/LorieView.java",
+                "class LorieView { long lastDelay; void s(android.os.Handler h, Runnable r) { h.postDelayed(r, lastDelay = 250L); } }",
             ),
             (
                 f"{ANDROID_KOTLIN}/view/DesktopActivity.kt",
