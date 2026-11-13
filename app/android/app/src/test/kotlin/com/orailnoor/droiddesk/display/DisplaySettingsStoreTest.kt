@@ -197,6 +197,53 @@ class DisplaySettingsStoreTest {
     }
 
     @Test
+    fun pointerLookupPreservesLegacyInputRouteForSubsequentTouchPromotion() {
+        val promotedKey = "external:3:PRT|4:2020|14:Portable Touch"
+        val overriddenKey = "external:3:WAC|4:1001|12:Wacom Cintiq"
+        val existingTouchOverride = DisplaySettings(
+            renderPolicy = RenderPolicy.CAP_1080,
+            uiScalePercent = 125,
+            inputMode = 2,
+            inputRoute = ExternalInputRoutePreference.NATIVE,
+        )
+        val preferences = MemoryDisplayPreferences(
+            mapOf(
+                "schemaVersion" to 2,
+                "phone.inputMigrated" to true,
+                "display.$promotedKey.inputRoute" to "phoneRelay",
+                "display.$overriddenKey.inputRoute" to "phoneRelay",
+                "v2.display.externalTouch.$overriddenKey.renderPolicy" to existingTouchOverride.renderPolicy.wireName,
+                "v2.display.externalTouch.$overriddenKey.uiScalePercent" to checkNotNull(existingTouchOverride.uiScalePercent),
+                "v2.display.externalTouch.$overriddenKey.inputMode" to existingTouchOverride.inputMode,
+                "v2.display.externalTouch.$overriddenKey.inputRoute" to existingTouchOverride.inputRoute.wireName,
+            ),
+        )
+        val store = DisplaySettingsStore(preferences, legacyInputMode = { null }, diagnostic = {})
+
+        val initialPointer = store.load(DisplaySettingsKey(PresentationClass.EXTERNAL_POINTER, promotedKey))
+        val promotedTouch = store.load(DisplaySettingsKey(PresentationClass.EXTERNAL_TOUCH, promotedKey))
+
+        assertNull(preferences.read("display.$promotedKey.inputRoute"))
+        assertEquals(
+            DisplaySettings(RenderPolicy.NATIVE, null, 1, ExternalInputRoutePreference.PHONE_RELAY),
+            initialPointer,
+        )
+        assertEquals(
+            DisplaySettings(RenderPolicy.NATIVE, null, 3, ExternalInputRoutePreference.PHONE_RELAY),
+            promotedTouch,
+        )
+
+        val overriddenPointer = store.load(DisplaySettingsKey(PresentationClass.EXTERNAL_POINTER, overriddenKey))
+        val preservedTouch = store.load(DisplaySettingsKey(PresentationClass.EXTERNAL_TOUCH, overriddenKey))
+        assertNull(preferences.read("display.$overriddenKey.inputRoute"))
+        assertEquals(
+            DisplaySettings(RenderPolicy.NATIVE, null, 1, ExternalInputRoutePreference.PHONE_RELAY),
+            overriddenPointer,
+        )
+        assertEquals(existingTouchOverride, preservedTouch)
+    }
+
+    @Test
     fun savingBeforeLazyRouteMigrationCleansUpLegacyKeyWithoutResurrection() {
         val stableKey = "external:3:RTK|3:447|7:RTK FHD"
         val preferences = MemoryDisplayPreferences(
@@ -232,7 +279,10 @@ class DisplaySettingsStoreTest {
 
         assertNull(preferences.read("display.$stableKey.inputRoute"))
         assertEquals(saved, store.load(DisplaySettingsKey(PresentationClass.EXTERNAL_POINTER, stableKey)))
-        assertNull(store.load(DisplaySettingsKey(PresentationClass.EXTERNAL_TOUCH, stableKey)))
+        assertEquals(
+            DisplaySettings(RenderPolicy.NATIVE, null, 3, ExternalInputRoutePreference.PHONE_RELAY),
+            store.load(DisplaySettingsKey(PresentationClass.EXTERNAL_TOUCH, stableKey)),
+        )
 
         val phoneExact = DisplaySettings(RenderPolicy.NATIVE, 125, 2)
         store.save(

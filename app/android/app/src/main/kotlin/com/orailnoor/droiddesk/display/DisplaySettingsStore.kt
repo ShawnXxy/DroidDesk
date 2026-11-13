@@ -68,7 +68,7 @@ class DisplaySettingsStore(
 
     fun hasExactOverride(key: DisplaySettingsKey): Boolean {
         ensureSchema(); val cls = key.presentationClass; val stableKey = key.stableDisplayKey?.takeIf { it.isNotBlank() } ?: return false
-        val legacy = if (kindFor(cls) == ProfileKind.MONITOR) migrateOrReadLegacyRoute(cls, stableKey) { baseSettings(cls) ?: defaultSettingsFor(cls) } else null
+        val legacy = if (kindFor(cls) == ProfileKind.MONITOR) migrateOrReadLegacyRoute(stableKey) else null
         return hasRecord(displayPrefix(cls, stableKey)) || (legacy != null && legacy != ExternalInputRoutePreference.AUTOMATIC)
     }
     fun resolveScope(key: DisplaySettingsKey): DisplaySettingsScope {
@@ -77,20 +77,15 @@ class DisplaySettingsStore(
     }
     fun load(key: DisplaySettingsKey): DisplaySettings? {
         ensureSchema(); val cls = key.presentationClass; val kind = kindFor(cls); val stableKey = key.stableDisplayKey?.takeIf { it.isNotBlank() }
-        val base by lazy { baseSettings(cls) }
-        val legacyRoute = if (stableKey != null && kind == ProfileKind.MONITOR) migrateOrReadLegacyRoute(cls, stableKey) { base ?: defaultSettingsFor(cls) } else null
+        val legacyRoute = if (stableKey != null && kind == ProfileKind.MONITOR) migrateOrReadLegacyRoute(stableKey) else null
         if (stableKey != null) displayPrefix(cls, stableKey).takeIf(::hasRecord)?.let { return readEntry(kind, it, repair = true) }
-        return base?.let { if (legacyRoute != null) it.copy(inputRoute = legacyRoute) else it } ?: legacyRoute?.let { defaultSettingsFor(cls).copy(inputRoute = it) }
+        return baseSettings(cls)?.let { if (legacyRoute != null) it.copy(inputRoute = legacyRoute) else it } ?: legacyRoute?.let { defaultSettingsFor(cls).copy(inputRoute = it) }
     }
     fun save(key: DisplaySettingsKey, scope: DisplaySettingsScope, settings: DisplaySettings) {
         val cls = key.presentationClass; val stableKey = key.stableDisplayKey?.takeIf { it.isNotBlank() }
         require(scope != DisplaySettingsScope.THIS_DISPLAY || stableKey != null) { "Exact display settings require a stable display key" }
         migrateSchema(allowFallback = false); val changes = mutableMapOf<String, Any?>()
-        if (stableKey != null && kindFor(cls) == ProfileKind.MONITOR) {
-            val dPrefix = displayPrefix(cls, stableKey); val legacy = if (scope == DisplaySettingsScope.CLASS_DEFAULT && !hasRecord(dPrefix)) ExternalInputRoutePreference.fromWire(preferences.read("display.$stableKey.inputRoute") as? String) else null
-            changes["display.$stableKey.inputRoute"] = null
-            if (legacy != null && legacy != ExternalInputRoutePreference.AUTOMATIC) changes.putAll(recordMap(dPrefix, (baseSettings(cls) ?: defaultSettingsFor(cls)).copy(inputRoute = legacy)))
-        }
+        if (stableKey != null && kindFor(cls) == ProfileKind.MONITOR) seedLegacyRouteChanges(stableKey, changes)
         val prefix = if (scope == DisplaySettingsScope.CLASS_DEFAULT) classPrefix(cls) else displayPrefix(cls, checkNotNull(stableKey))
         changes.putAll(recordMap(prefix, settings)); if (cls == PresentationClass.PHONE_TOUCH) changes["phone.inputMigrated"] = true
         writeWithRollback(changes)
@@ -186,14 +181,20 @@ class DisplaySettingsStore(
         }
     }
 
-    private fun migrateOrReadLegacyRoute(cls: PresentationClass, stableKey: String, seedBase: () -> DisplaySettings): ExternalInputRoutePreference? {
+    private fun migrateOrReadLegacyRoute(stableKey: String): ExternalInputRoutePreference? {
+        val changes = mutableMapOf<String, Any?>(); val parsed = seedLegacyRouteChanges(stableKey, changes) ?: return null
+        if (preferences.read("schemaVersion") != 2) return parsed
+        writeSafely(changes)
+        return parsed.takeIf { preferences.read("display.$stableKey.inputRoute") != null }
+    }
+    private fun seedLegacyRouteChanges(stableKey: String, changes: MutableMap<String, Any?>): ExternalInputRoutePreference? {
         val legacyKey = "display.$stableKey.inputRoute"; val raw = preferences.read(legacyKey) ?: return null
         val parsed = ExternalInputRoutePreference.fromWire(raw as? String) ?: ExternalInputRoutePreference.AUTOMATIC.also { diagnostic("Invalid $legacyKey; restoring Automatic") }
-        if (preferences.read("schemaVersion") != 2) return parsed
-        val dPrefix = displayPrefix(cls, stableKey); val changes = mutableMapOf<String, Any?>(legacyKey to null)
-        if (!hasRecord(dPrefix) && parsed != ExternalInputRoutePreference.AUTOMATIC) changes.putAll(recordMap(dPrefix, seedBase().copy(inputRoute = parsed)))
-        writeSafely(changes)
-        return parsed.takeIf { preferences.read(legacyKey) != null }
+        changes[legacyKey] = null
+        if (parsed != ExternalInputRoutePreference.AUTOMATIC) classesFor(ProfileKind.MONITOR).filterNot { hasRecord(displayPrefix(it, stableKey)) }.forEach {
+            changes.putAll(recordMap(displayPrefix(it, stableKey), (baseSettings(it) ?: defaultSettingsFor(it)).copy(inputRoute = parsed)))
+        }
+        return parsed
     }
 
     private fun hasRecord(prefix: String) = preferences.read("$prefix.renderPolicy") != null || preferences.read("$prefix.uiScalePercent") != null || preferences.read("$prefix.inputMode") != null
