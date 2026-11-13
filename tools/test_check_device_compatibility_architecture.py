@@ -114,13 +114,22 @@ class DeviceCompatibilityArchitectureGuardTest(unittest.TestCase):
                     "    val selector: DesktopPlacementSelector = DesktopPlacementSelector(DeviceQuirkCatalog()),\n"
                     ") {\n"
                     "    val isDisplayLocal = selection.mode == PlacementMode.DISPLAY_LOCAL\n"
+                    "    private fun scheduleTimeout(ms: Long) {}\n"
+                    "    fun unrelatedLocal() = scheduleTimeout(250L)\n"
                     "}\n"
                 ),
                 f"{ANDROID_KOTLIN}/display/DesktopDisplayLauncher.kt": (
                     "private const val delayMillis = 250L\n"
-                    "class DesktopDisplayLauncher {\n"
+                    "fun android.os.Handler.scheduleTimeout(delayMillis: Long = 1000L, r: Runnable) { postDelayed(r, delayMillis) }\n"
+                    "class UiHelper { fun scheduleTimeout(ms: Long, r: Runnable) {}; fun f(r: Runnable) { val h = UiHelper(); h.scheduleTimeout(250L, r) } }\n"
+                    "class DesktopDisplayLauncher(\n"
+                    "    private val onEvent: () -> Unit = {},\n"
+                    "    private val extraPaddingForLongConstructorHeader: String = \"ok\",\n"
+                    "    private val secondExtraFieldForLongConstructorHeader: Int = 0,\n"
+                    ") {\n"
                     "    private fun fadeDuration(): Long { val delayMillis = 250L; return delayMillis }\n"
-                    "    private fun scheduleTimeout(delayMillis: Long = 1000L, timeout: Runnable) { handler.postDelayed(timeout, delayMillis) }\n"
+                    "    private fun android.os.Handler.extTimeout(delayMillis: Long = 1000L, timeout: Runnable) { postDelayed(timeout, delayMillis) }\n"
+                    "    fun scheduleTimeout(delayMillis: Long = 1000L, timeout: Runnable) { handler.postDelayed(timeout, delayMillis) }\n"
                     "    private fun retryShadow(timeout: Runnable) { val d = 250L; listOf(1000L).forEach { d -> handler.postDelayed(timeout, d) } }\n"
                     "    private fun overwritten(timeout: Runnable) { var d = 250L; d = 1000L; handler.postDelayed(timeout, d) }\n"
                     "}\n"
@@ -144,16 +153,32 @@ class DeviceCompatibilityArchitectureGuardTest(unittest.TestCase):
                     "    companion object { private const val FADE_DELAY_MS = 250L; private const val TIMEOUT_MS = 250L * 4 }\n"
                     "    val fallbackProfile = ProfilePolicy.phoneDefaultProfile()\n"
                     "    val defaultSettings = ProfilePolicy.defaults(ProfileKind.PHONE)\n"
-                    "    class OtherHelper { fun classify() = 1 }\n"
-                    "    class ExtTarget\n"
+                    "    class OtherHelper(val onDone: () -> Unit = {}) {\n"
+                    "        fun classify(x: Int) = x\n"
+                    "        fun classify(onItem: () -> Unit, onPair: (Int, Int) -> Unit) = 1\n"
+                    "        fun resolve(name: String) = name.length\n"
+                    "    }\n"
+                    "    interface ExtBase\n"
+                    "    class ExtTarget @JvmOverloads constructor(val id: Int = 0) :\n"
+                    "        ExtBase\n"
                     "    fun ExtTarget.resolve() = 2\n"
-                    "    fun scopeSafe(other: OtherHelper, ext: ExtTarget) = with(ProfilePolicy) { val resolve = 1; other.classify(); other::classify; with(other) { classify() }; other.run { classify() }; other.apply { classify() }; with(ext) { resolve() }; defaults(ProfileKind.PHONE) }\n"
-                    "    fun shadowParamSafe(ProfilePolicy: OtherHelper) { val x = ProfilePolicy; x.classify(); listOf(DisplayProfilePolicy).forEach { ProfilePolicy: DisplayProfilePolicy -> ProfilePolicy.defaults(ProfileKind.PHONE) } }\n"
-                                        "    private val fadeLambda: () -> Unit = { hideOverlay() }\n"
+                    "    fun ExtBase?.classify() = 3\n"
+                    "    class LocalRouter { fun check() = externalInputRoute(); fun externalInputRoute() = 0 }\n"
+                    "    class ExtRouter\n"
+                    "    fun ExtRouter.externalInputRoute() = 0\n"
+                    "    fun routeSafe(r: ExtRouter) = with(r) { externalInputRoute() }\n"
+                    "    fun extNoLocalSafe(ext: ExtTarget) = with(ProfilePolicy) { with(ext) { resolve(); classify() }; with(ExtTarget()) { resolve() } }\n"
+                    "    fun scopeSafe(other: OtherHelper, ext: ExtTarget) = with(ProfilePolicy) { val resolve = 1; other.classify(1); other::classify; with(other) { classify(\n1,\n); classify({}, { _, _ -> }); resolve(\"phone\") }; other.run { classify(1) }; other.apply { classify(1) }; with(ext) { resolve() }; defaults(ProfileKind.PHONE) }\n"
+                    "    fun shadowParamSafe(ProfilePolicy: OtherHelper) { val x = ProfilePolicy; x.classify(1); listOf(DisplayProfilePolicy).forEach { ProfilePolicy: DisplayProfilePolicy -> ProfilePolicy.defaults(ProfileKind.PHONE) } }\n"
+                    "    fun earlierClobberSafe(collapsedFadeView: android.view.MotionEvent) {}\n"
+                    "    private val fadeLambda: () -> Unit = { hideOverlay() }\n"
                     "    private val gate = DesktopReadinessGate {}\n"
                     "    private fun hideOverlay() {}\n"
+                    "    private fun android.view.View.fadeOutOverlay() { alpha = 0f }\n"
                     "    private fun fadeCollapsedControl() = hideOverlay()\n"
+                    "    lateinit var lateView: android.view.View\n"
                     "    private val fadeTyped: Runnable = Runnable { hideOverlay() }\n"
+                    "    private val fadeAlias = fadeTyped\n"
                     "    private val fadeObj: Runnable = object : Runnable { override fun run() { hideOverlay() } }\n"
                     "    fun launchSession() {}\n"
                     "    val refreshRateLimit = 60\n"
@@ -165,6 +190,7 @@ class DeviceCompatibilityArchitectureGuardTest(unittest.TestCase):
                     "    }\n"
                     "    fun timeoutOk(delayMillis: Long) = handler.postDelayed(timeoutTask, delayMillis)\n"
                     "    fun tokenThreeArgOk(runnable: Runnable, tok: Any) { handler.postDelayed(runnable, 250, 1000L); handler.postDelayed(1000L, 250) { launchSession() }; handler.postDelayed(token = 250, delayInMillis = 1000L) { launchSession() }; collapsedFadeHandler.postDelayed(fadeTyped, tok, 250L) }\n"
+                    "    fun viewKtxExtOk(collapsedFadeView: android.view.View) { collapsedFadeView.postDelayed(250L, ::fadeCollapsedControl); collapsedFadeView.postDelayed(250L, { hideOverlay() }); collapsedFadeView.postDelayed(FADE_DELAY_MS, fadeLambda); collapsedFadeView.postDelayed(250L, collapsedFadeView::fadeOutOverlay); collapsedFadeHandler.postDelayed(250L) { collapsedFadeView.fadeOutOverlay() }; collapsedFadeHandler.apply { postDelayed(250L) { hideOverlay() } }; collapsedFadeHandler.postDelayed(fadeAlias, 250L); collapsedFadeView.postDelayed(250L) { collapsedFadeView.animate().alpha(0f).withEndAction { hideOverlay() }.start() } }\n"
                     "    fun namedFade() = collapsedFadeHandler.postDelayed(::fadeCollapsedControl, delayMillis = 250L)\n"
                     "    fun samFade() = collapsedFadeHandler.postDelayed(Runnable { hideOverlay() }, 250)\n"
                     "    fun objInlineFade() = collapsedFadeHandler.postDelayed(object : Runnable { override fun run() { hideOverlay() } }, 250)\n"
@@ -172,7 +198,8 @@ class DeviceCompatibilityArchitectureGuardTest(unittest.TestCase):
                     "    fun timeoutConst() = handler.postDelayed(timeoutTask, TIMEOUT_MS)\n"
                     "    fun fadeUi() = collapsedFadeHandler.postDelayed(::fadeCollapsedControl, 250)\n"
                     "    fun fadeConst() = collapsedFadeHandler.postDelayed(::fadeCollapsedControl, FADE_DELAY_MS)\n"
-                    "    fun animUi() = collapsedFadeHandler.postDelayed({ bar.animate().alpha(0f).start() }, 250)\n"
+                    "    fun animUi() = collapsedFadeHandler.postDelayed({ bar.animate().alpha(0f).\n        start(); hideOverlay() }, 250)\n"
+                    "    fun laterClobberSafe(collapsedFadeView: android.view.MotionEvent) {}\n"
                     "    fun modes() = target?.supportedModes?.mapNotNull { it?.toEvidenceOrNull() }\n"
                     "    fun refresh(request: RefreshRequest) {\n"
                     "        var calls = 0\n"
@@ -293,6 +320,14 @@ class DeviceCompatibilityArchitectureGuardTest(unittest.TestCase):
                 )
 
     def test_misplaced_input_or_placement_policy_fails(self) -> None:
+        self.assert_fails_with(
+            {
+                f"{ANDROID_KOTLIN}/util/UnrelatedExt.kt": "package com.orailnoor.droiddesk.util\nfun Any.classify(a: Boolean, b: Int, c: Boolean) = 0\n",
+                f"{ANDROID_KOTLIN}/view/PrivExt.kt": "package com.orailnoor.droiddesk\nprivate fun Any.classify(a: Boolean, b: Int, c: Boolean) = 0\n",
+                f"{ANDROID_KOTLIN}/MainActivity.kt": "package com.orailnoor.droiddesk\nimport com.orailnoor.droiddesk.display.DisplayProfilePolicy as ProfilePolicy\nclass EmptyHelper\nfun bad(other: EmptyHelper) = with(ProfilePolicy) { with(other) { classify(true, 600, false) } }\n",
+            },
+            "misplaced input/placement policy",
+        )
         for relative, snippet in (
             (
                 f"{ANDROID_KOTLIN}/view/DesktopActivity.kt",
@@ -426,6 +461,18 @@ class DeviceCompatibilityArchitectureGuardTest(unittest.TestCase):
                 f"{ANDROID_KOTLIN}/MainActivity.kt",
                 "import com.orailnoor.droiddesk.display.DisplayProfilePolicy as ProfilePolicy\nclass EmptyHelper\nclass OtherHelper { fun classify() = 1 }\nfun bad(other: EmptyHelper) = with(ProfilePolicy) { with(other) { classify(true, 600, false) } }\nfun ok(other: OtherHelper) = other.classify()",
             ),
+            (
+                f"{ANDROID_KOTLIN}/MainActivity.kt",
+                "import com.orailnoor.droiddesk.display.DisplayProfilePolicy as ProfilePolicy\nfun nonCallableVal(ctx: Any) = with(ProfilePolicy) { val resolve = 1; resolve(ctx) }",
+            ),
+            (
+                f"{ANDROID_KOTLIN}/MainActivity.kt",
+                "import com.orailnoor.droiddesk.display.DisplayProfilePolicy as ProfilePolicy\nfun thisBypass(ctx: Any) = with(ProfilePolicy) { fun resolve(x: Any) = 1; this.resolve(ctx) }",
+            ),
+            (
+                f"{ANDROID_KOTLIN}/MainActivity.kt",
+                "import com.orailnoor.droiddesk.display.DisplayProfilePolicy as ProfilePolicy\nclass EmptyHelper\ndata class OtherHelper(val id: Int) { fun classify(a: Boolean, b: Int, c: Boolean) = 0 }\nfun stealBody(empty: EmptyHelper) = with(ProfilePolicy) { with(empty) { classify(true, 600, false) } }",
+            ),
         ):
             with self.subTest(relative=relative, snippet=snippet):
                 self.assert_fails_with(
@@ -536,6 +583,14 @@ class DeviceCompatibilityArchitectureGuardTest(unittest.TestCase):
                 self.assert_fails_with({relative: snippet}, "fixed pointer array")
 
     def test_startup_250ms_delay_or_missing_readiness_gate_fails(self) -> None:
+        self.assert_fails_with(
+            {
+                f"{ANDROID_KOTLIN}/display/DesktopDisplayLauncher.kt": "class DesktopDisplayLauncher { private val tag = 1\nfun scheduleTimeout(delayMillis: Long, action: () -> Unit) { handler.postDelayed(Runnable(action), delayMillis) } }",
+                f"{ANDROID_KOTLIN}/display/Bridge.kt": "class Bridge(val p: DesktopDisplayLauncher) { fun forward(ms: Long, a: () -> Unit) = p.scheduleTimeout(ms, a) }",
+                f"{ANDROID_KOTLIN}/display/DesktopDisplayCoordinator.kt": "class DesktopDisplayCoordinator { val d = 250L; fun boot(b: Bridge) = b.forward(d) { proceed() }; fun unrelated(b: Boolean) = b }",
+            },
+            "250 ms startup delay",
+        )
         for relative, snippet in (
             (
                 f"{ANDROID_KOTLIN}/view/DesktopActivity.kt",
@@ -696,6 +751,114 @@ class DeviceCompatibilityArchitectureGuardTest(unittest.TestCase):
             (
                 f"{TERMUX_X11}/LorieView.java",
                 "class LorieView { long lastDelay; void s(android.os.Handler h, Runnable r) { h.postDelayed(r, lastDelay = 250L); } }",
+            ),
+            (
+                f"{ANDROID_KOTLIN}/view/DesktopActivity.kt",
+                "class DesktopActivity { val g = DesktopReadinessGate {}; fun delegExt(helper: Any) = collapsedFadeHandler.postDelayed({ helper.proceed() }, 250) }",
+            ),
+            (
+                f"{ANDROID_KOTLIN}/view/DesktopActivity.kt",
+                "class DesktopActivity { val g = DesktopReadinessGate {}; private object Helper { fun go() { launchSession() } }; fun delegObj() = collapsedFadeHandler.postDelayed({ Helper.go() }, 250) }",
+            ),
+            (
+                f"{ANDROID_KOTLIN}/view/DesktopActivity.kt",
+                "class DesktopActivity { val g = DesktopReadinessGate {}; private fun go() { launchSession() }; fun delegThis() = collapsedFadeHandler.postDelayed({ this@DesktopActivity.go() }, 250) }",
+            ),
+            (
+                f"{ANDROID_KOTLIN}/view/DesktopActivity.kt",
+                "class DesktopActivity { val g = DesktopReadinessGate {}; private fun step(b: () -> Unit) { launchSession() }; fun delegTrail() = collapsedFadeHandler.postDelayed({ step {} }, 250) }",
+            ),
+            (
+                f"{ANDROID_KOTLIN}/view/DesktopActivity.kt",
+                "class DesktopActivity { val g = DesktopReadinessGate {}; val bad = Runnable { launchSession() }; val fadeAlias = bad; fun delegAlias() = collapsedFadeHandler.postDelayed(fadeAlias, 250) }",
+            ),
+            (
+                f"{ANDROID_KOTLIN}/view/DesktopActivity.kt",
+                "class DesktopActivity { val g = DesktopReadinessGate {}; val bad = Runnable { launchSession() }; fun delegEnd() = collapsedFadeHandler.postDelayed({ bar.animate().withEndAction(bad).start() }, 250) }",
+            ),
+            (
+                f"{ANDROID_KOTLIN}/view/DesktopActivity.kt",
+                "class DesktopActivity { val g = DesktopReadinessGate {}; fun delegRef(h: Any) = collapsedFadeHandler.postDelayed({ bar.animate().withEndAction(h::proceed).start() }, 250) }",
+            ),
+            (
+                f"{ANDROID_KOTLIN}/view/DesktopActivity.kt",
+                "class DesktopActivity { val g = DesktopReadinessGate {}; fun a() = b(); fun b() = c(); fun c() = d(); fun d() = e(); fun e() = f(); fun f() { launchSession() }; fun deep() = collapsedFadeHandler.postDelayed(::a, 250) }",
+            ),
+            (
+                f"{ANDROID_KOTLIN}/view/DesktopActivity.kt",
+                "class DesktopActivity { val g = DesktopReadinessGate {}; private fun scheduleLater(ms: Long, r: Runnable) { handler.postDelayed(r, ms) }; fun p1(ms: Long, r: Runnable) = scheduleLater(ms, r); fun p2(ms: Long, r: Runnable) = p1(ms, r); fun p3(ms: Long, r: Runnable) = p2(ms, r); fun p4(ms: Long, r: Runnable) = p3(ms, r); fun p5(ms: Long, r: Runnable) = p4(ms, r); fun wrap(r: Runnable) = p5(250L, r) }",
+            ),
+            (
+                f"{ANDROID_KOTLIN}/view/DesktopActivity.kt",
+                "class DesktopActivity { val g = DesktopReadinessGate {}; class Helper { fun isEmpty(): Boolean { launchSession(); return true } }; fun spoofZero(h: Helper) = collapsedFadeHandler.postDelayed({ h.isEmpty() }, 250) }",
+            ),
+            (
+                f"{ANDROID_KOTLIN}/view/DesktopActivity.kt",
+                "class DesktopActivity { val g = DesktopReadinessGate {}; private fun proceed(x: Int) {}; fun decoyLocal(h: Any) = collapsedFadeHandler.postDelayed({ h.proceed(0) }, 250) }",
+            ),
+            (
+                f"{ANDROID_KOTLIN}/view/DesktopActivity.kt",
+                "class DesktopActivity { val g = DesktopReadinessGate {}; fun android.os.Handler.startLater(delayMillis: Long = 250L) { postDelayed({ launchSession() }, delayMillis) } }",
+            ),
+            (
+                f"{ANDROID_KOTLIN}/view/DesktopActivity.kt",
+                "class DesktopActivity { val g = DesktopReadinessGate {}; private fun android.os.Handler.startLater(delayMillis: Long) { postDelayed({ launchSession() }, delayMillis) }; fun boot(handler: android.os.Handler) = handler.startLater(250L) }",
+            ),
+            (
+                f"{ANDROID_KOTLIN}/view/DesktopActivity.kt",
+                "class DesktopActivity { val g = DesktopReadinessGate {}; val bad = Runnable { launchSession() }; val fadeAlias = this.bad; fun f() = collapsedFadeHandler.postDelayed(fadeAlias, 250) }",
+            ),
+            (
+                f"{ANDROID_KOTLIN}/view/DesktopActivity.kt",
+                "class DesktopActivity { val g = DesktopReadinessGate {}; fun bang(helper: Any?) = collapsedFadeHandler.postDelayed({ helper!!.proceed() }, 250) }",
+            ),
+            (
+                f"{ANDROID_KOTLIN}/view/DesktopActivity.kt",
+                "class DesktopActivity { val g = DesktopReadinessGate {}; private fun proceed() {}; fun parenRef(h: Any) = collapsedFadeHandler.postDelayed({ bar.animate().withEndAction((h)::proceed).start() }, 250) }",
+            ),
+            (
+                f"{TERMUX_X11}/LorieView.java",
+                'class LorieView { void strTok(android.os.Handler h, Runnable r) { HandlerCompat.postDelayed(h, r, "startup_token", 250L); } }',
+            ),
+            (
+                f"{ANDROID_KOTLIN}/view/DesktopActivity.kt",
+                'class DesktopActivity { val g = DesktopReadinessGate {}; private fun scheduleLater(tag: String, delayMs: Long, r: Runnable) { handler.postDelayed(r, delayMs) }; fun boot(r: Runnable) = scheduleLater("boot", 250L, r) }',
+            ),
+            (
+                f"{ANDROID_KOTLIN}/view/DesktopActivity.kt",
+                "class DesktopActivity(private val a: () -> Unit = {}, private val b: String = \"long_header_padding_value_1\", private val c: String = \"long_header_padding_value_2\") { companion object { private const val STARTUP_DELAY_MS = 250L }; val g = DesktopReadinessGate {}; fun s() = handler.postDelayed({ launchSession() }, DesktopActivity.STARTUP_DELAY_MS) }",
+            ),
+            (
+                f"{ANDROID_KOTLIN}/view/DesktopActivity.kt",
+                "var topDelay = 0L\nclass DesktopActivity(val ctorDelay: Long = 250L) { val g = DesktopReadinessGate {}; fun boot() { topDelay = 250L; handler.postDelayed({ launchSession() }, topDelay) } }",
+            ),
+            (
+                f"{ANDROID_KOTLIN}/view/DesktopActivity.kt",
+                "class DesktopActivity(val ctorDelay: Long = 250L) { val g = DesktopReadinessGate {}; fun boot() = handler.postDelayed({ launchSession() }, this.ctorDelay) }",
+            ),
+            (
+                f"{ANDROID_KOTLIN}/view/DesktopActivity.kt",
+                "class DesktopActivity { val g = DesktopReadinessGate {}; private fun android.view.View.dismiss() {}; fun prior(helper: android.view.View) {}; fun spoof(x: Any) { val helper = x; collapsedFadeHandler.postDelayed({ helper.dismiss() }, 250) } }",
+            ),
+            (
+                f"{ANDROID_KOTLIN}/view/DesktopActivity.kt",
+                "class DesktopActivity { val g = DesktopReadinessGate {}; private fun proceed(x: Int) {}; fun scopeSpoof(h: Any) = collapsedFadeHandler.postDelayed({ h.run { proceed(0) } }, 250) }",
+            ),
+            (
+                f"{ANDROID_KOTLIN}/view/DesktopActivity.kt",
+                "class DesktopActivity { val g = DesktopReadinessGate {}; private fun android.view.View.dismiss() {}; fun letSpoof(h: Any) = collapsedFadeHandler.postDelayed({ h.let { it.dismiss() } }, 250) }",
+            ),
+            (
+                f"{ANDROID_KOTLIN}/view/DesktopActivity.kt",
+                "class DesktopActivity { val g = DesktopReadinessGate {}; private fun android.view.View.dismiss() {}; fun spoofExt(helper: Any) = collapsedFadeHandler.postDelayed({ helper.dismiss() }, 250); fun other(helper: android.view.View) {} }",
+            ),
+            (
+                f"{TERMUX_X11}/LorieView.java",
+                "import static androidx.core.os.HandlerCompat.postDelayed;\nclass LorieView { void twoArg(Runnable r) { postDelayed(r, 250); } }",
+            ),
+            (
+                f"{TERMUX_X11}/LorieView.java",
+                "class LorieView { void helper(android.os.Handler h, Runnable r, long d) { h.postDelayed(r, d); } void boot(android.os.Handler h, Runnable r) { helper(h, r, 250L); } }",
             ),
             (
                 f"{ANDROID_KOTLIN}/view/DesktopActivity.kt",
