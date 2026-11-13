@@ -117,9 +117,10 @@ class DeviceCompatibilityArchitectureGuardTest(unittest.TestCase):
                     "}\n"
                 ),
                 f"{ANDROID_KOTLIN}/display/DesktopDisplayLauncher.kt": (
+                    "private const val delayMillis = 250L\n"
                     "class DesktopDisplayLauncher {\n"
                     "    private fun fadeDuration(): Long { val delayMillis = 250L; return delayMillis }\n"
-                    "    private fun scheduleTimeout(delayMillis: Long, timeout: Runnable) { handler.postDelayed(timeout, delayMillis) }\n"
+                    "    private fun scheduleTimeout(delayMillis: Long = 1000L, timeout: Runnable) { handler.postDelayed(timeout, delayMillis) }\n"
                     "    private fun retryShadow(timeout: Runnable) { val d = 250L; listOf(1000L).forEach { d -> handler.postDelayed(timeout, d) } }\n"
                     "    private fun overwritten(timeout: Runnable) { var d = 250L; d = 1000L; handler.postDelayed(timeout, d) }\n"
                     "}\n"
@@ -143,7 +144,10 @@ class DeviceCompatibilityArchitectureGuardTest(unittest.TestCase):
                     "    companion object { private const val FADE_DELAY_MS = 250L; private const val TIMEOUT_MS = 250L * 4 }\n"
                     "    val fallbackProfile = ProfilePolicy.phoneDefaultProfile()\n"
                     "    val defaultSettings = ProfilePolicy.defaults(ProfileKind.PHONE)\n"
-                    "    fun scopeSafe(other: OtherHelper) = with(ProfilePolicy) { val resolve = 1; other.classify(); other::classify; defaults(ProfileKind.PHONE) }\n"
+                    "    class OtherHelper { fun classify() = 1 }\n"
+                    "    class ExtTarget\n"
+                    "    fun ExtTarget.resolve() = 2\n"
+                    "    fun scopeSafe(other: OtherHelper, ext: ExtTarget) = with(ProfilePolicy) { val resolve = 1; other.classify(); other::classify; with(other) { classify() }; other.run { classify() }; other.apply { classify() }; with(ext) { resolve() }; defaults(ProfileKind.PHONE) }\n"
                     "    fun shadowParamSafe(ProfilePolicy: OtherHelper) { val x = ProfilePolicy; x.classify(); listOf(DisplayProfilePolicy).forEach { ProfilePolicy: DisplayProfilePolicy -> ProfilePolicy.defaults(ProfileKind.PHONE) } }\n"
                                         "    private val fadeLambda: () -> Unit = { hideOverlay() }\n"
                     "    private val gate = DesktopReadinessGate {}\n"
@@ -403,6 +407,22 @@ class DeviceCompatibilityArchitectureGuardTest(unittest.TestCase):
                 f"{TERMUX_X11}/PolicyCaller.java",
                 "class PolicyCaller { Object bad(Object pref) { return ExternalInputPolicyKt.externalInputRoute(pref); } }",
             ),
+            (
+                f"{ANDROID_KOTLIN}/MainActivity.kt",
+                "import com.orailnoor.droiddesk.display.DisplayProfilePolicy as ProfilePolicy\nclass EmptyHelper\nfun fallback(empty: EmptyHelper) = with(ProfilePolicy) { with(empty) { classify(ctx) } }",
+            ),
+            (
+                f"{ANDROID_KOTLIN}/MainActivity.kt",
+                "import com.orailnoor.droiddesk.display.DisplayProfilePolicy as ProfilePolicy\nclass OtherHelper { fun classify() = 1 }\nfun fallbackRender(other: OtherHelper) = with(ProfilePolicy) { with(other) { classify(); renderSize(bounds, policy) } }",
+            ),
+            (
+                f"{ANDROID_KOTLIN}/MainActivity.kt",
+                "import com.orailnoor.droiddesk.display.DisplayProfilePolicy as ProfilePolicy\nclass OtherHelper { fun classify() = 1 }\nfun fallbackArity(other: OtherHelper) = with(ProfilePolicy) { with(other) { classify(); classify(true, 600, false) } }",
+            ),
+            (
+                f"{ANDROID_KOTLIN}/MainActivity.kt",
+                "import com.orailnoor.droiddesk.display.DisplayProfilePolicy as ProfilePolicy\nclass EmptyHelper\nclass OtherHelper { fun classify() = 1 }\nfun bad(other: EmptyHelper) = with(ProfilePolicy) { with(other) { classify(true, 600, false) } }\nfun ok(other: OtherHelper) = other.classify()",
+            ),
         ):
             with self.subTest(relative=relative, snippet=snippet):
                 self.assert_fails_with(
@@ -653,6 +673,14 @@ class DeviceCompatibilityArchitectureGuardTest(unittest.TestCase):
             (
                 f"{ANDROID_KOTLIN}/view/DesktopActivity.kt",
                 "class DesktopActivity { val g = DesktopReadinessGate {}; fun f() { var d: Long = 0L; d = 250L; handler.postDelayed({ launchSession() }, d) } }",
+            ),
+            (
+                f"{ANDROID_KOTLIN}/view/DesktopActivity.kt",
+                "private const val delayMillis = 250L\nclass DesktopActivity { val g = DesktopReadinessGate {}; fun sneak(delayMillis: Long = delayMillis) { handler.postDelayed({ launchSession() }, delayMillis) } }",
+            ),
+            (
+                f"{ANDROID_KOTLIN}/view/DesktopActivity.kt",
+                "class DesktopActivity { val g = DesktopReadinessGate {}; fun chain(a: Long = 250L, b: Long = a) { handler.postDelayed({ launchSession() }, b) } }",
             ),
             (
                 f"{ANDROID_KOTLIN}/view/DesktopActivity.kt",
