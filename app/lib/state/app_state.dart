@@ -116,10 +116,12 @@ class AppState extends ChangeNotifier {
     return false;
   }
 
-  Future<void> saveDesktopDisplaySettings(DesktopDisplaySettings settings) =>
-      _runDesktopOperation(
-        () => DroidDeskPlatform.saveDesktopDisplaySettings(settings),
-      );
+  Future<void> saveDesktopDisplaySettings(
+    DesktopDisplaySettings settings, {
+    DesktopDisplaySettingsScope? scope,
+  }) => _runDesktopOperation(
+    () => DroidDeskPlatform.saveDesktopDisplaySettings(settings, scope: scope),
+  );
 
   Future<void> _runDesktopOperation(
     Future<DesktopDisplayState> Function() operation,
@@ -143,6 +145,8 @@ class AppState extends ChangeNotifier {
     } on PlatformException catch (error) {
       _recordDisplayError(error);
     } on FormatException catch (error) {
+      _recordDisplayError(error);
+    } on ArgumentError catch (error) {
       _recordDisplayError(error);
     } finally {
       if (!_disposed) {

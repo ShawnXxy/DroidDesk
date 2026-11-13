@@ -146,6 +146,13 @@ class FakeDesktopPlatform {
               return settings[key] ??
                   {
                     'displayKey': key,
+                    'presentationClass': key == 'phone-key'
+                        ? 'phoneTouch'
+                        : 'externalPointer',
+                    'stableDisplayKey': key == 'phone-key'
+                        ? 'default'
+                        : 'external:0:|0:|7:Monitor|$key',
+                    'settingsScope': 'thisDisplay',
                     'renderPolicy': key == 'phone-key'
                         ? 'legacyPhone'
                         : 'native',
@@ -157,6 +164,15 @@ class FakeDesktopPlatform {
               final arguments = Map<Object?, Object?>.from(
                 call.arguments as Map,
               );
+              final stableKey = arguments['stableDisplayKey'] as String?;
+              if (arguments['settingsScope'] == 'thisDisplay' &&
+                  (stableKey == null || stableKey.trim().isEmpty)) {
+                throw PlatformException(
+                  code: 'INVALID_ARGUMENT',
+                  message:
+                      'Exact display settings require a stable display key',
+                );
+              }
               settings[arguments['displayKey'] as String] = arguments;
               return snapshot;
             case 'openDesktopOnDisplay':

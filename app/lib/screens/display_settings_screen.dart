@@ -98,6 +98,8 @@ class _DisplaySettingsScreenState extends State<DisplaySettingsScreen> {
       _settingsFailed(key, revision, '${error.code}: ${error.message}');
     } on FormatException catch (error) {
       _settingsFailed(key, revision, error.toString());
+    } on ArgumentError catch (error) {
+      _settingsFailed(key, revision, error.toString());
     }
   }
 
@@ -114,6 +116,7 @@ class _DisplaySettingsScreenState extends State<DisplaySettingsScreen> {
   }
 
   void _edit({
+    DesktopDisplaySettingsScope? scope,
     DesktopRenderPolicy? render,
     String? scale,
     int? mode,
@@ -122,16 +125,16 @@ class _DisplaySettingsScreenState extends State<DisplaySettingsScreen> {
     final settings = _settings;
     if (settings == null) return;
     setState(() {
-      _settings = DesktopDisplaySettings(
-        displayKey: settings.displayKey,
-        renderPolicy: render ?? settings.renderPolicy,
+      _settings = settings.copyWith(
+        settingsScope: scope,
+        renderPolicy: render,
         uiScalePercent: scale == null
             ? settings.uiScalePercent
             : scale == 'auto'
             ? null
             : int.parse(scale),
-        inputMode: mode ?? settings.inputMode,
-        inputRoute: inputRoute ?? settings.inputRoute,
+        inputMode: mode,
+        inputRoute: inputRoute,
       );
       _dirty = true;
     });
@@ -265,14 +268,58 @@ class _DisplaySettingsScreenState extends State<DisplaySettingsScreen> {
           const SizedBox(height: 10),
           if (snapshot.monitors.isEmpty)
             const Text('No independently launchable display detected'),
-          if (selected != null && !selected.isDefault)
-            const Text(
-              'Render, scale, and input-mode preferences apply to all monitors. Input routing is stored for the selected monitor.',
-            ),
           if (selected?.reason != null) Text(selected!.reason!),
           if (_loadingSettings) const LinearProgressIndicator(),
           const SizedBox(height: 20),
           if (settings != null) ...[
+            Text(
+              'Presentation class: ${settings.presentationClass.label}',
+              key: const Key('desktop-presentation-class'),
+            ),
+            const SizedBox(height: 12),
+            KeyedSubtree(
+              key: ValueKey(
+                'desktop-scope-${settings.displayKey}-${settings.settingsScope.wireValue}-${settings.stableDisplayKey}',
+              ),
+              child: DropdownButtonFormField<DesktopDisplaySettingsScope>(
+                key: const Key('desktop-settings-scope'),
+                initialValue: settings.settingsScope,
+                decoration: const InputDecoration(
+                  labelText: 'Save settings for',
+                ),
+                items: DesktopDisplaySettingsScope.values
+                    .map(
+                      (scope) => DropdownMenuItem(
+                        value: scope,
+                        enabled:
+                            scope != DesktopDisplaySettingsScope.thisDisplay ||
+                            settings.hasStableIdentity,
+                        child: Text(scope.label),
+                      ),
+                    )
+                    .toList(),
+                onChanged: enabled
+                    ? (scope) {
+                        if (scope != null &&
+                            (scope != DesktopDisplaySettingsScope.thisDisplay ||
+                                settings.hasStableIdentity)) {
+                          _edit(scope: scope);
+                        }
+                      }
+                    : null,
+              ),
+            ),
+            const SizedBox(height: 8),
+            Text(
+              !settings.hasStableIdentity
+                  ? 'Exact display identity is unavailable for this connection; settings fall back to the ${settings.presentationClass.label.toLowerCase()} class default for all displays of this type.'
+                  : settings.settingsScope ==
+                        DesktopDisplaySettingsScope.thisDisplay
+                  ? 'Saves an override for this display only.'
+                  : 'Saves the ${settings.presentationClass.label.toLowerCase()} class default for displays without a display-specific override.',
+              key: const Key('desktop-settings-scope-hint'),
+            ),
+            const SizedBox(height: 14),
             DropdownButtonFormField<DesktopRenderPolicy>(
               key: ValueKey(
                 'desktop-render-${settings.displayKey}-${settings.renderPolicy.name}',

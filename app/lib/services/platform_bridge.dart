@@ -415,21 +415,28 @@ class DroidDeskPlatform {
 
   static Future<DesktopDisplaySettings> getDesktopDisplaySettings(
     String displayKey,
-  ) async => DesktopDisplaySettings.fromMap(
-    desktopDisplayMap(
-      await _channel.invokeMethod<Object?>('getDesktopDisplaySettings', {
-        'displayKey': displayKey,
-      }),
-    ),
-  );
+  ) async {
+    if (displayKey.trim().isEmpty) {
+      throw ArgumentError.value(displayKey, 'displayKey', 'Required');
+    }
+    return DesktopDisplaySettings.fromMap(
+      desktopDisplayMap(
+        await _channel.invokeMethod<Object?>('getDesktopDisplaySettings', {
+          'displayKey': displayKey,
+        }),
+      ),
+    );
+  }
 
   static Future<DesktopDisplayState> saveDesktopDisplaySettings(
-    DesktopDisplaySettings settings,
-  ) async => DesktopDisplayState.fromMap(
+    DesktopDisplaySettings settings, {
+    DesktopDisplaySettingsScope? scope,
+  }) async => DesktopDisplayState.fromMap(
     desktopDisplayMap(
       await _channel.invokeMethod<Object?>(
         'saveDesktopDisplaySettings',
-        settings.toMap(),
+        (scope == null ? settings : settings.copyWith(settingsScope: scope))
+            .toMap(),
       ),
     ),
   );
