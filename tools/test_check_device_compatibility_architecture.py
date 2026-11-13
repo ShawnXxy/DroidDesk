@@ -373,11 +373,35 @@ class DeviceCompatibilityArchitectureGuardTest(unittest.TestCase):
             ),
             (
                 f"{ANDROID_KOTLIN}/MainActivity.kt",
-                "fun beforeShadow() { DesktopInputPolicy.resolve(ctx); val DesktopInputPolicy = 1 }",
+                "fun beforeShadow() { println(0); DesktopInputPolicy.resolve(ctx); val DesktopInputPolicy = 1 }",
+            ),
+            (
+                f"{ANDROID_KOTLIN}/view/DesktopActivity.kt",
+                "class DesktopActivity { val g = DesktopReadinessGate {}; fun beforeShadow() { println(0); DisplayProfilePolicy.classify(ctx); val DisplayProfilePolicy = 1 } }",
             ),
             (
                 f"{ANDROID_KOTLIN}/MainActivity.kt",
                 "fun typedLocal() { val p: DesktopInputPolicy = obtain(); p.resolve(ctx) }",
+            ),
+            (
+                f"{TERMUX_X11}/PolicyCaller.java",
+                "class PolicyCaller { Object bad(Object ctx) { return DesktopInputPolicy.INSTANCE.resolve(ctx); } }",
+            ),
+            (
+                f"{TERMUX_X11}/PolicyCaller.java",
+                "class PolicyCaller { Object bad(Object ctx) { return DisplayProfilePolicy.INSTANCE.classify(ctx); } }",
+            ),
+            (
+                f"{TERMUX_X11}/PolicyCaller.java",
+                "import static com.orailnoor.droiddesk.display.input.DesktopInputPolicy.INSTANCE;\nclass PolicyCaller { Object bad(Object ctx) { return INSTANCE.resolve(ctx); } }",
+            ),
+            (
+                f"{TERMUX_X11}/PolicyCaller.java",
+                "class PolicyCaller { Object bad(Object ctx) { DesktopInputPolicy p = DesktopInputPolicy.INSTANCE; return p.resolve(ctx); } }",
+            ),
+            (
+                f"{TERMUX_X11}/PolicyCaller.java",
+                "class PolicyCaller { Object bad(Object pref) { return ExternalInputPolicyKt.externalInputRoute(pref); } }",
             ),
         ):
             with self.subTest(relative=relative, snippet=snippet):
@@ -455,6 +479,14 @@ class DeviceCompatibilityArchitectureGuardTest(unittest.TestCase):
             (
                 f"{TERMUX_X11}/input/InputEventSender.java",
                 "class InputEventSender { ActivePointerTracker t; boolean[] active = new boolean[16]; void a(android.view.MotionEvent e, boolean c) { int id = c\n ? e.getPointerId(0) : 0; active[id] = true; } }",
+            ),
+            (
+                f"{TERMUX_X11}/input/InputEventSender.java",
+                "class InputEventSender { ActivePointerTracker t; boolean[] active = new boolean[16]; void a(android.view.MotionEvent e, boolean reset) { int id = e.getPointerId(0); if (reset) id = 0; active[id] = true; } }",
+            ),
+            (
+                f"{TERMUX_X11}/input/InputEventSender.java",
+                "class InputEventSender { ActivePointerTracker t; boolean[] active = new boolean[16]; void a(android.view.MotionEvent e, boolean reset) { int id = e.getPointerId(0); if (reset) {} else id = 0; active[id] = true; } }",
             ),
             (
                 f"{TERMUX_X11}/input/TouchInputHandler.java",

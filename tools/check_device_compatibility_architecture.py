@@ -26,7 +26,6 @@ def balanced_end(text: str, open_idx: int, open_ch: str, close_ch: str) -> int |
     for idx in range(open_idx, len(text)):
         if (depth := depth + (text[idx] == open_ch) - (text[idx] == close_ch)) == 0: return idx + 1
     return None
-
 def lex_source(text: str, suffix: str) -> tuple[str, str]:
     nc, co, n, delims = [], [], len(text), (('"""', "'''", '"', "'") if suffix == ".dart" else ('"""', '"', "'"))
     def emit(chunk: str, keep_nc: bool, keep_co: bool = False) -> None: nc.append(chunk if keep_nc else _blank(chunk)); co.append(chunk if keep_co else _blank(chunk))
@@ -60,38 +59,51 @@ def lex_source(text: str, suffix: str) -> tuple[str, str]:
                 while idx < n and depth > 0:
                     step = 2 if (nested and text.startswith("/*", idx)) or text.startswith("*/", idx) else 1
                     depth += 1 if step == 2 and text.startswith("/*", idx) else (-1 if step == 2 else 0); emit(text[idx : idx + step], False); idx += step
-            elif suffix == ".dart" and text[idx] == "r" and (idx == 0 or not (text[idx - 1].isalnum() or text[idx - 1] == "_")) and (q := next((d for d in delims if text.startswith(d, idx + 1)), None)):
-                emit("r", True, True); idx = scan_string(idx + 1, q, True, False)
+            elif suffix == ".dart" and text[idx] == "r" and (idx == 0 or not (text[idx - 1].isalnum() or text[idx - 1] == "_")) and (q := next((d for d in delims if text.startswith(d, idx + 1)), None)): emit("r", True, True); idx = scan_string(idx + 1, q, True, False)
             elif q := next((d for d in delims if text.startswith(d, idx)), None): idx = scan_string(idx, q, suffix == ".kt" and q == '"""', suffix == ".dart" or (suffix == ".kt" and q != "'"))
             else: emit(text[idx], True, True); idx += 1
         return idx
     scan_code(0); return "".join(nc), "".join(co)
-
 def _shallow_text(s: str) -> str:
-    buf, idx = list(s), 0
-    while idx < len(s):
-        if s[idx] == "{" and (end := balanced_end(s, idx, "{", "}")): buf[idx:end] = list(_blank(s[idx:end])); idx = end
-        else: idx += 1
+    out, idx = [], 0
+    while idx < len(s): end = balanced_end(s, idx, "{", "}") if s[idx] == "{" else None; out.append(_blank(s[idx:end]) if end else s[idx]); idx = end or idx + 1
+    return "".join(out)
+def _uncond_text(s: str) -> str:
+    sh, buf = _shallow_text(s), list(_shallow_text(s))
+    stmt_end = lambda pos: (ws := pos + len(s[pos:]) - len(s[pos:].lstrip())) + (er := len(_rhs_expr(sh[ws:]))) + (1 if ws + er < len(sh) and sh[ws + er] == ";" else 0)
+    for m in re.finditer(r"\b(?:if|for|while)\s*\(", sh):
+        if pend := balanced_end(sh, m.end() - 1, "(", ")"): se = pend if s[pend:].lstrip().startswith("{") else stmt_end(pend); buf[m.start() : se] = list(_blank(sh[m.start() : se]))
+    for m in re.finditer(r"\belse\b", "".join(buf)):
+        if not s[m.end() :].lstrip().startswith("{"): se = stmt_end(m.end()); buf[m.start() : se] = list(_blank(sh[m.start() : se]))
+    for m in re.finditer(r"(?:->|\?|&&|\|\||\?:)\s*\(", "".join(buf)):
+        if pend := balanced_end("".join(buf), m.end() - 1, "(", ")"): buf[m.start() : pend] = list(_blank(sh[m.start() : pend]))
+    for m in re.finditer(r"(?:->|\?|&&|\|\||\?:)[^;\n]*", "".join(buf)): buf[m.start() : m.end()] = list(_blank(sh[m.start() : m.end()]))
     return "".join(buf)
 def _split_top_commas(s: str) -> list[str]:
     parts, cur, depth = [], [], 0
     for ch in s: depth += (ch in "([{<") - (ch in ")]}>"); parts.append("".join(cur)) or cur.clear() if ch == "," and depth <= 0 else cur.append(ch)
     return [*parts, "".join(cur)]
+def _flatten_paren_nl(s: str) -> str:
+    out, depth = [], 0
+    for ch in s: depth = 0 if ch in ";{}" else max(0, depth + (ch == "(") - (ch == ")")); out.append(" " if ch == "\n" and depth > 0 else ch)
+    return "".join(out)
 def _rhs_expr(s: str) -> str:
     start = i = len(s) - len(s.lstrip()); depth = 0
-    while i < len(s) and not (depth == 0 and (s[i] in ";,})" or (s[i] == "\n" and not (s[start:i].rstrip().endswith(("+", "-", "*", "/", "%", "?", ":", ".", "&&", "||")) or s[i + 1 :].lstrip().startswith((".", "?.", "!!", "?:", "?", ":", "+", "-", "*", "/", "%", "&&", "||")))))):
-        depth = max(0, depth + (s[i] in "([{") - (s[i] in ")]}")); i += 1
+    while i < len(s) and not (depth == 0 and (s[i] in ";,})" or (s[i] == "\n" and not (s[start:i].rstrip().endswith(("+", "-", "*", "/", "%", "?", ":", ".", "=", "&&", "||")) or s[i + 1 :].lstrip().startswith((".", "?.", "!!", "?:", "?", ":", "+", "-", "*", "/", "%", "&&", "||")))))): depth = max(0, depth + (s[i] in "([{") - (s[i] in ")]}")); i += 1
     return s[start:i]
 def _decl_map_in(sh: str, base: int) -> dict[str, int]:
     out: dict[str, int] = {}
     for m in re.finditer(r"\b(?:val|var)\s+(?:([A-Za-z_]\w*)|\(([^)=;{}\n]+)\))", sh):
-        end = base + m.end() + (len(_rhs_expr(sh[em.end() :])) + (em.end() - m.end()) if (em := re.match(r"(?:\s*:\s*[\w<>?.*, \t]+)?\s*=(?!=)", sh[m.end() :])) else 0)
+        end = base + m.end() + (em.end() + len(_rhs_expr(sh[m.end() + em.end() :])) if (em := re.match(r"(?:\s*:\s*[\w<>?.*, \t]+)?\s*=(?!=)", sh[m.end() :])) else 0)
         for d in ([m.group(1)] if m.group(1) else re.findall(r"\b([A-Za-z_]\w*)\b", re.sub(r":\s*[\w<>?.*]+", "", m.group(2)))): out.setdefault(d, end) if d != "_" else None
-    for m in re.finditer(r"\b(?:int|long|float|double|boolean|short|byte|Integer|Long|Float|Double)\s+([^;{}\n]+)", sh):
-        for p in _split_top_commas(m.group(1)): out.setdefault(dm.group(1), base + m.end()) if (dm := re.match(r"\s*([A-Za-z_]\w*)", p)) and dm.group(1) != "_" else None
+    for m in re.finditer(r"(?<![.\w])(?:int|long|float|double|boolean|short|byte|(?:com\.orailnoor\.droiddesk\.[\w.]*\.)?[A-Z]\w*(?:\s*<[^>{};\n]*>)?)(?:\s*\[\s*\])*\s+([^;{}\n]+)", sh):
+        cur = base + m.start(1)
+        for p in _split_top_commas(m.group(1)):
+            if (dm := re.match(r"\s*([A-Za-z_]\w*)(?!\s*\()", p)) and dm.group(1) not in {"_", "in", "is", "as"}: out.setdefault(dm.group(1), cur + len(p))
+            cur += len(p) + 1
     return out
 def _scoped_taint(src: str, seed_re: re.Pattern[str], extra_root: set[str] = frozenset(), param_type_re: str = ""):
-    top_m, loops = _decl_map_in(_shallow_text(src), 0), []
+    top_m, loops, uncond_all = _decl_map_in(_shallow_text(src), 0), [], _uncond_text(src)
     scopes: list[tuple[int, int, dict[str, int], bool, str, str]] = [*( [(0, len(src), {k: 0 for k in set(extra_root) - set(top_m)}, False, "", "")] if set(extra_root) - set(top_m) else [] ), *( [(0, len(src), {k: 0 for k in top_m}, True, "", _shallow_text(src))] if top_m else [] )]
     for lm in re.finditer(r"\b(?:for|while)\s*\(", src):
         if lend := balanced_end(src, lm.end() - 1, "(", ")"):
@@ -113,14 +125,15 @@ def _scoped_taint(src: str, seed_re: re.Pattern[str], extra_root: set[str] = fro
     scopes.sort(key=lambda t: (t[0], -(t[1] - t[0])))
     bindings, p_seeded = [], set()
     for s0, s1, dmap, is_type, tname, decl_hdr in scopes:
+        uc_blk = (" " + _uncond_text(src[s0 + 1 : s1 - 1]) + " ") if src.startswith("{", s0) else uncond_all[s0:s1]
         for v, _ in sorted(dmap.items()):
             lv, tv = list(src[s0:s1]), list(src[s0:s1]) if is_type else []
             for c0, c1, cmap, c_type, _, _ in scopes:
                 if (c0, c1) != (s0, s1) and s0 <= c0 and c1 <= s1 and v in cmap:
                     ms = max(s0, cmap[v]); lv[ms - s0 : c1 - s0] = list(_blank(src[ms:c1]))
                     if is_type and c_type: tv[c0 - s0 : c1 - s0] = list(_blank(src[c0:c1]))
-            if param_type_re and decl_hdr and re.search(rf"\b{re.escape(v)}\s*:\s*{param_type_re}", decl_hdr) and not (s0 == 0 and v in extra_root): p_seeded.add(len(bindings))
-            lvs = "".join(lv); bindings.append((s0, s1, v, lvs, "".join(tv), (" " + _shallow_text(lvs[1:-1]) + " ") if lvs.startswith("{") else _shallow_text(lvs), is_type, tname))
+            if param_type_re and decl_hdr and re.search(rf"(?:\b{re.escape(v)}\s*:\s*{param_type_re}|{param_type_re}\s+{re.escape(v)}\b)", decl_hdr) and not (s0 == 0 and v in extra_root): p_seeded.add(len(bindings))
+            bindings.append((s0, s1, v, "".join(lv), "".join(tv), uc_blk, is_type, tname))
     this_pats = lambda s0, s1, v, tvs, is_type, tname: (((1, tvs, rf"(?<!\.\s)(?<!\.)\bthis\s*\.\s*{re.escape(v)}\b"), *(((2, src[s0:s1], rf"(?:\b{re.escape(tname)}\s*\.\s*this|\bthis\s*@\s*{re.escape(tname)})\s*\.\s*{re.escape(v)}\b"),) if tname else ())) if is_type else ())
     asgns = [(bi, m.start(), _rhs_expr(slc[m.end() :]), True if kind else sh_s[m.start()] != " ") for bi, (s0, s1, v, lvs, tvs, sh_s, is_type, tname) in enumerate(bindings) for kind, slc, pat in ((0, lvs, rf"(?<![.\w]){re.escape(v)}\b(?:\s*:\s*[\w<>?.*, \t]+)?"), *this_pats(s0, s1, v, tvs, is_type, tname)) for m in re.finditer(rf"{pat}\s*=(?!=)", slc)]
     tainted = {ai for ai, (_, _, rhs, _) in enumerate(asgns) if seed_re.search(rhs)}
@@ -148,13 +161,8 @@ def find_fixed_pointers(code_only: str) -> list[tuple[int, str]]:
     bindings, active_bis, is_tainted_at, this_pats = _scoped_taint(clean, re.compile(r"\bgetPointerId\s*\("), {"pointerId"})
     for bi in active_bis:
         s0, s1, v, lvs, tvs, _, is_type, tname = bindings[bi]
-        for kind, slc, tok in ((0, lvs, rf"(?<![.\w]){re.escape(v)}\b"), *this_pats(s0, s1, v, tvs, is_type, tname)):
-            hits.update((s0 + m.start(), code_only[s0 + m.start() : s0 + m.end()].strip()) for m in re.finditer(rf"\[\s*[^\[\]]*{tok}[^\[\]]*\]|{tok}\s*(?:>=|<|<=|>)\s*(?:10|9)\b|(?:10|9)\s*(?:>=|<|<=|>)\s*{tok}", slc) if is_tainted_at(bi, s0 + m.start(), kind))
+        for kind, slc, tok in ((0, lvs, rf"(?<![.\w]){re.escape(v)}\b"), *this_pats(s0, s1, v, tvs, is_type, tname)): hits.update((s0 + m.start(), code_only[s0 + m.start() : s0 + m.end()].strip()) for m in re.finditer(rf"\[\s*[^\[\]]*{tok}[^\[\]]*\]|{tok}\s*(?:>=|<|<=|>)\s*(?:10|9)\b|(?:10|9)\s*(?:>=|<|<=|>)\s*{tok}", slc) if is_tainted_at(bi, s0 + m.start(), kind))
     return sorted(hits)
-def _flatten_paren_nl(s: str) -> str:
-    out, depth = [], 0
-    for ch in s: depth = 0 if ch in ";{}" else max(0, depth + (ch == "(") - (ch == ")")); out.append(" " if ch == "\n" and depth > 0 else ch)
-    return "".join(out)
 def _rate_comparisons(code_only: str) -> list[tuple[int, str]]:
     if not re.search(rf"\b{_RATE_BASE}", code_only): return []
     flat, hits = _flatten_paren_nl(code_only), {}
@@ -210,7 +218,6 @@ def _is_when_brace(code_only: str, brace_idx: int) -> bool:
     for idx in range(len(pre) - 1, -1, -1) if pre.endswith(")") else ():
         if (depth := depth + (pre[idx] == ")") - (pre[idx] == "(")) == 0: return bool(re.search(r"\bwhen\s*$", pre[:idx]))
     return bool(re.search(r"\bwhen\s*$", pre))
-
 def _decl_bodies(code_only: str, name: str) -> list[str] | None:
     p = re.escape(name)
     if re.search(rf"\bvar\s+{p}\b|\b(?:val|var)\s*\([^)=;{{}}]*\b{p}\b|\bfor\s*\([^)]*\b{p}\b[^)]*(?::|\bin\b)|\bRunnable\s+{p}\s*[,)]|(?<!:\s)(?:(?<![.\w])|\([^()=:]*\b){p}\s*\)?\s*->", code_only) or len(re.findall(rf"\b{p}\b(?:[ \t]*:[ \t]*(?:\([^)\n]*\)[ \t]*->[ \t]*)?[\w<>?., \t]+)?[ \t]*=(?!=)", code_only)) > 1: return None
@@ -224,7 +231,6 @@ def _decl_bodies(code_only: str, name: str) -> list[str] | None:
         elif m.group(1) and "{" not in (lb := code_only[tail : len(code_only) if (nl := code_only.find("\n", tail)) == -1 else nl]) and (nl == -1 or _NEXT_DECL.match(code_only, nl)): bodies.append(lb)
         else: return None
     return bodies
-
 def _norm_delay(expr: str) -> str:
     depth, s = 0, expr
     for idx, ch in enumerate(expr):
@@ -234,7 +240,6 @@ def _norm_delay(expr: str) -> str:
         s, changed = (s[1:-1].strip(), True) if s.startswith("(") and balanced_end(s, 0, "(", ")") == len(s) else (s, False)
         if m := re.match(r"^(?:\(\s*(?:long|int)\s*\)\s*(.+)|(.+?)\s*\.\s*to(?:Long|Int)\s*\(\s*\))$", s): s, changed = (m.group(1) or m.group(2)).strip(), True
     return s
-
 def find_250ms_post_delayed(code_only: str) -> list[int]:
     if not re.search(r"\bpostDelayed\s*\(", code_only): return []
     hits, lit_250, qual_ident = [], re.compile(r"(?i)250(?:_?l)?|0x0*fal?"), re.compile(r"[A-Za-z_]\w*(?:\s*\.\s*[A-Za-z_]\w*)*")
@@ -271,7 +276,7 @@ def find_250ms_post_delayed(code_only: str) -> list[int]:
     writes.extend((m.group(1), m.start(), _norm_delay(m.group(2) or ""), *decl_scope(m.start()), True) for m in re.finditer(r"\b(?:val|var)\s+([A-Za-z_]\w*)(?:\s*:\s*[\w<>?., \t]+)?(?:\s+get\s*\(\s*\))?(?:\s*=(?!=)\s*(?:\n\s*)?([^\n;,}]+))?", code_only))
     writes.extend((dm.group(1), jm.start(), _norm_delay(dm.group(2) or ""), *decl_scope(jm.start()), True) for jm in re.finditer(r"\b(?:int|long|Integer|Long)\s+([^;{}\n]+)", code_only) for p in _split_top_commas(jm.group(1)) if (dm := re.match(r"\s*([A-Za-z_]\w*)(?:\s*=(?!=)\s*(.+))?", p)))
     for n, s0, s1, own in sorted({(n, s0, s1, own) for n, _, _, s0, s1, own, _ in writes if s0 > 0}):
-        off, sh_blk = (s0 + 1, _shallow_text(code_only[s0 + 1 : s1 - 1])) if code_only[s0] == "{" else (s0, _shallow_text(code_only[s0:s1]))
+        off, sh_blk = (s0 + 1, _uncond_text(code_only[s0 + 1 : s1 - 1])) if code_only[s0] == "{" else (s0, _uncond_text(code_only[s0:s1]))
         for am in re.finditer((rf"{_THIS_PFX}{re.escape(n)}\s*=(?!=)\s*(?:\n\s*)?([^\n;,}}]+)|" if own else "") + rf"(?<![.\w]){re.escape(n)}\s*=(?!=)\s*(?:\n\s*)?([^\n;,}}]+)", code_only[off : s1 - (1 if code_only[s0] == "{" else 0)]):
             if (own and am.group(1) and am.lastindex == 1) or (not re.search(r"\b(?:val|var|int|long|Integer|Long)\b[^;={}\n]*$", code_only[off : off + am.start()]) and not (own and shadowed(n, s0, off + am.start())) and not any(n == pn and bs <= off + am.start() < be and (bs, be) != (s0, s1) for pn, bs, be, _, _ in fun_params)):
                 writes.append((n, off + am.start(), _norm_delay(am.group(1) or am.group(am.lastindex or 1)), s0, s1, own, True if own else sh_blk[am.start()] != " "))
@@ -318,24 +323,22 @@ def find_250ms_post_delayed(code_only: str) -> list[int]:
                 else: chunks.extend(res)
         if any(is_250_at(match.start(), p) for p in arg_texts) and not (cb_ok and not bad_callee and (_is_cosmetic_ident(recv) or any(_is_cosmetic_ident(c) for c in cb_idents)) and not STARTUP_WORDS.intersection(_ident_words(ANIM_START.sub(r"\1\2", " ".join(chunks))))): hits.append(match.start())
     return hits
-
 def _policy_calls(code_only: str, cls: str, members: str, extra_fn: str = "") -> list[tuple[int, str]]:
     if cls not in code_only and (not extra_fn or extra_fn not in code_only): return []
-    src = re.sub(r"`([A-Za-z_]\w*)`", r" \1 ", code_only)
-    tnames, prev_n, qual_cls = {cls, *re.findall(rf"\bimport\s+com\.orailnoor\.droiddesk\.[\w.]*\b{cls}\s+as\s+([A-Za-z_]\w*)", src)}, 0, rf"com\.orailnoor\.droiddesk\.[\w.]*\b{cls}\b"
+    raw, qual_cls = re.sub(r"`([A-Za-z_]\w*)`", r" \1 ", code_only), rf"com\.orailnoor\.droiddesk\.[\w.]*\b{cls}\b"
+    tnames, prev_n = {cls, *re.findall(rf"\bimport\s+{qual_cls}\s+as\s+([A-Za-z_]\w*)", raw), *(["INSTANCE"] if re.search(rf"\bimport\s+static\s+{qual_cls}\s*\.\s*INSTANCE\b", raw) else [])}, 0
+    hits, src = {(m.start(), code_only[m.start() : m.end()].strip()) for m in re.finditer(rf"\bimport\s+(?:static\s+)?{qual_cls}\s*\.\s*(?!INSTANCE\b)(?:\*|(?:{members})\b)", raw)}, re.sub(r"(?<=[\w)])(\s*\.\s*INSTANCE)\b(?!\s*\()", lambda m: _blank(m.group(1)), raw)
     while len(tnames) != prev_n:
         prev_n, tnr = len(tnames), "|".join(sorted((re.escape(x) for x in tnames), key=len, reverse=True))
         tnames.update(re.findall(rf"\btypealias\s+([A-Za-z_]\w*)\s*=\s*(?<!\.)(?:com\.orailnoor\.droiddesk\.[\w.]*\.)?(?:{tnr})\b", src))
     tnr = "|".join(sorted((re.escape(x) for x in tnames), key=len, reverse=True))
-    hits = {(m.start(), code_only[m.start() : m.end()].strip()) for m in re.finditer(rf"\bimport\s+(?:static\s+)?{qual_cls}\s*\.\s*(?:\*|(?:{members})\b)", src)}
     def scan_recv(s0: int, slc: str, tok: str, pred) -> None:
         hits.update((s0 + m.start(), code_only[s0 + m.start() : s0 + m.end()].strip()) for m in re.finditer(rf"{tok}(?:\s*\))*\s*(?:\?\.|\.|::)\s*(?:{members})\b", slc) if pred(s0 + m.start()))
         for sm in re.finditer(rf"\b(?:(with)\s*\(\s*\(*\s*{tok}\s*\)*\s*\)|{tok}(?:\s*\))*\s*(?:\?\.|\.)\s*(?:(run|apply)|(let|also))\b)\s*\{{", slc):
             if not pred(s0 + sm.start()): continue
             body = slc[sm.end() : (balanced_end(slc, sm.end() - 1, "{", "}") or len(slc)) - 1]
             lp = re.escape(lm.group(1) if (lm := re.match(r"\s*([A-Za-z_]\w*)\s*->", body)) else "it")
-            in_pat = rf"\b{lp}\s*(?:\?\.|\.|::)\s*(?:{members})\b" if sm.group(3) else rf"(?:(?<!\.\s)(?<!\.)(?<![:\w])(?<!::\s)(?<!\bval\s)(?<!\bvar\s)(?<!\bfun\s)(?:{members})\s*\(|(?<![.\w])::\s*(?:{members})\b|\bthis\s*(?:\?\.|\.|::)\s*(?:{members})\b)"
-            hits.update((s0 + sm.end() + m.start(), code_only[s0 + sm.end() + m.start() : s0 + sm.end() + m.end()].strip()) for m in re.finditer(in_pat, body))
+            hits.update((s0 + sm.end() + m.start(), code_only[s0 + sm.end() + m.start() : s0 + sm.end() + m.end()].strip()) for m in re.finditer(rf"\b{lp}\s*(?:\?\.|\.|::)\s*(?:{members})\b" if sm.group(3) else rf"(?:(?<!\.\s)(?<!\.)(?<![:\w])(?<!::\s)(?<!\bval\s)(?<!\bvar\s)(?<!\bfun\s)(?:{members})\s*\(|(?<![.\w])::\s*(?:{members})\b|\bthis\s*(?:\?\.|\.|::)\s*(?:{members})\b)", body))
     if cls in code_only:
         scan_recv(0, src, qual_cls, lambda _: True)
         bindings, active_bis, is_tainted_at, this_pats = _scoped_taint(src, re.compile(rf"^\(*\s*{qual_cls}\s*\)*$"), tnames, rf"(?<!\.)(?:com\.orailnoor\.droiddesk\.[\w.]*\.)?(?:{tnr})\b")
@@ -344,14 +347,12 @@ def _policy_calls(code_only: str, cls: str, members: str, extra_fn: str = "") ->
             for kind, slc, tok in ((0, lvs, rf"(?<![.\w]){re.escape(v)}\b"), *this_pats(s0, s1, v, tvs, is_type, tname)): scan_recv(s0, slc, tok, lambda p, b=bi, k=kind: is_tainted_at(b, p, k))
     if extra_fn and extra_fn in code_only:
         fn_roots = {extra_fn, *re.findall(rf"\bimport\s+com\.orailnoor\.droiddesk\.[\w.]*\b{extra_fn}\s+as\s+([A-Za-z_]\w*)", src)}
-        hits.update((m.start(), code_only[m.start() : m.end()].strip()) for m in re.finditer(rf"\bimport\s+(?:static\s+)?com\.orailnoor\.droiddesk\.[\w.]*\b{extra_fn}\b", src))
+        hits.update([*((m.start(), code_only[m.start() : m.end()].strip()) for m in re.finditer(rf"\bimport\s+(?:static\s+)?com\.orailnoor\.droiddesk\.[\w.]*\b{extra_fn}\b", src)), *_policy_calls(code_only, "ExternalInputPolicyKt", extra_fn)])
         fb, fab, fit, ftp = _scoped_taint(src, re.compile(r"(?!x)x"), fn_roots)
         for bi in fab:
             s0, s1, v, lvs, tvs, _, is_type, tname = fb[bi]
-            for kind, slc, tok in ((0, lvs, rf"(?<![.\w]){re.escape(v)}\b"), *ftp(s0, s1, v, tvs, is_type, tname)):
-                hits.update((s0 + m.start(), code_only[s0 + m.start() : s0 + m.end()].strip()) for m in re.finditer(rf"(?:(?<![.\w])::\s*{re.escape(v)}\b|{tok}\s*\()", slc) if fit(bi, s0 + m.start(), kind))
+            for kind, slc, tok in ((0, lvs, rf"(?<![.\w]){re.escape(v)}\b"), *ftp(s0, s1, v, tvs, is_type, tname)): hits.update((s0 + m.start(), code_only[s0 + m.start() : s0 + m.end()].strip()) for m in re.finditer(rf"(?:(?<![.\w])::\s*{re.escape(v)}\b|{tok}\s*\()", slc) if fit(bi, s0 + m.start(), kind))
     return sorted(hits)
-
 def main() -> int:
     root, violations = Path(sys.argv[1] if len(sys.argv) > 1 else ".").resolve(), []
     android_root, flutter_root = root / ANDROID_MAIN, root / "app/lib"
