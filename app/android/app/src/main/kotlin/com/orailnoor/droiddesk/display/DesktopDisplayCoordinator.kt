@@ -5,12 +5,9 @@ import android.content.Context
 import android.app.Activity
 import android.content.Intent
 import com.orailnoor.droiddesk.display.capability.*
-import com.orailnoor.droiddesk.display.placement.DesktopOpenRequest
-import com.orailnoor.droiddesk.display.placement.DesktopPlacementPort
-import com.orailnoor.droiddesk.display.placement.DesktopPlacementStrategy
-import com.orailnoor.droiddesk.display.placement.PlacementSelection
-import com.orailnoor.droiddesk.display.placement.bootstrapCurrentDevicePlacementStrategy
-import com.orailnoor.droiddesk.display.placement.bootstrapPlacementStrategy
+import com.orailnoor.droiddesk.display.input.ExternalInputRoute
+import com.orailnoor.droiddesk.display.placement.*
+import com.orailnoor.droiddesk.display.policy.PresentationPlan
 import com.orailnoor.droiddesk.display.policy.PresentationPolicy
 import com.orailnoor.droiddesk.display.startup.*
 import com.orailnoor.droiddesk.runtime.*
@@ -104,6 +101,10 @@ class DesktopDisplayCoordinator(
     private var presentationContextProvider: ((Int) -> PresentationContext?)? = null,
     private val presentationPolicy: PresentationPolicy = PresentationPolicy(),
     private var runtimeCapabilitiesProvider: (() -> RuntimeCapabilities)? = null,
+    private var placementPreferenceStore: PlacementPreferenceStore? = null,
+    private val placementSelector: DesktopPlacementSelector = DesktopPlacementSelector(DeviceQuirkCatalog()),
+    private var placementEvidenceProvider: ((Int) -> DisplayPlacementEvidence?)? = null,
+    private var deviceIdentityProvider: (() -> DeviceIdentity)? = null,
 ) {
     private var strategyWasProvided = placementStrategy != null
     private val placementStrategy = ReplaceableDesktopPlacementStrategy(
@@ -167,6 +168,8 @@ class DesktopDisplayCoordinator(
     private var appliedKind: ProfileKind? = null
     private var appliedPresentationClass: PresentationClass? = null
     private var classifiedPresentationClass: PresentationClass? = null
+    private var activePlan: PresentationPlan? = null
+    private var activeInputCapabilities: InputCapabilities? = null
     private var renderSize: PixelSize? = null
     private var profileRefresher: (((Result<Unit>) -> Unit) -> Unit)? = null
     private var move: Move? = null
@@ -246,6 +249,12 @@ class DesktopDisplayCoordinator(
     var sessionGeneration: Long
         get() = observerSessionGeneration.get() ?: publishedSessionGeneration
         private set(value) { publishedSessionGeneration = value }
+
+    init {
+        if (!strategyWasProvided && (placementPreferenceStore != null || placementEvidenceProvider != null || deviceIdentityProvider != null)) {
+            this.placementStrategy.replace(selectPlacementAdapter())
+        }
+    }
 
     fun beginSession(): Long {
         assertMainThread()
@@ -424,6 +433,7 @@ class DesktopDisplayCoordinator(
             sessionTarget = null
             phase = "stopped"
             error = null
+            reselectPlacementStrategyIfStopped(publishState = false)
         }
         publish()
     }
@@ -528,7 +538,10 @@ class DesktopDisplayCoordinator(
         previous?.detach?.invoke()
         val hadPendingRestart = !preserveRestart && restartController.hasPendingRestart
         if (!preserveRestart && restartController.hasPendingRestart) restartController.cancelPendingRestart()
-        else if (!hadPendingRestart && isStopped && isCurrent(continuation)) publish()
+        else if (!hadPendingRestart && isStopped && isCurrent(continuation)) {
+            if (!preserveRestart) reselectPlacementStrategyIfStopped(publishState = false)
+            publish()
+        }
         finishStartupResultDelivery(deliverResults) {
             previous?.finish?.invoke()
             retirement?.let { finishMoveRetirement(it, stopped) }
@@ -538,19 +551,17 @@ class DesktopDisplayCoordinator(
     fun initialize(context: Context) {
         assertMainThread()
         if (host != null) return
-        if (!strategyWasProvided) {
-            placementStrategy.replace(bootstrapCurrentDevicePlacementStrategy())
-        }
-        settingsStore = DisplaySettingsStore(context)
+        val app = context.applicationContext
+        if (settingsStore == null) settingsStore = DisplaySettingsStore(context)
+        if (placementPreferenceStore == null) placementPreferenceStore = AndroidPlacementPreferenceStore(app)
         val discovery = DisplayRepository(context)
         repository = discovery
-        host = AndroidDesktopDisplayHost(context.applicationContext, discovery, placementStrategy)
-        val app = context.applicationContext; val probe = AndroidPresentationEvidenceProbe(app, discovery)
-        if (presentationContextProvider == null) presentationContextProvider = { id ->
-            probe.presentationContext(id).let { raw ->
-                if (raw.isDefaultDisplay && raw.input.touch == TouchEvidence.UNKNOWN_ASSOCIATION && android.view.InputDevice.getDeviceIds().any { d -> android.view.InputDevice.getDevice(d)?.let { !it.isExternal && it.supportsSource(android.view.InputDevice.SOURCE_TOUCHSCREEN) } == true }) raw.copyWithSnapshot(input = raw.input.copy(touch = TouchEvidence.CURRENT_DISPLAY)) else raw
-            }
-        }
+        val probe = AndroidPresentationEvidenceProbe(app, discovery)
+        if (placementEvidenceProvider == null) placementEvidenceProvider = { id -> runCatching { probe.placementEvidence(id) }.getOrNull() }
+        if (deviceIdentityProvider == null) deviceIdentityProvider = ::currentDeviceIdentity
+        host = AndroidDesktopDisplayHost(app, discovery, placementStrategy)
+        if (!strategyWasProvided) placementStrategy.replace(selectPlacementAdapter())
+        if (presentationContextProvider == null) presentationContextProvider = { id -> promoteInternalDefaultTouch(probe.presentationContext(id)) }
         if (runtimeCapabilitiesProvider == null) runtimeCapabilitiesProvider = { ProcessLinuxEnvironmentRegistry.get(app).capabilityCache.current() }
         stopForEnvironmentChange = { completion ->
             DroidDeskService.stopDesktop(app, DesktopStopReason.ENVIRONMENT_CHANGE, completion)
@@ -568,6 +579,7 @@ class DesktopDisplayCoordinator(
         val display = host?.currentDisplay()
         val displayId = display?.id ?: host?.currentDisplayId()
         boundActivities[activity] = BoundActivityDisplay(displayId, display)
+        reselectPlacementStrategyIfStopped()
         if (!placementStrategy.allowsManualMoves) {
             applyActivityOrientation(
                 activity,
@@ -870,14 +882,54 @@ class DesktopDisplayCoordinator(
                 "Desktop placement can change only while Linux is fully stopped",
             )
         }
+        applyPlacementStrategy(strategy, markProvided = true)
+    }
+
+    fun setPlacementOverride(mode: PlacementMode?): Map<String, Any?> {
+        assertMainThread()
+        if (!isFullyStoppedForStrategyChange()) {
+            throw DesktopDisplayException("INVALID_ARGUMENT", "Stop Linux before changing desktop placement mode")
+        }
+        checkNotNull(placementPreferenceStore) { "Placement preference store is not initialized" }.saveOverride(mode)
+        applyPlacementStrategy(selectPlacementAdapter(mode), markProvided = false)
+        return snapshot()
+    }
+
+    private fun applyPlacementStrategy(strategy: DesktopPlacementStrategy, markProvided: Boolean, publishState: Boolean = true) {
         placementStrategy.replace(strategy)
-        strategyWasProvided = true
+        strategyWasProvided = markProvided
         cancelAutomaticOpening()
         automaticAttempts.clear()
         automaticSuppressed.clear()
         automaticEpoch = publishedSessionGeneration
         reapplyActivityOrientations()
-        publish()
+        if (publishState) publish()
+    }
+
+    private fun selectPlacementAdapter(override: PlacementMode? = runCatching { placementPreferenceStore?.loadOverride() }.getOrNull()): DesktopPlacementStrategy {
+        val available = if (host != null) displays() else emptyList()
+        val targetId = host?.currentDisplayId()
+            ?: available.firstOrNull { !it.isDefault && it.eligible }?.id
+            ?: available.firstOrNull()?.id ?: android.view.Display.DEFAULT_DISPLAY
+        val evidence = placementEvidenceProvider?.invoke(targetId)
+            ?: DisplayPlacementEvidence(targetId, targetId == android.view.Display.DEFAULT_DISPLAY, false, false, false, false)
+        val selection = placementSelector.select(evidence, deviceIdentityProvider?.invoke() ?: DeviceIdentity("", "", "", ""), override)
+        return if (selection.mode == PlacementMode.DISPLAY_LOCAL) DisplayLocalRestartAdapter(selection) else MovableSecondaryDisplayAdapter(selection)
+    }
+
+    private fun reselectPlacementStrategyIfStopped(publishState: Boolean = true) {
+        if (strategyWasProvided || (placementPreferenceStore == null && placementEvidenceProvider == null && deviceIdentityProvider == null)) return
+        val stopped = isFullyStoppedForStrategyChange()
+        val current = placementStrategy.selection
+        if (!stopped && !(current.mode == PlacementMode.MOVABLE && current.source == PlacementSelectionSource.SAFE_DEFAULT)) return
+        val next = selectPlacementAdapter()
+        if (next.selection == current) return
+        if (stopped) {
+            applyPlacementStrategy(next, markProvided = false, publishState = publishState)
+        } else if (next.selection.mode == PlacementMode.MOVABLE && next.selection.source == PlacementSelectionSource.RUNTIME_EVIDENCE) {
+            placementStrategy.replace(next)
+            if (publishState) { publish(); refreshAutomaticOpening() }
+        }
     }
 
     private fun isFullyStoppedForStrategyChange(): Boolean {
@@ -909,6 +961,7 @@ class DesktopDisplayCoordinator(
         val display = displays().firstOrNull { it.id == displayId }
             ?: boundActivities[activity]?.display?.takeIf { it.id == displayId }
         boundActivities[activity] = BoundActivityDisplay(displayId, display)
+        reselectPlacementStrategyIfStopped()
         if (!isDisplayLocal) return
         applyActivityOrientation(activity, displayId)
         observePassiveActivityEnvironment(displayId, expectedEpoch)
@@ -985,8 +1038,16 @@ class DesktopDisplayCoordinator(
         val headless = isDisplayLocal && running && sessionTarget != null &&
             displays.none { it.id == sessionTarget?.displayId && it.key == sessionTarget?.displayKey && it.eligible }
         val exposedActive = active.takeUnless { headless }
+        val sameOwnerDisplay = exposedActive != null && exposedActive.id == owner?.lease?.displayId
+        val plan = activePlan?.takeIf { sameOwnerDisplay }; val input = activeInputCapabilities?.takeIf { sameOwnerDisplay }
+        val activeClass = if (sameOwnerDisplay) plan?.presentationClass ?: appliedPresentationClass ?: classifiedPresentationClass else null
+        val activeProfile = if (sameOwnerDisplay) plan?.profileKind ?: appliedKind ?: activeClass?.let(presentationPolicy::profileKind) else null
+        val selection = placementStrategy.selection
+        val source = if (selection.source == PlacementSelectionSource.SAFE_DEFAULT && (isDisplayLocal || placementStrategy.allowsAutomaticMoves)) {
+            PlacementSelectionSource.RUNTIME_EVIDENCE
+        } else selection.source
         return mapOf(
-            "schemaVersion" to 1,
+            "schemaVersion" to 2,
             "autoOpenOnMonitor" to automaticOpeningEnabled(),
             "phase" to when {
                 sessionRestarting -> "restarting"
@@ -1002,8 +1063,37 @@ class DesktopDisplayCoordinator(
             "sessionDisplayId" to sessionTarget?.displayId,
             "sessionHeadless" to headless,
             "activeDisplayId" to exposedActive?.id, "activeDisplayKey" to exposedActive?.key,
-            "profileKind" to exposedActive?.let { kindFor(it).wireName },
+            "profileKind" to activeProfile?.wireName,
             "renderWidth" to renderSize?.width, "renderHeight" to renderSize?.height,
+            "placementMode" to selection.mode.wireName,
+            "placementSelectionSource" to source.wireName,
+            "placementReason" to selection.reason.ifBlank { "Placement mode ${selection.mode.wireName}" },
+            "automaticMovesAllowed" to placementStrategy.allowsAutomaticMoves,
+            "placementOverride" to selection.mode.wireName.takeIf { source == PlacementSelectionSource.USER_OVERRIDE },
+            "presentationClass" to activeClass?.wireName,
+            "stableDisplayKey" to exposedActive?.settingsKey?.takeIf { it.isNotBlank() },
+            "inputCapabilities" to input?.let {
+                mapOf(
+                    "touchEvidence" to when (it.touch) {
+                        TouchEvidence.NONE -> "none"; TouchEvidence.CURRENT_DISPLAY -> "currentDisplay"; TouchEvidence.UNKNOWN_ASSOCIATION -> "unknownAssociation"
+                    },
+                    "pointerAssociation" to when (it.pointerAssociation) {
+                        PointerAssociationEvidence.NO_EXTERNAL_POINTER -> "noExternalPointer"
+                        PointerAssociationEvidence.TARGET_DISPLAY -> "targetDisplay"
+                        PointerAssociationEvidence.DEFAULT_OR_UNASSOCIATED -> "defaultOrUnassociated"
+                        PointerAssociationEvidence.OTHER_DISPLAY -> "otherDisplay"
+                        PointerAssociationEvidence.UNKNOWN -> "unknown"
+                    },
+                    "hasMouse" to it.hasMouse, "hasTouchpad" to it.hasTouchpad, "hasKeyboard" to it.hasKeyboard, "hasStylus" to it.hasStylus,
+                )
+            },
+            "externalInputRoute" to plan?.input?.externalInputRoute?.let { if (it == ExternalInputRoute.NATIVE) "native" else "phoneRelay" },
+            "rendererPointerCaptureRequested" to plan?.input?.rendererPointerCapture,
+            "relayPointerCaptureRequested" to plan?.input?.relayPointerCapture,
+            "refreshPreferredRate" to plan?.refresh?.preferredRefreshRate?.toDouble()?.takeIf { it.isFinite() && it > 0.0 },
+            "refreshPreferredModeId" to plan?.refresh?.preferredModeId?.takeIf { it > 0 },
+            "refreshReason" to plan?.refresh?.reason?.takeIf { it.isNotBlank() },
+            "runtimeCapabilities" to runtimeCapabilitiesProvider?.invoke()?.toMap(),
             "displays" to displays.map(DesktopDisplay::toMap),
             "error" to error?.let { mapOf("code" to it.code, "message" to it.message) },
         )
@@ -1030,10 +1120,15 @@ class DesktopDisplayCoordinator(
         return checkNotNull(settingsStore).load(DisplaySettingsKey((classifiedPresentationClass ?: appliedPresentationClass)?.takeIf { owner?.lease?.displayId == targetId && presentationPolicy.profileKind(it) == kind } ?: classForKind(kind, targetId), stableKey))
     }
 
+    private fun usesTntLauncherCopy(): Boolean =
+        sessionTarget?.environment == DisplayEnvironment.TNT || environmentForCurrentDisplay() == DisplayEnvironment.TNT
+
     fun setAutoOpenOnMonitor(enabled: Boolean) {
         assertMainThread()
         if (!placementStrategy.allowsManualMoves) {
-            val failure = DesktopDisplayException("DISPLAY_NOT_ALLOWED", "The phone or TNT launcher selects the display environment")
+            val message = if (usesTntLauncherCopy()) "The phone or TNT launcher selects the display environment"
+            else "Display-local mode selects the active display from the launcher"
+            val failure = DesktopDisplayException("DISPLAY_NOT_ALLOWED", message)
             reportError(failure)
             throw failure
         }
@@ -1134,6 +1229,12 @@ class DesktopDisplayCoordinator(
     }
 
     fun reportPresentationClass(lease: RendererLease, presentationClass: PresentationClass) { assertMainThread(); if (isCurrent(lease)) classifiedPresentationClass = presentationClass }
+    fun reportPresentationPlan(lease: RendererLease, plan: PresentationPlan, inputCapabilities: InputCapabilities) {
+        assertMainThread(); if (!isCurrent(lease)) return
+        classifiedPresentationClass = plan.presentationClass
+        if (activePlan == plan && activeInputCapabilities == inputCapabilities) return
+        activePlan = plan; activeInputCapabilities = inputCapabilities; publish()
+    }
     fun presentationClassForDisplay(displayId: Int): PresentationClass = knownDisplays().firstOrNull { it.id == displayId }?.let(::presentationClassFor)
         ?: (classifiedPresentationClass ?: appliedPresentationClass)?.takeIf { owner?.lease?.displayId == displayId } ?: probeContextOrNull(displayId)?.let(presentationPolicy::classify) ?: if (displayId == 0) PresentationClass.PHONE_TOUCH else PresentationClass.EXTERNAL_POINTER
     @JvmOverloads
@@ -1249,9 +1350,9 @@ class DesktopDisplayCoordinator(
     }
 
     private fun rejectCrossDisplayMove(completion: (Result<Unit>) -> Unit) {
-        val failure = DesktopDisplayException(
-            "DISPLAY_NOT_ALLOWED", "Open DroidDesk from the phone or TNT launcher to select its display",
-        )
+        val message = if (usesTntLauncherCopy()) "Open DroidDesk from the phone or TNT launcher to select its display"
+        else "Open DroidDesk from the target display's launcher to select its display"
+        val failure = DesktopDisplayException("DISPLAY_NOT_ALLOWED", message)
         reportError(failure)
         completion(Result.failure(failure))
     }
@@ -1444,6 +1545,7 @@ class DesktopDisplayCoordinator(
             lastTarget?.takeIf { target -> current.none { it.key == target.key } }?.let { onDisplayRemoved(it.id) }
         }
         profileRefresher?.invoke {}
+        reselectPlacementStrategyIfStopped(publishState = false)
         publish()
         refreshAutomaticOpening()
     }
@@ -1757,6 +1859,8 @@ class DesktopDisplayCoordinator(
         appliedKind = null
         appliedPresentationClass = null
         classifiedPresentationClass = null
+        activePlan = null
+        activeInputCapabilities = null
         renderSize = null
     }
 
