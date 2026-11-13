@@ -559,6 +559,10 @@ class DeviceCompatibilityArchitectureGuardTest(unittest.TestCase):
                 "class InputEventSender { ActivePointerTracker t; boolean[] active = new boolean[16]; void a(android.view.MotionEvent e, boolean reset) { int id = e.getPointerId(0); if (reset) {} else id = 0; active[id] = true; } }",
             ),
             (
+                f"{TERMUX_X11}/input/InputEventSender.java",
+                "class InputEventSender { ActivePointerTracker t; boolean[] active = new boolean[16]; void chain(android.view.MotionEvent e) { int a0 = e.getPointerId(0); int a1 = a0; int a2 = a1; int a3 = a2; int a4 = a3; int a5 = a4; int a6 = a5; active[a6] = true; } }",
+            ),
+            (
                 f"{TERMUX_X11}/input/TouchInputHandler.java",
                 "public class TouchInputHandler { void onTouch() {} }",
             ),
