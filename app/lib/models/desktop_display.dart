@@ -1,3 +1,5 @@
+import 'package:droiddesk/models/linux_environment.dart';
+
 enum DesktopDisplayPhase {
   hidden,
   attached,
@@ -61,6 +63,85 @@ enum DesktopExternalInputRoute {
   final String wireValue;
 }
 
+mixin _WireEnum on Enum {
+  String get wireValue => name;
+  String get label =>
+      name[0].toUpperCase() +
+      name
+          .substring(1)
+          .replaceAllMapped(RegExp('[A-Z]'), (m) => ' ${m[0]!.toLowerCase()}');
+}
+
+enum DesktopPlacementMode with _WireEnum {
+  movable('Move existing desktop view'),
+  displayLocal('Restart Linux on current display');
+
+  const DesktopPlacementMode(this.label);
+  @override
+  final String label;
+}
+
+enum DesktopPlacementSelectionSource with _WireEnum {
+  userOverride,
+  runtimeEvidence,
+  deviceQuirk,
+  safeDefault,
+}
+
+enum DesktopTouchEvidence with _WireEnum {
+  none,
+  currentDisplay,
+  unknownAssociation,
+}
+
+enum DesktopPointerAssociation with _WireEnum {
+  noExternalPointer,
+  targetDisplay,
+  defaultOrUnassociated,
+  otherDisplay,
+  unknown,
+}
+
+enum DesktopResolvedExternalInputRoute with _WireEnum {
+  native('Android native'),
+  phoneRelay('Phone relay');
+
+  const DesktopResolvedExternalInputRoute(this.label);
+  @override
+  final String label;
+}
+
+class DesktopInputCapabilities {
+  const DesktopInputCapabilities({
+    required this.touchEvidence,
+    required this.pointerAssociation,
+    required this.hasMouse,
+    required this.hasTouchpad,
+    required this.hasKeyboard,
+    required this.hasStylus,
+  });
+
+  factory DesktopInputCapabilities.fromMap(Map<Object?, Object?> m) {
+    const touch = DesktopTouchEvidence.values;
+    const pointer = DesktopPointerAssociation.values;
+    return DesktopInputCapabilities(
+      touchEvidence: _enum(touch, m['touchEvidence'], 'touchEvidence'),
+      pointerAssociation: _enum(pointer, m['pointerAssociation'], 'pointer'),
+      hasMouse: _required<bool>(m, 'hasMouse'),
+      hasTouchpad: _required<bool>(m, 'hasTouchpad'),
+      hasKeyboard: _required<bool>(m, 'hasKeyboard'),
+      hasStylus: _required<bool>(m, 'hasStylus'),
+    );
+  }
+
+  static DesktopInputCapabilities _p(Object v) =>
+      DesktopInputCapabilities.fromMap(_map(v, 'inputCapabilities'));
+
+  final DesktopTouchEvidence touchEvidence;
+  final DesktopPointerAssociation pointerAssociation;
+  final bool hasMouse, hasTouchpad, hasKeyboard, hasStylus;
+}
+
 class DesktopDisplayInfo {
   const DesktopDisplayInfo({
     required this.id,
@@ -108,6 +189,7 @@ class DesktopDisplayFailure {
 
 class DesktopDisplayState {
   DesktopDisplayState({
+    this.schemaVersion = 1,
     this.phase = DesktopDisplayPhase.hidden,
     this.autoOpenOnMonitor = true,
     this.displayLocalMode = false,
@@ -122,12 +204,28 @@ class DesktopDisplayState {
     this.profileKind,
     this.renderWidth,
     this.renderHeight,
+    this.placementMode,
+    this.placementSelectionSource,
+    this.placementReason,
+    this.automaticMovesAllowed,
+    this.placementOverride,
+    this.presentationClass,
+    this.stableDisplayKey,
+    this.inputCapabilities,
+    this.externalInputRoute,
+    this.rendererPointerCaptureRequested,
+    this.relayPointerCaptureRequested,
+    this.refreshPreferredRate,
+    this.refreshPreferredModeId,
+    this.refreshReason,
+    this.runtimeCapabilities,
     List<DesktopDisplayInfo> displays = const [],
     this.error,
   }) : displays = List.unmodifiable(displays);
 
   factory DesktopDisplayState.fromMap(Map<Object?, Object?> map) {
-    if (_required<int>(map, 'schemaVersion') != 1) {
+    final schemaVersion = map['schemaVersion'];
+    if (schemaVersion is! int || (schemaVersion != 1 && schemaVersion != 2)) {
       throw const FormatException('Unsupported desktop display schema');
     }
     final phase = _enum(DesktopDisplayPhase.values, map['phase'], 'phase');
@@ -176,7 +274,42 @@ class DesktopDisplayState {
             displays.length) {
       throw const FormatException('Duplicate desktop display identity');
     }
+    const modes = DesktopPlacementMode.values;
+    const sources = DesktopPlacementSelectionSource.values;
+    const routes = DesktopResolvedExternalInputRoute.values;
+    final pMode = _e(modes, map, 'placementMode');
+    final pSource = _e(sources, map, 'placementSelectionSource');
+    final pReason = _opt<String>(map, 'placementReason');
+    final autoMoves = _opt<bool>(map, 'automaticMovesAllowed');
+    final pOverride = _e(modes, map, 'placementOverride');
+    final pCount = [pMode, pSource, pReason, autoMoves].nonNulls.length;
+    const userSrc = DesktopPlacementSelectionSource.userOverride;
+    const safeSrc = DesktopPlacementSelectionSource.safeDefault;
+    if ((pCount != 0 && pCount != 4) ||
+        (pSource == userSrc) != (pOverride != null) ||
+        (pOverride != null && pMode != pOverride) ||
+        (pCount == 4 &&
+            ((pMode == DesktopPlacementMode.displayLocal) != local ||
+                (pMode == DesktopPlacementMode.movable) != crossDisplay ||
+                (local && autoMoves!) ||
+                (pSource == safeSrc && (local || autoMoves!))))) {
+      throw const FormatException('Invalid desktop placement diagnostics');
+    }
+    final rendererCapture = _opt<bool>(map, 'rendererPointerCaptureRequested');
+    final relayCapture = _opt<bool>(map, 'relayPointerCaptureRequested');
+    if (rendererCapture == true && relayCapture == true) {
+      throw const FormatException('Conflicting desktop pointer capture');
+    }
+    final modeId = _opt<int>(map, 'refreshPreferredModeId');
+    if (modeId != null && modeId <= 0) {
+      throw const FormatException('Invalid refreshPreferredModeId');
+    }
+    const rtFromMap = LinuxRuntimeCapabilities.fromMap;
+    final pClass = _m(map, 'presentationClass', DesktopPresentationClass.parse);
+    final inCaps = _m(map, 'inputCapabilities', DesktopInputCapabilities._p);
+    final rtCaps = _m(map, 'runtimeCapabilities', rtFromMap);
     return DesktopDisplayState(
+      schemaVersion: schemaVersion,
       phase: phase,
       autoOpenOnMonitor: _required<bool>(map, 'autoOpenOnMonitor'),
       displayLocalMode: local,
@@ -199,6 +332,21 @@ class DesktopDisplayState {
           : _enum(DesktopProfileKind.values, profile, 'profileKind'),
       renderWidth: width,
       renderHeight: height,
+      placementMode: pMode,
+      placementSelectionSource: pSource,
+      placementReason: pReason,
+      automaticMovesAllowed: autoMoves,
+      placementOverride: pOverride,
+      presentationClass: pClass,
+      stableDisplayKey: _opt<String>(map, 'stableDisplayKey'),
+      inputCapabilities: inCaps,
+      externalInputRoute: _e(routes, map, 'externalInputRoute'),
+      rendererPointerCaptureRequested: rendererCapture,
+      relayPointerCaptureRequested: relayCapture,
+      refreshPreferredRate: _optRate(map, 'refreshPreferredRate'),
+      refreshPreferredModeId: modeId,
+      refreshReason: _opt<String>(map, 'refreshReason'),
+      runtimeCapabilities: rtCaps,
       displays: displays,
       error: error == null
           ? null
@@ -206,6 +354,7 @@ class DesktopDisplayState {
     );
   }
 
+  final int schemaVersion;
   final DesktopDisplayPhase phase;
   final bool autoOpenOnMonitor;
   final bool displayLocalMode;
@@ -220,11 +369,49 @@ class DesktopDisplayState {
   final DesktopProfileKind? profileKind;
   final int? renderWidth;
   final int? renderHeight;
+  final DesktopPlacementMode? placementMode, placementOverride;
+  final DesktopPlacementSelectionSource? placementSelectionSource;
+  final String? placementReason, stableDisplayKey, refreshReason;
+  final bool? automaticMovesAllowed;
+  final DesktopPresentationClass? presentationClass;
+  final DesktopInputCapabilities? inputCapabilities;
+  final DesktopResolvedExternalInputRoute? externalInputRoute;
+  final bool? rendererPointerCaptureRequested, relayPointerCaptureRequested;
+  final double? refreshPreferredRate;
+  final int? refreshPreferredModeId;
+  final LinuxRuntimeCapabilities? runtimeCapabilities;
   final List<DesktopDisplayInfo> displays;
   final DesktopDisplayFailure? error;
 
   static const environmentRestartWarning =
       'Opening DroidDesk in another display restarts Linux/XFCE. Save unsaved work first.';
+
+  bool get supportsCompatibilityDiagnostics =>
+      schemaVersion == 2 &&
+      [
+            placementMode,
+            placementSelectionSource,
+            placementReason,
+            automaticMovesAllowed,
+          ].nonNulls.length ==
+          4;
+
+  String? get effectivePlacementLabel => placementMode == null
+      ? null
+      : placementSelectionSource == DesktopPlacementSelectionSource.safeDefault
+      ? 'Safe default'
+      : placementMode == DesktopPlacementMode.displayLocal
+      ? 'Display-local restart'
+      : 'Movable';
+
+  String get pointerCaptureOwnerLabel => rendererPointerCaptureRequested == true
+      ? 'Desktop renderer'
+      : relayPointerCaptureRequested == true
+      ? 'Phone relay'
+      : (rendererPointerCaptureRequested == false ||
+            relayPointerCaptureRequested == false)
+      ? 'None'
+      : 'Not active';
 
   bool get showEnvironmentWarning => displayLocalMode && sessionRunning;
   bool get isMoving =>
@@ -388,3 +575,24 @@ T _enum<T extends Enum>(List<T> values, Object? value, String field) =>
       (item) => item.name == value,
       orElse: () => throw FormatException('Invalid $field'),
     );
+
+R? _m<R>(Map<Object?, Object?> m, String k, R Function(Object) fn) =>
+    m[k] == null ? null : fn(m[k]!);
+
+T? _e<T extends Enum>(List<T> v, Map<Object?, Object?> m, String k) =>
+    m[k] == null ? null : _enum(v, m[k], k);
+
+T? _opt<T extends Object>(Map<Object?, Object?> m, String k) {
+  final v = m[k];
+  if (v == null) return null;
+  if (v is! T || (v is String && v.trim().isEmpty)) {
+    throw FormatException('Invalid $k');
+  }
+  return v;
+}
+
+double? _optRate(Map<Object?, Object?> m, String k) {
+  final v = _opt<num>(m, k)?.toDouble();
+  if (v != null && (!v.isFinite || v <= 0)) throw FormatException('Invalid $k');
+  return v;
+}

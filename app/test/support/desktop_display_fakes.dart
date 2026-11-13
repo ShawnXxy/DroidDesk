@@ -39,6 +39,110 @@ Map<Object?, Object?> desktopSnapshot({
   'error': null,
 };
 
+Map<Object?, Object?> runtimeCapabilitiesMap({
+  String rendererBackend = 'softwareLlvmPipe',
+  bool hardwareAccelerationVerified = false,
+}) => {
+  'schemaVersion': 1,
+  'hostApiLevel': 36,
+  'abi': 'arm64-v8a',
+  for (final key in [
+    'host',
+    'localExecution',
+    'proot',
+    'x11',
+    'audio',
+    'storage',
+    'renderer',
+  ])
+    key: {'state': 'SUPPORTED_AND_PROBED', 'reason': null},
+  'clipboard': {'state': 'PRESENT_UNVERIFIED', 'reason': 'Foreground only'},
+  'chroot': {'state': 'UNAVAILABLE', 'reason': null},
+  'avfFeature': {'state': 'UNAVAILABLE', 'reason': null},
+  'avfPermission': {'state': 'UNAVAILABLE', 'reason': null},
+  'rendererBackend': rendererBackend,
+  'availableBytes': 10 * 1024 * 1024 * 1024,
+  'requiredBytes': 4 * 1024 * 1024 * 1024,
+  'prootCandidate': true,
+  'avfAdapterAvailable': false,
+  'hardwareAccelerationVerified': hardwareAccelerationVerified,
+  'distribution': {
+    'channel': 'sideloadLocalLinux',
+    'targetSdk': 28,
+    'requiresAppPrivateElfExecution': true,
+  },
+};
+
+Map<Object?, Object?> desktopSnapshotV2({
+  String phase = 'attached',
+  int? activeId = 2,
+  String? profile = 'monitor',
+  int? width = 3840,
+  int? height = 2160,
+  bool secondMonitor = true,
+  bool autoOpenOnMonitor = true,
+  String placementMode = 'movable',
+  String placementSelectionSource = 'runtimeEvidence',
+  String placementReason = 'Runtime evidence permits placement across displays',
+  bool? automaticMovesAllowed,
+  String? placementOverride,
+  String? sessionEnvironment,
+  String? presentationClass = 'externalPointer',
+  String? stableDisplayKey = 'external:3:DEL|4:4112|11:Dell U2723Q',
+  Map<Object?, Object?>? inputCapabilities = const {
+    'touchEvidence': 'none',
+    'pointerAssociation': 'targetDisplay',
+    'hasMouse': true,
+    'hasTouchpad': false,
+    'hasKeyboard': true,
+    'hasStylus': false,
+  },
+  String? externalInputRoute = 'native',
+  bool? rendererPointerCaptureRequested = true,
+  bool? relayPointerCaptureRequested = false,
+  Object? refreshPreferredRate = 60.0,
+  int? refreshPreferredModeId = 4,
+  String? refreshReason = 'selected exact-resolution mode 4',
+  Map<Object?, Object?>? runtimeCapabilities,
+}) {
+  final isLocal = placementMode == 'displayLocal';
+  final effectiveAutoMoves =
+      automaticMovesAllowed ??
+      (!isLocal &&
+          placementSelectionSource != 'safeDefault' &&
+          placementSelectionSource != 'deviceQuirk');
+  return {
+    ...desktopSnapshot(
+      phase: phase,
+      activeId: activeId,
+      profile: profile,
+      width: width,
+      height: height,
+      secondMonitor: secondMonitor,
+      autoOpenOnMonitor: autoOpenOnMonitor,
+    ),
+    'schemaVersion': 2,
+    'displayLocalMode': isLocal,
+    'crossDisplayMovesAllowed': !isLocal,
+    'sessionEnvironment': ?sessionEnvironment,
+    'placementMode': placementMode,
+    'placementSelectionSource': placementSelectionSource,
+    'placementReason': placementReason,
+    'automaticMovesAllowed': effectiveAutoMoves,
+    'placementOverride': placementOverride,
+    'presentationClass': presentationClass,
+    'stableDisplayKey': stableDisplayKey,
+    'inputCapabilities': inputCapabilities,
+    'externalInputRoute': externalInputRoute,
+    'rendererPointerCaptureRequested': rendererPointerCaptureRequested,
+    'relayPointerCaptureRequested': relayPointerCaptureRequested,
+    'refreshPreferredRate': refreshPreferredRate,
+    'refreshPreferredModeId': refreshPreferredModeId,
+    'refreshReason': refreshReason,
+    'runtimeCapabilities': runtimeCapabilities ?? runtimeCapabilitiesMap(),
+  };
+}
+
 String displayKey(int id) => id == 0 ? 'phone-key' : 'monitor-$id';
 
 Map<Object?, Object?> displayInfo(int id, String name, bool isDefault) => {
@@ -110,6 +214,7 @@ class FakeDesktopPlatform {
 
   PlatformException? openError;
   PlatformException? autoOpenError;
+  PlatformException? placementOverrideError;
   bool hasRoot = false;
   bool provisionSuccess = true;
   String? provisionFailureMessage;
@@ -138,6 +243,35 @@ class FakeDesktopPlatform {
                 'autoOpenOnMonitor': arguments['enabled'],
               };
               if (autoOpenReply != null) return await autoOpenReply!.future;
+              return snapshot;
+            case 'setDesktopPlacementOverride':
+              if (placementOverrideError != null) {
+                throw placementOverrideError!;
+              }
+              if (snapshot['sessionRunning'] == true) {
+                throw PlatformException(
+                  code: 'INVALID_ARGUMENT',
+                  message: 'Stop Linux before changing desktop placement mode',
+                );
+              }
+              final arguments = call.arguments as Map<Object?, Object?>;
+              final mode = arguments['placementMode'] as String?;
+              final resolvedMode = mode ?? 'movable';
+              final isLocal = resolvedMode == 'displayLocal';
+              snapshot = {
+                ...snapshot,
+                'displayLocalMode': isLocal,
+                'crossDisplayMovesAllowed': !isLocal,
+                'placementMode': resolvedMode,
+                'placementSelectionSource': mode == null
+                    ? 'runtimeEvidence'
+                    : 'userOverride',
+                'placementReason': mode == null
+                    ? 'Runtime evidence permits placement across displays'
+                    : 'The user selected $mode placement',
+                'automaticMovesAllowed': !isLocal,
+                'placementOverride': mode,
+              };
               return snapshot;
             case 'getDesktopDisplaySettings':
               final arguments = call.arguments as Map<Object?, Object?>;

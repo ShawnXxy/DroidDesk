@@ -107,11 +107,32 @@ class AppState extends ChangeNotifier {
     await _runDesktopOperation(DroidDeskPlatform.moveDesktopToPhone);
   }
 
+  Future<void> setDesktopPlacementOverride(DesktopPlacementMode? mode) async {
+    if (_disposed) return;
+    if (!_desktopDisplays.supportsCompatibilityDiagnostics) {
+      return _recordDisplayError(
+        StateError('Placement override is unavailable on this native build'),
+      );
+    }
+    if (_desktopDisplays.sessionRunning || _isRunning) {
+      return _recordDisplayError(
+        StateError('Stop Linux before changing desktop placement mode'),
+      );
+    }
+    await _runDesktopOperation(
+      () => DroidDeskPlatform.setDesktopPlacementOverride(mode),
+    );
+  }
+
   bool _allowDisplayRouting() {
     if (_disposed) return false;
     if (_desktopDisplays.crossDisplayMovesAllowed) return true;
     _recordDisplayError(
-      StateError('The phone or TNT launcher selects the display environment'),
+      StateError(
+        _desktopDisplays.sessionEnvironment == DesktopDisplayEnvironment.tnt
+            ? 'The phone or TNT launcher selects the display environment'
+            : 'Display-local mode requires launching from the target display',
+      ),
     );
     return false;
   }
