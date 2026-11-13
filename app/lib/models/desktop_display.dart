@@ -12,6 +12,36 @@ enum DesktopDisplayEnvironment { phone, tnt, otherExternal }
 
 enum DesktopProfileKind { phone, wide, monitor }
 
+enum DesktopPresentationClass {
+  phoneTouch('phoneTouch', 'Phone touch'),
+  largeTouch('largeTouch', 'Large touch'),
+  externalPointer('externalPointer', 'External pointer'),
+  externalTouch('externalTouch', 'External touch');
+
+  const DesktopPresentationClass(this.wireValue, this.label);
+  final String wireValue;
+  final String label;
+
+  static DesktopPresentationClass parse(Object? value) => values.firstWhere(
+    (item) => item.wireValue == value,
+    orElse: () => throw const FormatException('Invalid presentation class'),
+  );
+}
+
+enum DesktopDisplaySettingsScope {
+  thisDisplay('thisDisplay', 'This display'),
+  classDefault('classDefault', 'All displays of this type');
+
+  const DesktopDisplaySettingsScope(this.wireValue, this.label);
+  final String wireValue;
+  final String label;
+
+  static DesktopDisplaySettingsScope parse(Object? value) => values.firstWhere(
+    (item) => item.wireValue == value,
+    orElse: () => throw const FormatException('Invalid display settings scope'),
+  );
+}
+
 enum DesktopRenderPolicy {
   nativeResolution('native'),
   cap1080('cap1080'),
@@ -208,20 +238,51 @@ class DesktopDisplayState {
 class DesktopDisplaySettings {
   DesktopDisplaySettings({
     required this.displayKey,
+    required this.presentationClass,
+    this.stableDisplayKey,
+    DesktopDisplaySettingsScope? settingsScope,
     required this.renderPolicy,
     required this.uiScalePercent,
     required this.inputMode,
     required this.inputRoute,
-  }) {
-    if (displayKey.isEmpty ||
+  }) : settingsScope =
+           settingsScope ??
+           (stableDisplayKey != null
+               ? DesktopDisplaySettingsScope.thisDisplay
+               : DesktopDisplaySettingsScope.classDefault) {
+    if (displayKey.trim().isEmpty ||
+        (stableDisplayKey != null && stableDisplayKey!.trim().isEmpty) ||
         (uiScalePercent != null && !uiScales.contains(uiScalePercent)) ||
         inputMode < 1 ||
         inputMode > 3) {
       throw ArgumentError('Invalid desktop display settings');
     }
+    if (this.settingsScope == DesktopDisplaySettingsScope.thisDisplay &&
+        stableDisplayKey == null) {
+      throw ArgumentError(
+        'Exact display settings require a stable display key',
+      );
+    }
   }
 
   factory DesktopDisplaySettings.fromMap(Map<Object?, Object?> map) {
+    final displayKey = _required<String>(map, 'displayKey');
+    final stableKey = _nullable<String>(map, 'stableDisplayKey');
+    if (displayKey.trim().isEmpty) {
+      throw const FormatException('Invalid displayKey');
+    }
+    if (stableKey != null && stableKey.trim().isEmpty) {
+      throw const FormatException('Invalid stableDisplayKey');
+    }
+    final presentationClass = DesktopPresentationClass.parse(
+      map['presentationClass'],
+    );
+    final scope = DesktopDisplaySettingsScope.parse(map['settingsScope']);
+    if (scope == DesktopDisplaySettingsScope.thisDisplay && stableKey == null) {
+      throw const FormatException(
+        'Exact display settings require a stable display key',
+      );
+    }
     final scale = _nullable<int>(map, 'uiScalePercent');
     final mode = _required<int>(map, 'inputMode');
     if ((scale != null && !uiScales.contains(scale)) || mode < 1 || mode > 3) {
@@ -238,7 +299,10 @@ class DesktopDisplaySettings {
       throw const FormatException('Invalid external input route');
     }
     return DesktopDisplaySettings(
-      displayKey: _required<String>(map, 'displayKey'),
+      displayKey: displayKey,
+      presentationClass: presentationClass,
+      stableDisplayKey: stableKey,
+      settingsScope: scope,
       renderPolicy: policy.single,
       uiScalePercent: scale,
       inputMode: mode,
@@ -247,14 +311,48 @@ class DesktopDisplaySettings {
   }
 
   static const uiScales = [100, 125, 150, 175, 200];
+  static const Object _unset = Object();
+
   final String displayKey;
+  final DesktopPresentationClass presentationClass;
+  final String? stableDisplayKey;
+  final DesktopDisplaySettingsScope settingsScope;
   final DesktopRenderPolicy renderPolicy;
   final int? uiScalePercent;
   final int inputMode;
   final DesktopExternalInputRoute inputRoute;
 
+  bool get hasStableIdentity => stableDisplayKey != null;
+
+  DesktopDisplaySettings copyWith({
+    String? displayKey,
+    DesktopPresentationClass? presentationClass,
+    Object? stableDisplayKey = _unset,
+    DesktopDisplaySettingsScope? settingsScope,
+    DesktopRenderPolicy? renderPolicy,
+    Object? uiScalePercent = _unset,
+    int? inputMode,
+    DesktopExternalInputRoute? inputRoute,
+  }) => DesktopDisplaySettings(
+    displayKey: displayKey ?? this.displayKey,
+    presentationClass: presentationClass ?? this.presentationClass,
+    stableDisplayKey: identical(stableDisplayKey, _unset)
+        ? this.stableDisplayKey
+        : stableDisplayKey as String?,
+    settingsScope: settingsScope ?? this.settingsScope,
+    renderPolicy: renderPolicy ?? this.renderPolicy,
+    uiScalePercent: identical(uiScalePercent, _unset)
+        ? this.uiScalePercent
+        : uiScalePercent as int?,
+    inputMode: inputMode ?? this.inputMode,
+    inputRoute: inputRoute ?? this.inputRoute,
+  );
+
   Map<String, Object?> toMap() => {
     'displayKey': displayKey,
+    'presentationClass': presentationClass.wireValue,
+    'stableDisplayKey': stableDisplayKey,
+    'settingsScope': settingsScope.wireValue,
     'renderPolicy': renderPolicy.wireValue,
     'uiScalePercent': uiScalePercent,
     'inputMode': inputMode,
