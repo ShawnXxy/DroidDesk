@@ -6,7 +6,6 @@ import android.app.ActivityOptions
 import android.app.ActivityManager
 import android.app.Activity
 import android.content.ActivityNotFoundException
-import android.content.res.Configuration
 import android.hardware.display.DisplayManager
 import android.os.Build
 import android.os.Handler
@@ -14,6 +13,10 @@ import android.os.Looper
 import android.util.Log
 import android.net.Uri
 import android.view.Display
+import android.view.InputDevice
+import com.orailnoor.droiddesk.display.capability.AndroidPresentationEvidenceProbe
+import com.orailnoor.droiddesk.display.capability.PresentationContext
+import com.orailnoor.droiddesk.display.capability.TouchEvidence
 import com.orailnoor.droiddesk.display.placement.AcceptedDisplayHandoffAdmission
 import com.orailnoor.droiddesk.display.placement.AcceptedDisplayHandoffEvidence
 import com.orailnoor.droiddesk.display.placement.AcceptedDisplayHandoffEvidenceSnapshot
@@ -21,12 +24,24 @@ import com.orailnoor.droiddesk.display.placement.AcceptedDisplayHandoffRegistry
 import com.orailnoor.droiddesk.display.placement.DesktopPlacementPort
 import com.orailnoor.droiddesk.display.placement.DesktopPlacementStrategy
 import com.orailnoor.droiddesk.display.placement.DisplayConnectionIdentity
+import com.orailnoor.droiddesk.display.policy.PresentationPolicy
 import com.orailnoor.droiddesk.view.DesktopActivity
 import com.orailnoor.droiddesk.runtime.ChrootRuntime
 import com.orailnoor.droiddesk.runtime.LinuxRuntime
 import com.orailnoor.droiddesk.runtime.ProotDebianSessionRegistry
 import com.orailnoor.droiddesk.service.DroidDeskService
 import java.lang.ref.WeakReference
+
+internal fun promoteInternalDefaultTouch(raw: PresentationContext): PresentationContext =
+    if (raw.isDefaultDisplay && raw.input.touch == TouchEvidence.UNKNOWN_ASSOCIATION &&
+        InputDevice.getDeviceIds().any { id -> InputDevice.getDevice(id)?.let { !it.isExternal && it.supportsSource(InputDevice.SOURCE_TOUCHSCREEN) } == true }) {
+        raw.copyWithSnapshot(input = raw.input.copy(touch = TouchEvidence.CURRENT_DISPLAY))
+    } else raw
+
+internal fun resolveDefaultProfileKind(
+    policy: PresentationPolicy,
+    readContext: () -> PresentationContext,
+): ProfileKind = runCatching { policy.profileKind(policy.classify(readContext())) }.getOrDefault(ProfileKind.PHONE)
 
 internal fun <T> activityDisplayForSdk(
     sdkInt: Int,
@@ -152,6 +167,8 @@ internal class AndroidDesktopDisplayHost(
     private val handler = Handler(Looper.getMainLooper())
     private val displayManager = context.getSystemService(DisplayManager::class.java)
     private val activities = context.getSystemService(ActivityManager::class.java)
+    private val evidenceProbe = AndroidPresentationEvidenceProbe(context, repository)
+    private val presentationPolicy = PresentationPolicy()
     private val handoffs = AcceptedDisplayHandoffRegistry()
     private var boundActivity: WeakReference<Activity>? = null
     private var localDesktop: WeakReference<DesktopActivity>? = null
@@ -217,12 +234,8 @@ internal class AndroidDesktopDisplayHost(
 
     override fun displays() = repository.snapshot()
 
-    override fun defaultProfileKind(): ProfileKind {
-        val configuration = context.resources.configuration
-        return DisplayProfilePolicy.classify(
-            true, configuration.smallestScreenWidthDp,
-            configuration.uiMode and Configuration.UI_MODE_TYPE_MASK == Configuration.UI_MODE_TYPE_DESK,
-        )
+    override fun defaultProfileKind(): ProfileKind = resolveDefaultProfileKind(presentationPolicy) {
+        promoteInternalDefaultTouch(evidenceProbe.presentationContext(Display.DEFAULT_DISPLAY))
     }
 
     override fun sessionRunning() =

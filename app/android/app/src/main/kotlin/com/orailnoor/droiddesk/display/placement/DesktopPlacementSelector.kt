@@ -54,15 +54,11 @@ fun bootstrapPlacementStrategy(
     }
 }
 
+fun currentDeviceIdentity(): DeviceIdentity =
+    DeviceIdentity(Build.MANUFACTURER, Build.BRAND, Build.DEVICE, Build.MODEL)
+
 fun bootstrapCurrentDevicePlacementStrategy(): DesktopPlacementStrategy =
-    bootstrapPlacementStrategy(
-        DeviceIdentity(
-            Build.MANUFACTURER,
-            Build.BRAND,
-            Build.DEVICE,
-            Build.MODEL,
-        ),
-    )
+    bootstrapPlacementStrategy(currentDeviceIdentity())
 
 class DesktopPlacementSelector(
     private val quirks: DeviceQuirkCatalog,

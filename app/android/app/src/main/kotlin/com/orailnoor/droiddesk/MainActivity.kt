@@ -40,12 +40,43 @@ import com.orailnoor.droiddesk.display.DesktopItemReadinessGate
 import com.orailnoor.droiddesk.display.DesktopLaunchReply
 import com.orailnoor.droiddesk.display.DesktopPlacementDiagnostics
 import com.orailnoor.droiddesk.display.InFlightDesktopOpenSpec
+import com.orailnoor.droiddesk.display.capability.PlacementMode
 import com.orailnoor.droiddesk.display.placement.DesktopOpenRequest
 import com.orailnoor.droiddesk.display.input.shouldCaptureRelayedPointer
 import com.orailnoor.droiddesk.packages.PackageStoreException
 import com.orailnoor.droiddesk.packages.PackageStoreMethodHandler
 import com.orailnoor.droiddesk.packages.ProcessPackageStoreRegistry
 import com.orailnoor.droiddesk.packages.toWireMap
+
+internal fun handleDesktopPlacementOverrideCall(
+    arguments: Any?,
+    coordinator: DesktopDisplayCoordinator,
+    result: MethodChannel.Result,
+    isProvisioningActive: () -> Boolean = { false },
+    onDisplayFailure: (DesktopDisplayException, MethodChannel.Result) -> Unit = { err, res -> res.error(err.code, err.message, null) },
+) {
+    val mode = try {
+        val map = arguments as? Map<*, *> ?: throw IllegalArgumentException("Invalid desktop placement mode")
+        require(map.containsKey("placementMode")) { "placementMode is required" }
+        when (val raw = map["placementMode"]) {
+            null -> null
+            is String -> PlacementMode.entries.firstOrNull { it.wireName == raw } ?: throw IllegalArgumentException("Invalid desktop placement mode")
+            else -> throw IllegalArgumentException("Invalid desktop placement mode")
+        }
+    } catch (error: IllegalArgumentException) {
+        result.error("INVALID_ARGUMENT", error.message, null); return
+    }
+    if (isProvisioningActive()) {
+        onDisplayFailure(DesktopDisplayException("INVALID_ARGUMENT", "Stop Linux before changing desktop placement mode"), result); return
+    }
+    try {
+        result.success(coordinator.setPlacementOverride(mode))
+    } catch (error: DesktopDisplayException) {
+        onDisplayFailure(error, result)
+    } catch (error: IllegalStateException) {
+        result.error("DISPLAY_SETTINGS_SAVE_FAILED", error.message, null)
+    }
+}
 
 internal fun forwardResolvedDesktopOpen(
     currentDisplayId: Int?,
@@ -401,8 +432,8 @@ class MainActivity : FlutterActivity() {
         desktopIntegration = DesktopIntegration(this)
         DesktopDisplayCoordinator.shared.initialize(applicationContext)
         DesktopDisplayCoordinator.shared.bindActivity(this)
-        if (!DesktopDisplayCoordinator.shared.allowsManualMoves) {
-            window.decorView.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ ->
+        window.decorView.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ ->
+            if (!DesktopDisplayCoordinator.shared.allowsManualMoves) {
                 DesktopDisplayCoordinator.shared.observeActivityEnvironment(this, DesktopDisplayCoordinator.shared.sessionGeneration)
             }
         }
@@ -721,6 +752,7 @@ class MainActivity : FlutterActivity() {
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CHANNEL).setMethodCallHandler { call, result ->
             when (call.method) {
                 "getDesktopDisplays" -> result.success(displays.snapshot())
+                "setDesktopPlacementOverride" -> handleDesktopPlacementOverrideCall(call.arguments, displays, result, { isProvisioningActive(displays) }, ::displayFailure)
                 "setAutoOpenOnMonitor" -> {
                     val enabled = (call.arguments as? Map<*, *>)?.get("enabled") as? Boolean
                     if (enabled == null) {

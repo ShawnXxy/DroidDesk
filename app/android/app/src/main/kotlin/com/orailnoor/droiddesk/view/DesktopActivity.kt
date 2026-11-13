@@ -116,6 +116,7 @@ internal data class DesktopPresentationSnapshot(
 
 internal class DesktopPresentationPlanner(
     private val policy: PresentationPolicy = PresentationPolicy(), private val onClassified: (PresentationClass) -> Unit = {},
+    private val onResolved: (PresentationPlan, InputCapabilities) -> Unit = { _, _ -> },
     private val readSnapshot: ((Int) -> PixelSize?) -> DesktopPresentationSnapshot?, private val loadSettings: (PresentationClass, Int) -> DisplaySettings?,
     private val applyPlan: (PresentationPlan, PixelSize?) -> ExternalDesktopInputTarget? = { _, _ -> null },
     private val openRelay: () -> Unit = {}, private val closeRelay: () -> Unit = {},
@@ -141,6 +142,7 @@ internal class DesktopPresentationPlanner(
             val sync = forceRelaySync || lastAppliedTarget !== target || lastAppliedInput != plan.input; lastAppliedTarget = target; lastAppliedInput = plan.input
             if (plan.input.externalInputRoute == ExternalInputRoute.PHONE_RELAY) { ExternalDesktopInputBridge.attach(target, plan.input.relayPointerCapture); if (sync) openRelay() } else { ExternalDesktopInputBridge.detach(target); if (sync) closeRelay() }
         }
+        onResolved(plan, ctx.input)
         return plan
     }
     fun promoteDirectTouch(displayId: Int, deviceId: Int): Boolean { if (promotedTouchDisplayId != displayId) { promotedTouchDisplayId = displayId; promotedTouchDevices.clear() }; return promotedTouchDevices.isEmpty().also { promotedTouchDevices.add(deviceId) } }
@@ -201,7 +203,7 @@ class DesktopActivity : Activity() {
     private val evidenceProbe by lazy { AndroidPresentationEvidenceProbe(applicationContext, DisplayRepository(applicationContext)) }
     private var lastAppliedPlan: PresentationPlan? = null; private var lastAppliedController: X11InputController? = null
     private var appliedRefreshRequest: RefreshRequest? = null; private var forceNextRelaySync = false
-    private val presentationPlanner = DesktopPresentationPlanner(onClassified = { cls -> rendererLease?.takeIf(::isCurrentRenderer)?.let { displayCoordinator.reportPresentationClass(it, cls) } }, readSnapshot = ::readPresentationSnapshot, loadSettings = displayCoordinator::loadSettings, applyPlan = ::applyPresentationPlan, openRelay = { ExternalInputRelayActivity.open(this) }, closeRelay = ExternalInputRelayActivity::finishIfOpen)
+    private val presentationPlanner = DesktopPresentationPlanner(onClassified = { cls -> rendererLease?.takeIf(::isCurrentRenderer)?.let { displayCoordinator.reportPresentationClass(it, cls) } }, onResolved = { plan, input -> rendererLease?.takeIf(::isCurrentRenderer)?.let { displayCoordinator.reportPresentationPlan(it, plan, input) } }, readSnapshot = ::readPresentationSnapshot, loadSettings = displayCoordinator::loadSettings, applyPlan = ::applyPresentationPlan, openRelay = { ExternalInputRelayActivity.open(this) }, closeRelay = ExternalInputRelayActivity::finishIfOpen)
     private var rendererLease: RendererLease? = null; private var readyGeneration = 0L; private var x11Attached = false
     private val readinessGate = DesktopReadinessGate(::onRendererReady)
     private val rendererCleanup = RendererCleanup()
