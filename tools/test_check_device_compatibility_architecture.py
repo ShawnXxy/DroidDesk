@@ -52,6 +52,7 @@ class DeviceCompatibilityArchitectureGuardTest(unittest.TestCase):
         self.assertIn("Device compatibility architecture: OK", output)
         desktop_src = (REPO_ROOT / f"{ANDROID_KOTLIN}/view/DesktopActivity.kt").read_text(encoding="utf-8")
         main_src = (REPO_ROOT / f"{ANDROID_KOTLIN}/MainActivity.kt").read_text(encoding="utf-8")
+        launcher_src = (REPO_ROOT / f"{ANDROID_KOTLIN}/display/DesktopDisplayLauncher.kt").read_text(encoding="utf-8")
         cosmetic_real = self.run_guard(
             {
                 f"{ANDROID_KOTLIN}/view/DesktopActivity.kt": desktop_src.replace(
@@ -59,6 +60,15 @@ class DeviceCompatibilityArchitectureGuardTest(unittest.TestCase):
                 ),
                 f"{ANDROID_KOTLIN}/MainActivity.kt": main_src.replace(
                     "postDelayed(logFlushRunnable, 150)", "postDelayed(logFlushRunnable, 250)", 1
+                ),
+                f"{ANDROID_KOTLIN}/display/DesktopDisplayLauncher.kt": "private const val delayMillis = 250L\n" + launcher_src.replace(
+                    "class DesktopDisplayLauncher(",
+                    "private fun topFadeDuration(): Long { val delayMillis = 250L; return delayMillis }\nclass DesktopDisplayLauncher(",
+                    1,
+                ).replace(
+                    "override fun scheduleTimeout(",
+                    "private fun fadeDuration(): Long { val delayMillis = 250L; return delayMillis }\n    override fun scheduleTimeout(",
+                    1,
                 ),
             }
         )
@@ -104,6 +114,14 @@ class DeviceCompatibilityArchitectureGuardTest(unittest.TestCase):
                     "    val selector: DesktopPlacementSelector = DesktopPlacementSelector(DeviceQuirkCatalog()),\n"
                     ") {\n"
                     "    val isDisplayLocal = selection.mode == PlacementMode.DISPLAY_LOCAL\n"
+                    "}\n"
+                ),
+                f"{ANDROID_KOTLIN}/display/DesktopDisplayLauncher.kt": (
+                    "class DesktopDisplayLauncher {\n"
+                    "    private fun fadeDuration(): Long { val delayMillis = 250L; return delayMillis }\n"
+                    "    private fun scheduleTimeout(delayMillis: Long, timeout: Runnable) { handler.postDelayed(timeout, delayMillis) }\n"
+                    "    private fun retryShadow(timeout: Runnable) { val d = 250L; listOf(1000L).forEach { d -> handler.postDelayed(timeout, d) } }\n"
+                    "    private fun overwritten(timeout: Runnable) { var d = 250L; d = 1000L; handler.postDelayed(timeout, d) }\n"
                     "}\n"
                 ),
                 f"{ANDROID_KOTLIN}/display/policy/PresentationPolicy.kt": (
@@ -152,7 +170,18 @@ class DeviceCompatibilityArchitectureGuardTest(unittest.TestCase):
                     "}\n"
                 ),
                 f"{TERMUX_X11}/input/TouchInputHandler.java": (
-                    "public class TouchInputHandler { private ActivePointerTracker tracker; }\n"
+                    "public class TouchInputHandler {\n"
+                    "    private ActivePointerTracker tracker;\n"
+                    "    void handle(android.view.MotionEvent e, int[] samples) {\n"
+                    "        if (e != null) { int id = e.getPointerId(0); tracker.begin(id); int dense = e.findPointerIndex(id); if (dense >= 0) samples[dense] = 1; }\n"
+                    "        else { for (int id = 0; id < samples.length; id++) { samples[id] = 1; } }\n"
+                    "        if (e != null) { int slot = 0, pid = e.getPointerId(0); if (slot < samples.length) samples[slot] = pid; }\n"
+                    "        if (e != null) { int v = e.getPointerId(0); tracker.begin(v); v = e.findPointerIndex(v); if (v >= 0 && v < samples.length) samples[v] = 1; }\n"
+                    "        int index = e != null ? e.findPointerIndex(e.getPointerId(0)) : -1;\n"
+                    "        float[] positions = new float[e != null ? e.getPointerCount() : 0];\n"
+                    "        if (index >= 0 && index < positions.length) positions[index] = e.getX(index);\n"
+                    "    }\n"
+                    "}\n"
                 ),
                 f"{TERMUX_X11}/LorieView.java": (
                     "public class LorieView {\n"
@@ -333,6 +362,18 @@ class DeviceCompatibilityArchitectureGuardTest(unittest.TestCase):
                 "class InputEventSender { ActivePointerTracker t; boolean[] active = new boolean[16]; void f(android.view.MotionEvent e) { active[e.getPointerId(e.getActionIndex())] = true; } }",
             ),
             (
+                f"{TERMUX_X11}/input/InputEventSender.java",
+                "class InputEventSender { ActivePointerTracker t; boolean[] active = new boolean[16]; void f(android.view.MotionEvent e) { for (int id = e.getPointerId(0); id >= 0; id--) { active[id] = true; } } }",
+            ),
+            (
+                f"{TERMUX_X11}/input/InputEventSender.java",
+                "class InputEventSender { ActivePointerTracker t; boolean[] active = new boolean[16]; void f(android.view.MotionEvent e) { int id = e.getPointerId(0); e.findPointerIndex(active[id] ? 1 : 0); } }",
+            ),
+            (
+                f"{TERMUX_X11}/input/InputEventSender.java",
+                "class InputEventSender { ActivePointerTracker t; int activeId; boolean[] active = new boolean[16]; void a(android.view.MotionEvent e) { activeId = e.getPointerId(0); } void b() { active[activeId] = true; } }",
+            ),
+            (
                 f"{TERMUX_X11}/input/TouchInputHandler.java",
                 "public class TouchInputHandler { void onTouch() {} }",
             ),
@@ -473,6 +514,30 @@ class DeviceCompatibilityArchitectureGuardTest(unittest.TestCase):
             (
                 f"{ANDROID_KOTLIN}/view/DesktopActivity.kt",
                 "class DesktopActivity { val g = DesktopReadinessGate {}; fun f() = collapsedFadeHandler.postDelayed(Runnable { launchSession() }, 250) }",
+            ),
+            (
+                f"{ANDROID_KOTLIN}/view/DesktopActivity.kt",
+                "class DesktopActivity { private object StartupDelays { const val DELAY_MS = 250L }; val g = DesktopReadinessGate {}; fun f() = handler.postDelayed({ launchSession() }, StartupDelays.DELAY_MS) }",
+            ),
+            (
+                f"{ANDROID_KOTLIN}/view/DesktopActivity.kt",
+                "class DesktopActivity { val g = DesktopReadinessGate {}; fun f() { val d =\n    250L\nhandler.postDelayed({ launchSession() }, d) } }",
+            ),
+            (
+                f"{ANDROID_KOTLIN}/view/DesktopActivity.kt",
+                "class DesktopActivity { companion object { private const val STARTUP_DELAY_MS = 250L }; val g = DesktopReadinessGate {}; fun s() = handler.postDelayed({ launchSession() }, DesktopActivity.STARTUP_DELAY_MS) }",
+            ),
+            (
+                f"{ANDROID_KOTLIN}/view/DesktopActivity.kt",
+                "class DesktopActivity { val g = DesktopReadinessGate {}; fun startLater(delayMillis: Long = 250L, other: Int = 1) { handler.postDelayed({ launchSession() }, delayMillis) } }",
+            ),
+            (
+                f"{ANDROID_KOTLIN}/view/DesktopActivity.kt",
+                "class DesktopActivity { private object StartupDelays { const val DELAY_MS = 250L }; val g = DesktopReadinessGate {}; fun f() { val local = StartupDelays.DELAY_MS; val hint = local; handler.postDelayed({ launchSession() }, local) } }",
+            ),
+            (
+                f"{ANDROID_KOTLIN}/view/DesktopActivity.kt",
+                "class DesktopActivity { val g = DesktopReadinessGate {}; fun f() { var d: Long = 0L; d = 250L; handler.postDelayed({ launchSession() }, d) } }",
             ),
             (
                 f"{ANDROID_KOTLIN}/view/DesktopActivity.kt",
