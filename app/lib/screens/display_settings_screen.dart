@@ -20,6 +20,7 @@ class _DisplaySettingsScreenState extends State<DisplaySettingsScreen> {
   bool _loadingSettings = false;
   bool _dirty = false;
   int _settingsRevision = 0;
+  int _placementReset = 0;
   String? _announcedError;
 
   @override
@@ -196,7 +197,9 @@ class _DisplaySettingsScreenState extends State<DisplaySettingsScreen> {
           const SizedBox(height: 8),
           Text(
             snapshot.displayLocalMode
-                ? 'The phone or TNT launcher selects the display environment. Changing environments restarts Linux/XFCE; scaling settings remain available.'
+                ? snapshot.sessionEnvironment == DesktopDisplayEnvironment.tnt
+                      ? 'The phone or TNT launcher selects the display environment. Changing environments restarts Linux/XFCE; scaling settings remain available.'
+                      : 'Display-local mode selects the active display from the launcher. Changing display environments restarts Linux/XFCE; scaling settings remain available.'
                 : 'Automatic mode moves a running desktop to one available monitor. Manual display controls remain available.',
           ),
           SwitchListTile.adaptive(
@@ -221,6 +224,51 @@ class _DisplaySettingsScreenState extends State<DisplaySettingsScreen> {
                 child: Text(error),
               ),
             ),
+          if (snapshot.supportsCompatibilityDiagnostics) ...[
+            if (snapshot.effectivePlacementLabel == 'Safe default' &&
+                snapshot.automaticMovesAllowed == false)
+              Card(
+                key: const Key('desktop-safe-default-warning'),
+                color: Colors.amber.withValues(alpha: 0.14),
+                child: const Padding(
+                  padding: EdgeInsets.all(12),
+                  child: Text(
+                    'Automatic monitor moves are disabled by the safe default because placement evidence was inconclusive. Select a placement preference while Linux is stopped or wait for conclusive display evidence.',
+                  ),
+                ),
+              ),
+            const SizedBox(height: 12),
+            KeyedSubtree(
+              key: ValueKey(
+                'desktop-placement-$_placementReset-${snapshot.placementOverride?.wireValue ?? 'auto'}',
+              ),
+              child: DropdownButtonFormField<String>(
+                key: const Key('desktop-placement-override'),
+                initialValue: snapshot.placementOverride?.wireValue ?? 'auto',
+                decoration: InputDecoration(
+                  labelText: 'Placement preference',
+                  helperText: snapshot.sessionRunning || state.isRunning
+                      ? 'Stop Linux before changing desktop placement mode.'
+                      : 'Applies on the next Linux desktop start.',
+                ),
+                items: [
+                  DropdownMenuItem(
+                    value: 'auto',
+                    child: const Text('Automatic'),
+                  ),
+                  for (final m in DesktopPlacementMode.values)
+                    DropdownMenuItem(value: m.wireValue, child: Text(m.label)),
+                ],
+                onChanged:
+                    state.desktopDisplayBusy ||
+                        snapshot.sessionRunning ||
+                        state.isRunning
+                    ? null
+                    : _selectPlacement,
+              ),
+            ),
+            const SizedBox(height: 16),
+          ],
           Text(
             'Applied render resolution',
             style: Theme.of(context).textTheme.labelLarge,
@@ -468,11 +516,81 @@ class _DisplaySettingsScreenState extends State<DisplaySettingsScreen> {
                   : () => state.startLinux(),
               child: const Text('Launch desktop'),
             ),
+          if (snapshot.supportsCompatibilityDiagnostics) ...[
+            const SizedBox(height: 16),
+            _details(context, snapshot),
+          ],
           const SizedBox(height: 10),
           const Text(
             'A render cap trades sharpness for performance; it never changes your UI-scale override. Mirror-only firmware or missing video hardware cannot be changed by DroidDesk.',
           ),
         ],
+      ),
+    );
+  }
+
+  Future<void> _selectPlacement(String? v) async {
+    if (v == null) return;
+    await _state.setDesktopPlacementOverride(
+      v == 'auto' ? null : DesktopPlacementMode.values.byName(v),
+    );
+    if (mounted &&
+        (_state.desktopDisplays.placementOverride?.wireValue ?? 'auto') != v) {
+      setState(() => _placementReset++);
+    }
+  }
+
+  Widget _details(BuildContext ctx, DesktopDisplayState s) {
+    final i = s.inputCapabilities, c = s.runtimeCapabilities;
+    final d = [
+      if (i?.hasMouse == true) 'Mouse',
+      if (i?.hasTouchpad == true) 'Touchpad',
+      if (i?.hasKeyboard == true) 'Keyboard',
+      if (i?.hasStylus == true) 'Stylus',
+    ];
+    final devs = d.isEmpty ? 'None' : d.join(', ');
+    final r = s.refreshPreferredRate;
+    final hz = r == null
+        ? null
+        : '${r == r.roundToDouble() ? r.toInt() : r.toStringAsFixed(2)} Hz';
+    final m = s.refreshPreferredModeId != null
+        ? 'Mode ID ${s.refreshPreferredModeId}'
+        : r != null
+        ? 'Frame-rate hint only (no mode switch)'
+        : 'Not requested';
+    return Card(
+      key: const Key('desktop-compatibility-details'),
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          spacing: 4,
+          children: [
+            Text(
+              'Compatibility details',
+              style: Theme.of(ctx).textTheme.titleSmall,
+            ),
+            for (final line in [
+              'Effective placement: ${s.effectivePlacementLabel!}',
+              'Selection source: ${s.placementSelectionSource!.label}',
+              'Placement reason: ${s.placementReason!}',
+              'Active presentation: ${s.presentationClass?.label ?? 'Not yet measured'}',
+              'Display identity: ${s.stableDisplayKey ?? 'Unavailable'}',
+              if (i == null) 'Input capabilities: Not yet measured',
+              if (i != null) 'Touch capability: ${i.touchEvidence.label}',
+              if (i != null) 'Input devices: $devs',
+              if (i != null)
+                'Pointer association: ${i.pointerAssociation.label}',
+              'External input route: ${s.externalInputRoute?.label ?? 'Not active'}',
+              'Pointer capture: ${s.pointerCaptureOwnerLabel}',
+              'Refresh request: ${hz == null ? m : '$hz · $m'}',
+              if (s.refreshReason case final rr?) 'Refresh reason: $rr',
+              if (c != null)
+                'Runtime renderer: ${c.rendererBackend} (${c.hardwareAccelerationVerified ? 'hardware verified' : 'software/unverified'})',
+            ])
+              Text(line),
+          ],
+        ),
       ),
     );
   }

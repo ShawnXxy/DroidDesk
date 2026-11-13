@@ -413,6 +413,16 @@ class DroidDeskPlatform {
         ),
       );
 
+  static Future<DesktopDisplayState> setDesktopPlacementOverride(
+    DesktopPlacementMode? mode,
+  ) async => DesktopDisplayState.fromMap(
+    desktopDisplayMap(
+      await _channel.invokeMethod<Object?>('setDesktopPlacementOverride', {
+        'placementMode': mode?.wireValue,
+      }),
+    ),
+  );
+
   static Future<DesktopDisplaySettings> getDesktopDisplaySettings(
     String displayKey,
   ) async {
