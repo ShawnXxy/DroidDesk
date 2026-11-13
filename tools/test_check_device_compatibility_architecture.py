@@ -50,6 +50,19 @@ class DeviceCompatibilityArchitectureGuardTest(unittest.TestCase):
         output = result.stdout + result.stderr
         self.assertEqual(0, result.returncode, output)
         self.assertIn("Device compatibility architecture: OK", output)
+        desktop_src = (REPO_ROOT / f"{ANDROID_KOTLIN}/view/DesktopActivity.kt").read_text(encoding="utf-8")
+        main_src = (REPO_ROOT / f"{ANDROID_KOTLIN}/MainActivity.kt").read_text(encoding="utf-8")
+        cosmetic_real = self.run_guard(
+            {
+                f"{ANDROID_KOTLIN}/view/DesktopActivity.kt": desktop_src.replace(
+                    "COLLAPSED_FADE_DELAY_MS = 3_000L", "COLLAPSED_FADE_DELAY_MS = 250L", 1
+                ),
+                f"{ANDROID_KOTLIN}/MainActivity.kt": main_src.replace(
+                    "postDelayed(logFlushRunnable, 150)", "postDelayed(logFlushRunnable, 250)", 1
+                ),
+            }
+        )
+        self.assertEqual(0, cosmetic_real.returncode, cosmetic_real.stdout + cosmetic_real.stderr)
 
     def test_minimal_compliant_tree_and_comments_pass(self) -> None:
         result = self.run_guard(
@@ -104,12 +117,17 @@ class DeviceCompatibilityArchitectureGuardTest(unittest.TestCase):
                 f"{ANDROID_KOTLIN}/view/DesktopActivity.kt": (
                     "class DesktopActivity {\n"
                     "    companion object { private const val FADE_DELAY_MS = 250L; private const val TIMEOUT_MS = 250L * 4 }\n"
+                                        "    private val fadeLambda: () -> Unit = { hideOverlay() }\n"
                     "    private val gate = DesktopReadinessGate {}\n"
+                    "    private fun hideOverlay() {}\n"
                     "    private fun fadeCollapsedControl() = hideOverlay()\n"
+                    "    private val fadeTyped: Runnable = Runnable { hideOverlay() }\n"
+                    "    private val fadeObj: Runnable = object : Runnable { override fun run() { hideOverlay() } }\n"
                     "    fun launchSession() {}\n"
                     "    val refreshRateLimit = 60\n"
                     "    fun timeoutOk(delayMillis: Long) = handler.postDelayed(timeoutTask, delayMillis)\n"
                     "    fun namedFade() = collapsedFadeHandler.postDelayed(::fadeCollapsedControl, delayMillis = 250L)\n"
+                    "    fun typedFade(a: Int) = when (a) { 0 -> collapsedFadeHandler.removeCallbacks(fadeTyped); else -> { collapsedFadeHandler.postDelayed(fadeTyped, 250); collapsedFadeHandler.postDelayed(fadeObj, 250); collapsedFadeHandler.postDelayed(fadeLambda, 250) } }\n"
                     "    fun timeoutConst() = handler.postDelayed(timeoutTask, TIMEOUT_MS)\n"
                     "    fun fadeUi() = collapsedFadeHandler.postDelayed(::fadeCollapsedControl, 250)\n"
                     "    fun fadeConst() = collapsedFadeHandler.postDelayed(::fadeCollapsedControl, FADE_DELAY_MS)\n"
@@ -431,6 +449,10 @@ class DeviceCompatibilityArchitectureGuardTest(unittest.TestCase):
             ),
             (
                 f"{ANDROID_KOTLIN}/view/DesktopActivity.kt",
+                "class DesktopActivity { val g = DesktopReadinessGate {}; private var fadeTask: Runnable = Runnable {}; fun sneak() { fadeTask = Runnable { launchSession() }; collapsedFadeHandler.postDelayed(fadeTask, 250) } }",
+            ),
+            (
+                f"{ANDROID_KOTLIN}/view/DesktopActivity.kt",
                 "class DesktopActivity { fun onCreate() {} }",
             ),
             (
@@ -512,6 +534,38 @@ class DeviceCompatibilityArchitectureGuardTest(unittest.TestCase):
             (
                 f"{TERMUX_X11}/LorieView.java",
                 "class LorieView { Object stream() { return java.util.Arrays.stream(getDisplay().getSupportedModes()).findFirst(); } }",
+            ),
+            (
+                f"{ANDROID_KOTLIN}/MainActivity.kt",
+                "fun pick() { val modes = display.supportedModes; modes.firstOrNull { it.physicalWidth == 1920 } }",
+            ),
+            (
+                f"{ANDROID_KOTLIN}/MainActivity.kt",
+                "fun pick(requestedRate: Float) = display.supportedModes.asSequence().first { it.refreshRate == requestedRate }",
+            ),
+            (
+                f"{ANDROID_KOTLIN}/MainActivity.kt",
+                "fun pick() = display.supportedModes.let { it.firstOrNull { m -> m.physicalWidth == 1920 } }",
+            ),
+            (
+                f"{ANDROID_KOTLIN}/MainActivity.kt",
+                "fun pick() {\n    val modes = display\n        .supportedModes\n    modes.firstOrNull { it.physicalWidth == 1920 }\n}",
+            ),
+            (
+                f"{ANDROID_KOTLIN}/view/DesktopActivity.kt",
+                "DesktopReadinessGate {}; fun shadow(req: RefreshRequest) { applyRefreshRequest(req) { rate, modeId -> preferredRefreshRate = rate; listOf(2).forEach { modeId -> window.attributes.preferredDisplayModeId = modeId } } }",
+            ),
+            (
+                f"{ANDROID_KOTLIN}/view/DesktopActivity.kt",
+                "DesktopReadinessGate {}; fun shadowVal(req: RefreshRequest) { applyRefreshRequest(req) { rate, modeId -> val modeId = 2; preferredRefreshRate = rate; window.attributes.preferredDisplayModeId = modeId } }",
+            ),
+            (
+                f"{ANDROID_KOTLIN}/view/DesktopActivity.kt",
+                "DesktopReadinessGate {}; fun shadowIt(req: RefreshRequest) { applyRefreshRequest(req) { rate, it -> preferredRefreshRate = rate; listOf(2).forEach { window.attributes.preferredDisplayModeId = it } } }",
+            ),
+            (
+                f"{ANDROID_KOTLIN}/display/capability/AndroidPresentationEvidenceProbe.kt",
+                "fun pick() = display.supportedModes.map { it.toEvidence() }.first { it.width == 1920 }",
             ),
             (
                 f"{TERMUX_X11}/LorieView.java",
