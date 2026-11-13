@@ -9,18 +9,11 @@ TERMUX_X11 = f"{ANDROID_MAIN}/java/com/termux/x11"
 QUIRK_CATALOG = f"{KOTLIN_ROOT}/display/placement/DeviceQuirkCatalog.kt"
 PLACEMENT_SELECTOR = f"{KOTLIN_ROOT}/display/placement/DesktopPlacementSelector.kt"
 COORDINATOR = f"{KOTLIN_ROOT}/display/DesktopDisplayCoordinator.kt"
-LOCAL_ALLOWED = {
-    COORDINATOR,
-    f"{KOTLIN_ROOT}/display/DisplayLocalSessionController.kt",
-    f"{KOTLIN_ROOT}/display/capability/PresentationEvidence.kt",
-}
-PRESENTATION_POLICY = f"{KOTLIN_ROOT}/display/policy/PresentationPolicy.kt"
-DISPLAY_PROFILE = f"{KOTLIN_ROOT}/display/DisplayProfile.kt"
+LOCAL_ALLOWED = {COORDINATOR, f"{KOTLIN_ROOT}/display/DisplayLocalSessionController.kt", f"{KOTLIN_ROOT}/display/capability/PresentationEvidence.kt"}
+PRESENTATION_POLICY, DISPLAY_PROFILE = f"{KOTLIN_ROOT}/display/policy/PresentationPolicy.kt", f"{KOTLIN_ROOT}/display/DisplayProfile.kt"
 REFRESH_POLICY = f"{KOTLIN_ROOT}/display/refresh/DisplayRefreshPolicy.kt"
-MAIN_ACTIVITY = f"{KOTLIN_ROOT}/MainActivity.kt"
-DESKTOP_ACTIVITY = f"{KOTLIN_ROOT}/view/DesktopActivity.kt"
-INPUT_SENDER = f"{TERMUX_X11}/input/InputEventSender.java"
-TOUCH_HANDLER = f"{TERMUX_X11}/input/TouchInputHandler.java"
+MAIN_ACTIVITY, DESKTOP_ACTIVITY = f"{KOTLIN_ROOT}/MainActivity.kt", f"{KOTLIN_ROOT}/view/DesktopActivity.kt"
+INPUT_SENDER, TOUCH_HANDLER = f"{TERMUX_X11}/input/InputEventSender.java", f"{TERMUX_X11}/input/TouchInputHandler.java"
 
 OEM_TOKEN = re.compile(r"(?i)(?:darwin|smartisan|nx888j|pq85a02|\b(?:1(?:_?0){4}_?3|0x0*186a3)[lL]?\b)")
 BUILD_IDENTITY = re.compile(
@@ -45,13 +38,17 @@ FIXED_POINTER = re.compile(
     r"|\[\s*(?:pointerId|\w+\s*\.\s*getPointerId\s*\([^)]*\))\s*\]"
     r"|\bMAX_POINTERS\s*=\s*10\b|\bpointerId\s*(?:>=|<|<=|>)\s*(?:10|9)\b"
 )
+_MODES_EXPR = r"\b(?:supportedModes\b|getSupportedModes\s*\(\s*\))"
+_RATE_EXPR = r"\b(?:refreshRate\b|getRefreshRate\s*\(\s*\))"
+_BAL = r"(?:[^(){}]|\((?:[^()]|\([^()]*\))*\))*"
 REFRESH_SELECT = re.compile(
-    r"\bsupportedModes\s*(?:\?\.|\.)\s*(?:firstOrNull|first|lastOrNull|last|singleOrNull|single|find|indexOfFirst"
+    rf"{_MODES_EXPR}\s*(?:\?\.|\.)\s*(?:firstOrNull|first|lastOrNull|last|singleOrNull|single|find|indexOfFirst"
     r"|filter|filterNot|forEach|forEachIndexed|minBy|minByOrNull|minWith|minWithOrNull|maxBy|maxByOrNull|maxWith"
-    r"|maxWithOrNull|sortedBy|sortedByDescending|sortedWith|get)\b|\bsupportedModes\s*\["
-    r"|\bfor\s*\([^)]*\bin\b[^)]*\bsupportedModes\b"
-    r"|\brefreshRate\b[^;{}]{0,80}?(?<![\w.])(?:60(?:\.0+)?[fFdD]?|59\.94[fFdD]?)(?![\w.])"
-    r"|(?<![\w.])(?:60(?:\.0+)?[fFdD]?|59\.94[fFdD]?)(?![\w.])[^;{}]{0,80}?\brefreshRate\b"
+    rf"|maxWithOrNull|sortedBy|sortedByDescending|sortedWith|get|stream|iterator)\b|{_MODES_EXPR}\s*\["
+    rf"|\b(?:Arrays\s*\.\s*(?:stream|asList|sort|copyOf\w*)|Stream\s*\.\s*of|List\s*\.\s*of)\s*\({_BAL}{_MODES_EXPR}"
+    rf"|\bfor\s*\({_BAL}{_MODES_EXPR}"
+    rf"|{_RATE_EXPR}[^;{{}}]{{0,80}}?(?<![\w.])(?:60(?:\.0+)?[fFdD]?|59\.94[fFdD]?)(?![\w.])"
+    rf"|(?<![\w.])(?:60(?:\.0+)?[fFdD]?|59\.94[fFdD]?)(?![\w.])[^;{{}}]{{0,80}}?{_RATE_EXPR}"
 )
 WINDOW_REFRESH_ASSIGN = re.compile(
     r"\b(?:preferredDisplayModeId|preferredRefreshRate)\s*(?:[+\-*/%]=|\+\+|--|=(?!=))"
@@ -63,20 +60,13 @@ ANIM_START = re.compile(
     r"(?:alpha|alphaBy|scaleX|scaleY|translationX|translationY|x|y|rotation|setDuration|setStartDelay)"
     r"\s*\([\w.\s+\-*/]*\))*\s*(?:\?\.|\.)\s*)start(\s*\(\s*\))"
 )
-STARTUP_WORDS = {
-    "start", "starting", "launch", "open", "opening", "session", "ready", "readiness",
-    "desktop", "x11", "lorie", "surface", "connect", "connected", "profile", "handoff",
-}
+STARTUP_WORDS = {"start", "starting", "launch", "open", "opening", "session", "ready", "readiness", "desktop", "x11", "lorie", "surface", "connect", "connected", "profile", "handoff"}
 SMALLEST_SW_DP = re.compile(r"\bsmallestScreenWidthDp\b")
-ACTIVE_POINTER_TRACKER = re.compile(r"\bActivePointerTracker\b")
-INPUT_EVENT_SENDER = re.compile(r"\bInputEventSender\b")
-READINESS_GATE = re.compile(r"\bDesktopReadinessGate\b")
-IMPORT_LINE = re.compile(r"(?m)^\s*import\b[^\n]*")
-
+ACTIVE_POINTER_TRACKER, INPUT_EVENT_SENDER = re.compile(r"\bActivePointerTracker\b"), re.compile(r"\bInputEventSender\b")
+READINESS_GATE, IMPORT_LINE = re.compile(r"\bDesktopReadinessGate\b"), re.compile(r"(?m)^\s*import\b[^\n]*")
 
 def _blank(chunk: str) -> str:
     return "".join("\n" if c == "\n" else " " for c in chunk)
-
 
 def lex_source(text: str, suffix: str) -> tuple[str, str]:
     nc, co, n = [], [], len(text)
@@ -159,10 +149,8 @@ def lex_source(text: str, suffix: str) -> tuple[str, str]:
     scan_code(0)
     return "".join(nc), "".join(co)
 
-
 def line_no(text: str, offset: int) -> int:
     return text.count("\n", 0, offset) + 1
-
 
 def balanced_end(text: str, open_idx: int, open_ch: str, close_ch: str) -> int | None:
     depth = 0
@@ -171,7 +159,6 @@ def balanced_end(text: str, open_idx: int, open_ch: str, close_ch: str) -> int |
         if depth == 0:
             return idx + 1
     return None
-
 
 def allowed_refresh_assigns(code_only: str) -> set[int]:
     allowed: set[int] = set()
@@ -197,17 +184,13 @@ def allowed_refresh_assigns(code_only: str) -> set[int]:
                     )
     return allowed
 
-
 def _ident_words(text: str) -> list[str]:
     return [w.lower() for w in re.findall(r"[A-Z]+(?=[A-Z][a-z]|\b)|[A-Z]?[a-z0-9]+", text)]
 
-
 def _is_cosmetic_ident(ident: str) -> bool:
     words = _ident_words(ident)
-    pairs = set(zip(words, words[1:]))
     cosmetic_pairs = {("loading", "message"), ("loading", "estimate"), ("mouse", "down"), ("log", "flush"), ("flush", "log")}
-    return bool(COSMETIC_WORDS.intersection(words) or cosmetic_pairs.intersection(pairs))
-
+    return bool(COSMETIC_WORDS.intersection(words) or cosmetic_pairs.intersection(set(zip(words, words[1:]))))
 
 def _decl_bodies(code_only: str, name: str) -> list[str]:
     if re.search(rf"\b{re.escape(name)}\s*:(?!=)|\bRunnable\s+{re.escape(name)}\s*[,)]", code_only):
@@ -234,56 +217,93 @@ def _decl_bodies(code_only: str, name: str) -> list[str]:
     return bodies
 
 
+def _norm_delay(expr: str) -> str:
+    s, changed = expr.strip(), True
+    while changed:
+        changed = False
+        if s.startswith("(") and balanced_end(s, 0, "(", ")") == len(s):
+            s, changed = s[1:-1].strip(), True
+        if m := re.match(r"^\(\s*(?:long|int)\s*\)\s*(.+)$", s):
+            s, changed = m.group(1).strip(), True
+        if m := re.match(r"^(.+?)\s*\.\s*to(?:Long|Int)\s*\(\s*\)$", s):
+            s, changed = m.group(1).strip(), True
+    return s
+
+
+def _trim_rparen(s: str) -> str:
+    depth = 0
+    for idx, ch in enumerate(s):
+        depth += (ch == "(") - (ch == ")")
+        if depth < 0:
+            return s[:idx]
+    return s
+
+
 def find_250ms_post_delayed(code_only: str) -> list[int]:
     hits: list[int] = []
-    delay_re = re.compile(r"(?:[A-Za-z_]\w*\s*=\s*)?250(?:_?[lL])?")
+    lit_250 = re.compile(r"(?i)250(?:_?l)?|0x0*fal?")
+    qual_ident = re.compile(r"[A-Za-z_]\w*(?:\s*\.\s*[A-Za-z_]\w*)*")
+    decls = [
+        (m.group(1), _norm_delay(_trim_rparen(m.group(2))))
+        for pat in (
+            r"\b(?:val|var)\s+([A-Za-z_]\w*)(?:\s*:\s*[\w?]+)?(?:\s+get\s*\(\s*\))?\s*=(?!=)\s*([^\n;,}]+)",
+            r"\b([A-Za-z_]\w*)\s*:\s*(?:Long|Int)\s*=(?!=)\s*([^\n;,}]+)",
+        )
+        for m in re.finditer(pat, code_only)
+    ]
+    for jm in re.finditer(r"\b(?:int|long|Integer|Long)\s+([^;{}\n]+)", code_only):
+        for part in jm.group(1).split(","):
+            if dm := re.match(r"\s*([A-Za-z_]\w*)\s*=(?!=)\s*(.+)", part):
+                decls.append((dm.group(1), _norm_delay(_trim_rparen(dm.group(2)))))
+    const_250 = {name for name, rhs in decls if lit_250.fullmatch(rhs)}
+    for _ in range(4):
+        const_250.update(name for name, rhs in decls if qual_ident.fullmatch(rhs) and rhs.split(".")[-1].strip() in const_250)
+    for fm in re.finditer(r"\bfor\s*\(", code_only):
+        fend = balanced_end(code_only, fm.end() - 1, "(", ")")
+        hdr = code_only[fm.end() : fend - 1] if fend else ""
+        if (
+            hm := re.match(r"\s*(?:final\s+)?(?:(?:int|long|Integer|Long|var|val)\s+)?([A-Za-z_]\w*)(?:\s*:\s*[\w?]+)?\s*(?::|\bin\b)([\s\S]*)", hdr)
+        ) and any(
+            not m.group(1)
+            for m in re.finditer(r"([+\-*/]\s*)?(?<![.\w])(?:250(?:_?[lL])?|0[xX]0*[fF][aA][lL]?)(?![.\w]|[ \t]*[+\-*/])", hm.group(2))
+        ):
+            const_250.add(hm.group(1))
     ident_re = re.compile(r"^(?:[A-Za-z_]\w*\s*=\s*)?(?:::|this::)?([A-Za-z_]\w*)$")
+
+    def is_250_arg(part: str) -> bool:
+        rhs = _norm_delay(re.sub(r"^[A-Za-z_]\w*\s*=\s*", "", part))
+        return bool(lit_250.fullmatch(rhs) or (qual_ident.fullmatch(rhs) and rhs.split(".")[-1].strip() in const_250))
+
     for match in re.finditer(r"\bpostDelayed\s*\(", code_only):
-        idx, paren, brace, args = match.end(), 1, 0, [[]]
-        while idx < len(code_only) and paren > 0:
-            ch = code_only[idx]
-            if ch == "(":
-                paren += 1
-                args[-1].append(ch)
-            elif ch == ")":
-                paren -= 1
-                if paren > 0:
-                    args[-1].append(ch)
-            elif ch in "{}":
-                brace = max(0, brace + (1 if ch == "{" else -1))
-                args[-1].append(ch)
-            elif ch == "," and paren == 1 and brace == 0:
-                args.append([])
-            else:
-                args[-1].append(ch)
-            idx += 1
-        rest = code_only[idx:]
+        end = balanced_end(code_only, match.end() - 1, "(", ")")
+        if end is None:
+            continue
+        args, paren, brace = [[]], 0, 0
+        for ch in code_only[match.end() : end - 1]:
+            paren += (ch == "(") - (ch == ")")
+            brace = max(0, brace + (ch == "{") - (ch == "}"))
+            args.append([]) if ch == "," and paren == 0 and brace == 0 else args[-1].append(ch)
+        rest = code_only[end:]
         ws = len(rest) - len(rest.lstrip())
-        trail_end = balanced_end(code_only, idx + ws, "{", "}") if rest.startswith("{", ws) else None
+        trail_end = balanced_end(code_only, end + ws, "{", "}") if rest.startswith("{", ws) else None
         recv_m = re.search(r"([A-Za-z_]\w*)\s*(?:\?\.|\.)\s*$", code_only[: match.start()])
         recv = recv_m.group(1) if recv_m else ""
-        arg_texts = ["".join(part).strip() for part in args if "".join(part).strip()]
-        cb_args = [
-            *[p for p in arg_texts if not delay_re.fullmatch(p)],
-            *([code_only[idx + ws : trail_end]] if trail_end else []),
-        ]
+        arg_texts = ["".join(p).strip() for p in args if "".join(p).strip()]
+        cb_args = [*[p for p in arg_texts if not is_250_arg(p)], *([code_only[end + ws : trail_end]] if trail_end else [])]
         cb_ok = bool(cb_args) and all((p.startswith("{") and p.endswith("}")) or ident_re.match(p) for p in cb_args)
         cb_idents = [m.group(1) for p in cb_args if (m := ident_re.match(p))]
         resolved = [_decl_bodies(code_only, name) for name in cb_idents]
-        chunks = [*cb_args, *(b for group in resolved for b in group)]
-        seen = set(cb_idents)
+        chunks, seen = [*cb_args, *(b for g in resolved for b in g)], set(cb_idents)
         for _ in range(4):
-            callees = {m.group(1) for chunk in chunks for m in re.finditer(r"(?:::|\b)([A-Za-z_]\w*)\s*(?:\(|(?![\w.(]))", chunk)} - seen
+            callees = {m.group(1) for c in chunks for m in re.finditer(r"(?:::|\b)([A-Za-z_]\w*)\s*(?:\(|(?![\w.(]))", c)} - seen
             seen.update(callees)
             chunks.extend(b for name in callees for b in _decl_bodies(code_only, name))
         inspected = ANIM_START.sub(r"\1\2", " ".join(chunks))
         is_cosmetic = (
-            cb_ok
-            and all(resolved)
-            and (_is_cosmetic_ident(recv) or any(_is_cosmetic_ident(c) for c in cb_idents))
+            cb_ok and all(resolved) and (_is_cosmetic_ident(recv) or any(_is_cosmetic_ident(c) for c in cb_idents))
             and not STARTUP_WORDS.intersection(_ident_words(inspected))
         )
-        if paren == 0 and any(delay_re.fullmatch(p) for p in arg_texts) and not is_cosmetic:
+        if any(is_250_arg(p) for p in arg_texts) and not is_cosmetic:
             hits.append(match.start())
     return hits
 
@@ -302,6 +322,7 @@ def main() -> int:
         for m in pattern.finditer(src):
             violations.append(f"{rel}:{line_no(src, m.start())}: {category} ({m.group(0).strip()})")
 
+    startup_prefixes = (f"{KOTLIN_ROOT}/display/", f"{KOTLIN_ROOT}/view/", f"{KOTLIN_ROOT}/x11/", f"{KOTLIN_ROOT}/service/", f"{TERMUX_X11}/")
     for rel, (no_comments, code_only) in lexed.items():
         if rel.endswith("/DisplayEnvironmentPolicy.kt"):
             violations.append(f"{rel}:1: display-local branching leakage (DisplayEnvironmentPolicy.kt)")
@@ -314,8 +335,7 @@ def main() -> int:
             masked = list(code_only)
             for allow in MAIN_DEVICE_INFO_ALLOW.finditer(no_comments):
                 for idx in range(allow.start(), allow.end()):
-                    if masked[idx] != "\n":
-                        masked[idx] = " "
+                    masked[idx] = "\n" if masked[idx] == "\n" else " "
             add(rel, "".join(masked), BUILD_IDENTITY, "oem identity leakage")
         elif rel not in {QUIRK_CATALOG, PLACEMENT_SELECTOR}:
             add(rel, code_only, BUILD_IDENTITY, "oem identity leakage")
@@ -330,9 +350,7 @@ def main() -> int:
             add(rel, code_only, PROFILE_POLICY_CALL, "misplaced input/placement policy")
         if rel.startswith(f"{TERMUX_X11}/input/"):
             add(rel, code_only, FIXED_POINTER, "fixed pointer array")
-        if rel == MAIN_ACTIVITY or rel.startswith(
-            (f"{KOTLIN_ROOT}/display/", f"{KOTLIN_ROOT}/view/", f"{KOTLIN_ROOT}/x11/", f"{KOTLIN_ROOT}/service/", f"{TERMUX_X11}/")
-        ):
+        if rel == MAIN_ACTIVITY or rel.startswith(startup_prefixes):
             for offset in find_250ms_post_delayed(code_only):
                 violations.append(f"{rel}:{line_no(code_only, offset)}: 250 ms startup delay (postDelayed 250)")
         if rel != REFRESH_POLICY:
@@ -340,28 +358,18 @@ def main() -> int:
             allowed = allowed_refresh_assigns(code_only) if rel == DESKTOP_ACTIVITY else set()
             for m in WINDOW_REFRESH_ASSIGN.finditer(code_only):
                 if m.start() not in allowed:
-                    violations.append(
-                        f"{rel}:{line_no(code_only, m.start())}: direct refresh-mode selection ({m.group(0).strip()})"
-                    )
+                    violations.append(f"{rel}:{line_no(code_only, m.start())}: direct refresh-mode selection ({m.group(0).strip()})")
         add(rel, code_only, SMALLEST_SW_DP, "smallestScreenWidthDp profile classification")
 
-    sender_tracked = INPUT_SENDER in lexed and bool(
-        ACTIVE_POINTER_TRACKER.search(IMPORT_LINE.sub("", lexed[INPUT_SENDER][1]))
-    )
+    sender_tracked = INPUT_SENDER in lexed and bool(ACTIVE_POINTER_TRACKER.search(IMPORT_LINE.sub("", lexed[INPUT_SENDER][1])))
     if INPUT_SENDER in lexed and not sender_tracked:
         violations.append(f"{INPUT_SENDER}:1: fixed pointer array (missing ActivePointerTracker)")
     if TOUCH_HANDLER in lexed:
         touch_body = IMPORT_LINE.sub("", lexed[TOUCH_HANDLER][1])
-        if not (
-            ACTIVE_POINTER_TRACKER.search(touch_body)
-            or (sender_tracked and INPUT_EVENT_SENDER.search(touch_body))
-        ):
+        if not (ACTIVE_POINTER_TRACKER.search(touch_body) or (sender_tracked and INPUT_EVENT_SENDER.search(touch_body))):
             violations.append(f"{TOUCH_HANDLER}:1: fixed pointer array (missing ActivePointerTracker)")
-    if DESKTOP_ACTIVITY in lexed and not READINESS_GATE.search(
-        IMPORT_LINE.sub("", lexed[DESKTOP_ACTIVITY][1])
-    ):
+    if DESKTOP_ACTIVITY in lexed and not READINESS_GATE.search(IMPORT_LINE.sub("", lexed[DESKTOP_ACTIVITY][1])):
         violations.append(f"{DESKTOP_ACTIVITY}:1: 250 ms startup delay (missing DesktopReadinessGate)")
-
     if violations:
         print("Device compatibility architecture violations:")
         for violation in violations:

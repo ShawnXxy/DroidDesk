@@ -103,10 +103,16 @@ class DeviceCompatibilityArchitectureGuardTest(unittest.TestCase):
                 ),
                 f"{ANDROID_KOTLIN}/view/DesktopActivity.kt": (
                     "class DesktopActivity {\n"
+                    "    companion object { private const val FADE_DELAY_MS = 250L; private const val TIMEOUT_MS = 250L * 4 }\n"
                     "    private val gate = DesktopReadinessGate {}\n"
                     "    private fun fadeCollapsedControl() = hideOverlay()\n"
                     "    fun launchSession() {}\n"
+                    "    val refreshRateLimit = 60\n"
+                    "    fun timeoutOk(delayMillis: Long) = handler.postDelayed(timeoutTask, delayMillis)\n"
+                    "    fun namedFade() = collapsedFadeHandler.postDelayed(::fadeCollapsedControl, delayMillis = 250L)\n"
+                    "    fun timeoutConst() = handler.postDelayed(timeoutTask, TIMEOUT_MS)\n"
                     "    fun fadeUi() = collapsedFadeHandler.postDelayed(::fadeCollapsedControl, 250)\n"
+                    "    fun fadeConst() = collapsedFadeHandler.postDelayed(::fadeCollapsedControl, FADE_DELAY_MS)\n"
                     "    fun animUi() = collapsedFadeHandler.postDelayed({ bar.animate().alpha(0f).start() }, 250)\n"
                     "    fun modes() = target?.supportedModes?.mapNotNull { it?.toEvidenceOrNull() }\n"
                     "    fun refresh(request: RefreshRequest) {\n"
@@ -122,6 +128,12 @@ class DeviceCompatibilityArchitectureGuardTest(unittest.TestCase):
                 ),
                 f"{TERMUX_X11}/input/TouchInputHandler.java": (
                     "public class TouchInputHandler { private ActivePointerTracker tracker; }\n"
+                ),
+                f"{TERMUX_X11}/LorieView.java": (
+                    "public class LorieView {\n"
+                    "    Object modes(android.view.Display d) { float r = d.getMode().getRefreshRate(); return d.getSupportedModes(); }\n"
+                    "    void non250Loop(android.os.Handler h, Runnable r) { for (long d : new long[] {4 * 250, 1000}) h.postDelayed(r, d); }\n"
+                    "}\n"
                 ),
                 "app/lib/screens/display_settings_screen.dart": (
                     "// smartisan nx888j pq85a02 100_003\n"
@@ -395,6 +407,30 @@ class DeviceCompatibilityArchitectureGuardTest(unittest.TestCase):
             ),
             (
                 f"{ANDROID_KOTLIN}/view/DesktopActivity.kt",
+                "class DesktopActivity { companion object { private const val STARTUP_DELAY_MS = 250L }; val g = DesktopReadinessGate {}; fun s() = handler.postDelayed({ launchSession() }, STARTUP_DELAY_MS) }",
+            ),
+            (
+                f"{TERMUX_X11}/LorieView.java",
+                "class LorieView { private static final long STARTUP_DELAY_MS = 250L; void s(android.os.Handler h, Runnable r) { h.postDelayed(r, STARTUP_DELAY_MS); } }",
+            ),
+            (
+                f"{ANDROID_KOTLIN}/view/DesktopActivity.kt",
+                "class DesktopActivity { companion object { private const val STARTUP_DELAY_MS = 250 }; val g = DesktopReadinessGate {}; fun s() = handler.postDelayed({ launchSession() }, STARTUP_DELAY_MS.toLong()) }",
+            ),
+            (
+                f"{TERMUX_X11}/MainActivity.java",
+                "class MainActivity { void c(android.os.Handler h) { for (long delay : new long[] {250, 500}) h.postDelayed(() -> refresh(), delay); } }",
+            ),
+            (
+                f"{TERMUX_X11}/MainActivity.java",
+                "class MainActivity { void c(android.os.Handler h) { for (Long delay : java.util.List.of(0xFAL, 500L)) h.postDelayed(() -> refresh(), delay); } }",
+            ),
+            (
+                f"{ANDROID_KOTLIN}/view/DesktopActivity.kt",
+                "class DesktopActivity { val g = DesktopReadinessGate {}; fun c() { for (interval in listOf(250L, 500L)) handler.postDelayed({ launchSession() }, interval) } }",
+            ),
+            (
+                f"{ANDROID_KOTLIN}/view/DesktopActivity.kt",
                 "class DesktopActivity { fun onCreate() {} }",
             ),
             (
@@ -460,6 +496,26 @@ class DeviceCompatibilityArchitectureGuardTest(unittest.TestCase):
             (
                 f"{ANDROID_KOTLIN}/MainActivity.kt",
                 "fun pick() { display.supportedModes.forEach { println(it) } }",
+            ),
+            (
+                f"{TERMUX_X11}/LorieView.java",
+                "class LorieView { Object pick(android.view.Display d) { return d.getSupportedModes()[0]; } }",
+            ),
+            (
+                f"{TERMUX_X11}/LorieView.java",
+                "class LorieView { void pick(android.view.Display d) { for (android.view.Display.Mode m : d.getSupportedModes()) {} } }",
+            ),
+            (
+                f"{TERMUX_X11}/LorieView.java",
+                "class LorieView { void pick() { for (android.view.Display.Mode m : getDisplay().getSupportedModes()) {} } }",
+            ),
+            (
+                f"{TERMUX_X11}/LorieView.java",
+                "class LorieView { Object stream() { return java.util.Arrays.stream(getDisplay().getSupportedModes()).findFirst(); } }",
+            ),
+            (
+                f"{TERMUX_X11}/LorieView.java",
+                "class LorieView { boolean is60(android.view.Display.Mode m) { return m.getRefreshRate() == 60f; } }",
             ),
             (
                 f"{ANDROID_KOTLIN}/view/DesktopActivity.kt",
