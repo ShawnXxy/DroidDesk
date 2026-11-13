@@ -245,19 +245,24 @@ class _DisplaySettingsScreenState extends State<DisplaySettingsScreen> {
               child: DropdownButtonFormField<String>(
                 key: const Key('desktop-placement-override'),
                 initialValue: snapshot.placementOverride?.wireValue ?? 'auto',
+                isExpanded: true,
                 decoration: InputDecoration(
                   labelText: 'Placement preference',
+                  helperMaxLines: 3,
                   helperText: snapshot.sessionRunning || state.isRunning
                       ? 'Stop Linux before changing desktop placement mode.'
                       : 'Applies on the next Linux desktop start.',
                 ),
                 items: [
-                  DropdownMenuItem(
+                  const DropdownMenuItem(
                     value: 'auto',
-                    child: const Text('Automatic'),
+                    child: Text('Automatic', overflow: TextOverflow.ellipsis),
                   ),
                   for (final m in DesktopPlacementMode.values)
-                    DropdownMenuItem(value: m.wireValue, child: Text(m.label)),
+                    DropdownMenuItem(
+                      value: m.wireValue,
+                      child: Text(m.label, overflow: TextOverflow.ellipsis),
+                    ),
                 ],
                 onChanged:
                     state.desktopDisplayBusy ||

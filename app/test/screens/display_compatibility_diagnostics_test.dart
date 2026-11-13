@@ -573,4 +573,55 @@ void main() {
       );
     },
   );
+
+  testWidgets(
+    'placement preference dropdown does not overflow on a 360px viewport at 2x text scale',
+    (tester) async {
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      addTearDown(tester.platformDispatcher.clearTextScaleFactorTestValue);
+      tester.view.devicePixelRatio = 1.0;
+      tester.view.physicalSize = const Size(360, 800);
+      tester.platformDispatcher.textScaleFactorTestValue = 2.0;
+
+      native.runtimeStatus = {
+        ...native.runtimeStatus,
+        'running': false,
+        'isRunning': false,
+      };
+      native.snapshot = desktopSnapshotV2(
+        phase: 'stopped',
+        activeId: null,
+        width: null,
+        height: null,
+      );
+      await state.refreshStatus();
+      await state.refreshDesktopDisplays();
+
+      await tester.pumpWidget(
+        ChangeNotifierProvider.value(
+          value: state,
+          child: const MaterialApp(home: DisplaySettingsScreen()),
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.scrollUntilVisible(
+        find.byKey(const Key('desktop-placement-override')),
+        200,
+        scrollable: find.byType(Scrollable).first,
+      );
+      await tester.ensureVisible(
+        find.byKey(const Key('desktop-placement-override')),
+      );
+      await tester.pumpAndSettle();
+      expect(tester.takeException(), isNull);
+
+      await tester.tap(find.byKey(const Key('desktop-placement-override')));
+      await tester.pumpAndSettle();
+      expect(tester.takeException(), isNull);
+      await tester.tap(find.text('Automatic').last);
+      await tester.pumpAndSettle();
+      expect(tester.takeException(), isNull);
+    },
+  );
 }
