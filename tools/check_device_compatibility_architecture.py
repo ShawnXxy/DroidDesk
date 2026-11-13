@@ -64,20 +64,8 @@ ANIM_START = re.compile(
     r"\s*\([\w.\s+\-*/]*\))*\s*(?:\?\.|\.)\s*)start(\s*\(\s*\))"
 )
 STARTUP_WORDS = {
-    "start",
-    "starting",
-    "launch",
-    "session",
-    "ready",
-    "readiness",
-    "desktop",
-    "x11",
-    "lorie",
-    "surface",
-    "connect",
-    "connected",
-    "profile",
-    "handoff",
+    "start", "starting", "launch", "open", "opening", "session", "ready", "readiness",
+    "desktop", "x11", "lorie", "surface", "connect", "connected", "profile", "handoff",
 }
 SMALLEST_SW_DP = re.compile(r"\bsmallestScreenWidthDp\b")
 ACTIVE_POINTER_TRACKER = re.compile(r"\bActivePointerTracker\b")
@@ -217,7 +205,8 @@ def _ident_words(text: str) -> list[str]:
 def _is_cosmetic_ident(ident: str) -> bool:
     words = _ident_words(ident)
     pairs = set(zip(words, words[1:]))
-    return bool(COSMETIC_WORDS.intersection(words) or {("loading", "message"), ("loading", "estimate"), ("mouse", "down")}.intersection(pairs))
+    cosmetic_pairs = {("loading", "message"), ("loading", "estimate"), ("mouse", "down"), ("log", "flush"), ("flush", "log")}
+    return bool(COSMETIC_WORDS.intersection(words) or cosmetic_pairs.intersection(pairs))
 
 
 def _decl_bodies(code_only: str, name: str) -> list[str]:
@@ -341,7 +330,9 @@ def main() -> int:
             add(rel, code_only, PROFILE_POLICY_CALL, "misplaced input/placement policy")
         if rel.startswith(f"{TERMUX_X11}/input/"):
             add(rel, code_only, FIXED_POINTER, "fixed pointer array")
-        if rel.startswith((f"{KOTLIN_ROOT}/display/", f"{KOTLIN_ROOT}/view/", f"{KOTLIN_ROOT}/x11/", f"{TERMUX_X11}/")):
+        if rel == MAIN_ACTIVITY or rel.startswith(
+            (f"{KOTLIN_ROOT}/display/", f"{KOTLIN_ROOT}/view/", f"{KOTLIN_ROOT}/x11/", f"{KOTLIN_ROOT}/service/", f"{TERMUX_X11}/")
+        ):
             for offset in find_250ms_post_delayed(code_only):
                 violations.append(f"{rel}:{line_no(code_only, offset)}: 250 ms startup delay (postDelayed 250)")
         if rel != REFRESH_POLICY:

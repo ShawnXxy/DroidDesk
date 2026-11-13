@@ -73,7 +73,9 @@ class DeviceCompatibilityArchitectureGuardTest(unittest.TestCase):
                     'val digest = "99c0b25ca100003f"\n'
                     'val label = "mode: ${docsUrl.ifEmpty { "smallestScreenWidthDp" }}"\n'
                     'val raw = """hello"""" // smallestScreenWidthDp\n'
-                    'fun flushLogs() = mainHandler.postDelayed(flushRunnable, 250)\n'
+                    'private val logFlushRunnable = Runnable { flushLogBuffer() }\n'
+                    'private fun flushLogBuffer() { logBuffer.setLength(0) }\n'
+                    'fun flushLogs() = mainHandler.postDelayed(logFlushRunnable, 250)\n'
                     'fun getDeviceInfo() = mapOf("model" to Build.MODEL, "brand" to Build.BRAND)\n'
                 ),
                 f"{ANDROID_KOTLIN}/display/DisplayRepository.kt": (
@@ -378,6 +380,18 @@ class DeviceCompatibilityArchitectureGuardTest(unittest.TestCase):
             (
                 f"{ANDROID_KOTLIN}/view/DesktopActivity.kt",
                 "class DesktopActivity { val g = DesktopReadinessGate {}; val fadeTask = Runnable { configure() }; fun configure() { launchSession() }; fun f() = collapsedFadeHandler.postDelayed(fadeTask, 250) }",
+            ),
+            (
+                f"{ANDROID_KOTLIN}/MainActivity.kt",
+                "fun openLater() = mainHandler.postDelayed({ requestResolvedDesktopOpen(target) }, 250)",
+            ),
+            (
+                f"{ANDROID_KOTLIN}/service/DroidDeskService.kt",
+                "fun startLater() = handler.postDelayed({ startDesktop() }, 250)",
+            ),
+            (
+                f"{ANDROID_KOTLIN}/service/DroidDeskService.kt",
+                "fun waitStart() = handler.postDelayed(runnable, 250)",
             ),
             (
                 f"{ANDROID_KOTLIN}/view/DesktopActivity.kt",
