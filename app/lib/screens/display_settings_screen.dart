@@ -91,7 +91,11 @@ class _DisplaySettingsScreenState extends State<DisplaySettingsScreen> {
         return;
       }
       setState(() {
-        _settings = settings;
+        _settings = settings.copyWith(
+          settingsScope: settings.hasStableIdentity
+              ? DesktopDisplaySettingsScope.thisDisplay
+              : DesktopDisplaySettingsScope.classDefault,
+        );
         _loadingSettings = false;
       });
     } on PlatformException catch (error) {

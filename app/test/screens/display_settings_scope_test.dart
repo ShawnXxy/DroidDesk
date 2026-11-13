@@ -298,4 +298,68 @@ void main() {
       );
     },
   );
+
+  testWidgets(
+    'identified display inheriting classDefault initializes editable scope to This display',
+    (tester) async {
+      native.settings['monitor-2'] = {
+        'displayKey': 'monitor-2',
+        'presentationClass': 'externalPointer',
+        'stableDisplayKey': 'external:3:DEL|4:4112|11:Dell U2723Q',
+        'settingsScope': 'classDefault',
+        'renderPolicy': 'native',
+        'uiScalePercent': 150,
+        'inputMode': 1,
+        'inputRoute': 'automatic',
+      };
+
+      await tester.pumpWidget(
+        ChangeNotifierProvider.value(
+          value: state,
+          child: const MaterialApp(home: DisplaySettingsScreen()),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.scrollUntilVisible(
+        find.byKey(const Key('desktop-settings-scope-hint')),
+        250,
+        scrollable: find.byType(Scrollable).first,
+      );
+      final scopeDropdown = tester
+          .widget<DropdownButtonFormField<DesktopDisplaySettingsScope>>(
+            find.byKey(const Key('desktop-settings-scope')),
+          );
+      expect(
+        scopeDropdown.initialValue,
+        DesktopDisplaySettingsScope.thisDisplay,
+      );
+
+      await tester.tap(
+        find.byKey(const ValueKey('desktop-render-monitor-2-nativeResolution')),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Cap at 1440p').last);
+      await tester.pumpAndSettle();
+
+      await tester.scrollUntilVisible(
+        find.byKey(const Key('desktop-save-settings')),
+        300,
+        scrollable: find.byType(Scrollable).first,
+      );
+      await tester.tap(find.byKey(const Key('desktop-save-settings')));
+      await tester.pumpAndSettle();
+
+      expect(native.settings['monitor-2'], {
+        'displayKey': 'monitor-2',
+        'presentationClass': 'externalPointer',
+        'stableDisplayKey': 'external:3:DEL|4:4112|11:Dell U2723Q',
+        'settingsScope': 'thisDisplay',
+        'renderPolicy': 'cap1440',
+        'uiScalePercent': 150,
+        'inputMode': 1,
+        'inputRoute': 'automatic',
+      });
+    },
+  );
 }
