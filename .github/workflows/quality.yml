@@ -67,3 +67,8 @@ jobs:
         run: |
           python -m unittest tools.test_check_package_store_architecture -v
           python tools/check_package_store_architecture.py .
+
+      - name: Enforce device-compatibility architecture
+        run: |
+          python -m unittest tools.test_check_device_compatibility_architecture -v
+          python tools/check_device_compatibility_architecture.py .
