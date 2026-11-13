@@ -144,6 +144,7 @@ class DeviceCompatibilityArchitectureGuardTest(unittest.TestCase):
                     "    val fallbackProfile = ProfilePolicy.phoneDefaultProfile()\n"
                     "    val defaultSettings = ProfilePolicy.defaults(ProfileKind.PHONE)\n"
                     "    fun scopeSafe(other: OtherHelper) = with(ProfilePolicy) { val resolve = 1; other.classify(); other::classify; defaults(ProfileKind.PHONE) }\n"
+                    "    fun shadowParamSafe(ProfilePolicy: OtherHelper) { val x = ProfilePolicy; x.classify(); listOf(DisplayProfilePolicy).forEach { ProfilePolicy: DisplayProfilePolicy -> ProfilePolicy.defaults(ProfileKind.PHONE) } }\n"
                                         "    private val fadeLambda: () -> Unit = { hideOverlay() }\n"
                     "    private val gate = DesktopReadinessGate {}\n"
                     "    private fun hideOverlay() {}\n"
@@ -357,6 +358,26 @@ class DeviceCompatibilityArchitectureGuardTest(unittest.TestCase):
             (
                 f"{ANDROID_KOTLIN}/MainActivity.kt",
                 "val a = DisplayProfilePolicy\nval b = a\nval c = b\nval d = c.classify(ctx)",
+            ),
+            (
+                f"{ANDROID_KOTLIN}/MainActivity.kt",
+                "val policy = DesktopInputPolicy\nfun misplaced(policy: Int) = DesktopInputPolicy::resolve",
+            ),
+            (
+                f"{ANDROID_KOTLIN}/view/DesktopActivity.kt",
+                "import com.orailnoor.droiddesk.display.DisplayProfilePolicy as ProfilePolicy\nclass DesktopActivity { val g = DesktopReadinessGate {}; val policy = ProfilePolicy; fun misplaced(policy: Int) = ProfilePolicy::classify }",
+            ),
+            (
+                f"{ANDROID_KOTLIN}/view/DesktopActivity.kt",
+                "import com.orailnoor.droiddesk.display.DisplayProfilePolicy as ProfilePolicy\nclass DesktopActivity { val g = DesktopReadinessGate {}; fun misplaced(ProfilePolicy: Int) = DisplayProfilePolicy.classify(ctx) }",
+            ),
+            (
+                f"{ANDROID_KOTLIN}/MainActivity.kt",
+                "fun beforeShadow() { DesktopInputPolicy.resolve(ctx); val DesktopInputPolicy = 1 }",
+            ),
+            (
+                f"{ANDROID_KOTLIN}/MainActivity.kt",
+                "fun typedLocal() { val p: DesktopInputPolicy = obtain(); p.resolve(ctx) }",
             ),
         ):
             with self.subTest(relative=relative, snippet=snippet):
