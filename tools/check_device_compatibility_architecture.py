@@ -53,7 +53,32 @@ REFRESH_SELECT = re.compile(
     r"|\brefreshRate\b[^;{}]{0,80}?(?<![\w.])(?:60(?:\.0+)?[fFdD]?|59\.94[fFdD]?)(?![\w.])"
     r"|(?<![\w.])(?:60(?:\.0+)?[fFdD]?|59\.94[fFdD]?)(?![\w.])[^;{}]{0,80}?\brefreshRate\b"
 )
-WINDOW_REFRESH_ASSIGN = re.compile(r"\b(preferredDisplayModeId|preferredRefreshRate)\s*=(?!=)")
+WINDOW_REFRESH_ASSIGN = re.compile(
+    r"\b(?:preferredDisplayModeId|preferredRefreshRate)\s*(?:[+\-*/%]=|\+\+|--|=(?!=))"
+    r"|(?<![\w)\]])(?:\+\+|--)[ \t]*(?:[\w?]+[ \t]*\.[ \t]*)*(?:preferredDisplayModeId|preferredRefreshRate)\b"
+)
+COSMETIC_WORDS = {"fade", "spinner", "toast", "tooltip", "blink", "ripple", "ime"}
+ANIM_START = re.compile(
+    r"((?:\?\.|\.)\s*animate\s*\(\s*\)(?:\s*(?:\?\.|\.)\s*"
+    r"(?:alpha|alphaBy|scaleX|scaleY|translationX|translationY|x|y|rotation|setDuration|setStartDelay)"
+    r"\s*\([\w.\s+\-*/]*\))*\s*(?:\?\.|\.)\s*)start(\s*\(\s*\))"
+)
+STARTUP_WORDS = {
+    "start",
+    "starting",
+    "launch",
+    "session",
+    "ready",
+    "readiness",
+    "desktop",
+    "x11",
+    "lorie",
+    "surface",
+    "connect",
+    "connected",
+    "profile",
+    "handoff",
+}
 SMALLEST_SW_DP = re.compile(r"\bsmallestScreenWidthDp\b")
 ACTIVE_POINTER_TRACKER = re.compile(r"\bActivePointerTracker\b")
 INPUT_EVENT_SENDER = re.compile(r"\bInputEventSender\b")
@@ -172,17 +197,58 @@ def allowed_refresh_assigns(code_only: str) -> set[int]:
         body_end = balanced_end(code_only, brace_idx, "{", "}") if brace_idx is not None else None
         body = code_only[brace_idx + 1 : body_end - 1] if brace_idx is not None and body_end is not None else ""
         if header := re.match(r"\s*([A-Za-z_]\w*)\s*,\s*([A-Za-z_]\w*)\s*->", body):
+            rhs_end = (
+                r"(?=[ \t]*(?:[;}]|$|\n\s*(?!\s|\.|\?\.|!!|\?:|[+\-*/%<>=&|\[\(]"
+                r"|(?:as|is|in|and|or|xor|shl|shr|ushr|until|downTo|step|coerce\w*)\b)))"
+            )
             for prop, param in (("preferredRefreshRate", header.group(1)), ("preferredDisplayModeId", header.group(2))):
                 if param != "_":
                     allowed.update(
                         brace_idx + 1 + a.start()
-                        for a in re.finditer(rf"\b{prop}\s*=\s*{re.escape(param)}\b(?=\s*(?:[\n;}}]|$))", body)
+                        for a in re.finditer(rf"\b{prop}\s*=(?!=)\s*{re.escape(param)}\b{rhs_end}", body)
                     )
     return allowed
 
 
+def _ident_words(text: str) -> list[str]:
+    return [w.lower() for w in re.findall(r"[A-Z]+(?=[A-Z][a-z]|\b)|[A-Z]?[a-z0-9]+", text)]
+
+
+def _is_cosmetic_ident(ident: str) -> bool:
+    words = _ident_words(ident)
+    pairs = set(zip(words, words[1:]))
+    return bool(COSMETIC_WORDS.intersection(words) or {("loading", "message"), ("loading", "estimate"), ("mouse", "down")}.intersection(pairs))
+
+
+def _decl_bodies(code_only: str, name: str) -> list[str]:
+    if re.search(rf"\b{re.escape(name)}\s*:(?!=)|\bRunnable\s+{re.escape(name)}\s*[,)]", code_only):
+        return []
+    bodies: list[str] = []
+    decl_re = re.compile(
+        rf"\b(?:val|var|fun|Runnable)\s+{re.escape(name)}\b"
+        r"(?:[ \t]*\([^)]*\))?(?:[ \t]*:[ \t]*[\w<>?., \t]+)?([ \t]*=\s*(?:Runnable\s*)?)?[ \t]*"
+    )
+    next_decl = re.compile(r"[ \t]*\n\s*(?:private\b|internal\b|public\b|protected\b|override\b|val\b|var\b|fun\b|\}|\Z)")
+    for m in decl_re.finditer(code_only):
+        tail = m.end()
+        if tail < len(code_only) and code_only[tail] == "{":
+            end = balanced_end(code_only, tail, "{", "}")
+            if end is None:
+                return []
+            bodies.append(code_only[tail:end])
+        elif m.group(1):
+            nl = code_only.find("\n", tail)
+            line_body = code_only[tail : len(code_only) if nl == -1 else nl]
+            if "{" in line_body or (nl != -1 and not next_decl.match(code_only, nl)):
+                return []
+            bodies.append(line_body)
+    return bodies
+
+
 def find_250ms_post_delayed(code_only: str) -> list[int]:
     hits: list[int] = []
+    delay_re = re.compile(r"(?:[A-Za-z_]\w*\s*=\s*)?250(?:_?[lL])?")
+    ident_re = re.compile(r"^(?:[A-Za-z_]\w*\s*=\s*)?(?:::|this::)?([A-Za-z_]\w*)$")
     for match in re.finditer(r"\bpostDelayed\s*\(", code_only):
         idx, paren, brace, args = match.end(), 1, 0, [[]]
         while idx < len(code_only) and paren > 0:
@@ -202,10 +268,33 @@ def find_250ms_post_delayed(code_only: str) -> list[int]:
             else:
                 args[-1].append(ch)
             idx += 1
-        if paren == 0 and any(
-            re.fullmatch(r"(?:[A-Za-z_]\w*\s*=\s*)?250(?:_?[lL])?", "".join(part).strip())
-            for part in args
-        ):
+        rest = code_only[idx:]
+        ws = len(rest) - len(rest.lstrip())
+        trail_end = balanced_end(code_only, idx + ws, "{", "}") if rest.startswith("{", ws) else None
+        recv_m = re.search(r"([A-Za-z_]\w*)\s*(?:\?\.|\.)\s*$", code_only[: match.start()])
+        recv = recv_m.group(1) if recv_m else ""
+        arg_texts = ["".join(part).strip() for part in args if "".join(part).strip()]
+        cb_args = [
+            *[p for p in arg_texts if not delay_re.fullmatch(p)],
+            *([code_only[idx + ws : trail_end]] if trail_end else []),
+        ]
+        cb_ok = bool(cb_args) and all((p.startswith("{") and p.endswith("}")) or ident_re.match(p) for p in cb_args)
+        cb_idents = [m.group(1) for p in cb_args if (m := ident_re.match(p))]
+        resolved = [_decl_bodies(code_only, name) for name in cb_idents]
+        chunks = [*cb_args, *(b for group in resolved for b in group)]
+        seen = set(cb_idents)
+        for _ in range(4):
+            callees = {m.group(1) for chunk in chunks for m in re.finditer(r"(?:::|\b)([A-Za-z_]\w*)\s*(?:\(|(?![\w.(]))", chunk)} - seen
+            seen.update(callees)
+            chunks.extend(b for name in callees for b in _decl_bodies(code_only, name))
+        inspected = ANIM_START.sub(r"\1\2", " ".join(chunks))
+        is_cosmetic = (
+            cb_ok
+            and all(resolved)
+            and (_is_cosmetic_ident(recv) or any(_is_cosmetic_ident(c) for c in cb_idents))
+            and not STARTUP_WORDS.intersection(_ident_words(inspected))
+        )
+        if paren == 0 and any(delay_re.fullmatch(p) for p in arg_texts) and not is_cosmetic:
             hits.append(match.start())
     return hits
 

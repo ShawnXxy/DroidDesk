@@ -102,13 +102,18 @@ class DeviceCompatibilityArchitectureGuardTest(unittest.TestCase):
                 f"{ANDROID_KOTLIN}/view/DesktopActivity.kt": (
                     "class DesktopActivity {\n"
                     "    private val gate = DesktopReadinessGate {}\n"
+                    "    private fun fadeCollapsedControl() = hideOverlay()\n"
+                    "    fun launchSession() {}\n"
+                    "    fun fadeUi() = collapsedFadeHandler.postDelayed(::fadeCollapsedControl, 250)\n"
+                    "    fun animUi() = collapsedFadeHandler.postDelayed({ bar.animate().alpha(0f).start() }, 250)\n"
                     "    fun modes() = target?.supportedModes?.mapNotNull { it?.toEvidenceOrNull() }\n"
                     "    fun refresh(request: RefreshRequest) {\n"
+                    "        var calls = 0\n"
                     "        applyRefreshRequest(request) { rate, modeId ->\n"
-                    "            window.attributes = window.attributes.apply {\n"
-                    "                preferredRefreshRate = rate\n"
-                    "                preferredDisplayModeId = modeId\n"
-                    "            }\n"
+                    "            calls++\n"
+                    "            preferredRefreshRate = rate\n"
+                    "            window.attributes.preferredDisplayModeId = modeId\n"
+                    "            logApplied()\n"
                     "        }\n"
                     "    }\n"
                     "}\n"
@@ -324,6 +329,58 @@ class DeviceCompatibilityArchitectureGuardTest(unittest.TestCase):
             ),
             (
                 f"{ANDROID_KOTLIN}/view/DesktopActivity.kt",
+                "DesktopReadinessGate {}; fun sneakStart() = collapsedFadeHandler.postDelayed({ launchSession() }, 250)",
+            ),
+            (
+                f"{ANDROID_KOTLIN}/view/DesktopActivity.kt",
+                "DesktopReadinessGate {}; fun t() = timeoutHandler.postDelayed(runnable, 250)",
+            ),
+            (
+                f"{ANDROID_KOTLIN}/view/DesktopActivity.kt",
+                "DesktopReadinessGate {}; fun fadeUi() = handler.postDelayed(runnable, 250)",
+            ),
+            (
+                f"{ANDROID_KOTLIN}/view/DesktopActivity.kt",
+                "class DesktopActivity { val g = DesktopReadinessGate {}; val fadeTask = Runnable { launchSession() }; fun f() = collapsedFadeHandler.postDelayed(fadeTask, 250) }",
+            ),
+            (
+                f"{ANDROID_KOTLIN}/view/DesktopActivity.kt",
+                "class DesktopActivity {\n    val g = DesktopReadinessGate {}\n    val fadeTask =\n        Runnable { launchSession() }\n    fun f() = collapsedFadeHandler.postDelayed(fadeTask, 250)\n}",
+            ),
+            (
+                f"{ANDROID_KOTLIN}/view/DesktopActivity.kt",
+                "class DesktopActivity { val g = DesktopReadinessGate {}; fun f() = collapsedFadeHandler.postDelayed(unresolvedFadeTask, 250) }",
+            ),
+            (
+                f"{ANDROID_KOTLIN}/view/DesktopActivity.kt",
+                "class DesktopActivity { val g = DesktopReadinessGate {}; fun f() = collapsedFadeHandler.postDelayed({ server.start() }, 250) }",
+            ),
+            (
+                f"{ANDROID_KOTLIN}/view/DesktopActivity.kt",
+                "class DesktopActivity { val g = DesktopReadinessGate {}; val t = Runnable { launchSession() }; fun f() = collapsedFadeHandler.postDelayed((t), 250) }",
+            ),
+            (
+                f"{ANDROID_KOTLIN}/view/DesktopActivity.kt",
+                "class DesktopActivity { val g = DesktopReadinessGate {}; fun f() = collapsedFadeHandler.postDelayed({ revealDesktop(true) }, 250) }",
+            ),
+            (
+                f"{ANDROID_KOTLIN}/view/DesktopActivity.kt",
+                "class DesktopActivity { val g = DesktopReadinessGate {}; fun f() = collapsedFadeHandler.postDelayed({ bar.animate().withEndAction(::launchSession).start() }, 250) }",
+            ),
+            (
+                f"{ANDROID_KOTLIN}/view/DesktopActivity.kt",
+                "class DesktopActivity {\n    val g = DesktopReadinessGate {}\n    fun fadeTask() = hideOverlay().also {\n        launchSession()\n    }\n    fun f() = collapsedFadeHandler.postDelayed(::fadeTask, 250)\n}",
+            ),
+            (
+                f"{ANDROID_KOTLIN}/view/DesktopActivity.kt",
+                "class DesktopActivity { val g = DesktopReadinessGate {}; fun f() = collapsedFadeHandler.postDelayed({ bar.animate().setDuration(server.start()) }, 250) }",
+            ),
+            (
+                f"{ANDROID_KOTLIN}/view/DesktopActivity.kt",
+                "class DesktopActivity { val g = DesktopReadinessGate {}; val fadeTask = Runnable { configure() }; fun configure() { launchSession() }; fun f() = collapsedFadeHandler.postDelayed(fadeTask, 250) }",
+            ),
+            (
+                f"{ANDROID_KOTLIN}/view/DesktopActivity.kt",
                 "class DesktopActivity { fun onCreate() {} }",
             ),
             (
@@ -393,6 +450,32 @@ class DeviceCompatibilityArchitectureGuardTest(unittest.TestCase):
             (
                 f"{ANDROID_KOTLIN}/view/DesktopActivity.kt",
                 "DesktopReadinessGate {}; fun shift(req: RefreshRequest) { applyRefreshRequest(req) { rate, modeId -> preferredRefreshRate = rate; preferredDisplayModeId = modeId + 1 } }",
+            ),
+            (
+                f"{ANDROID_KOTLIN}/view/DesktopActivity.kt",
+                "DesktopReadinessGate {}; fun compound() { window.attributes.preferredDisplayModeId += 1 }",
+            ),
+            (
+                f"{ANDROID_KOTLIN}/view/DesktopActivity.kt",
+                "DesktopReadinessGate {}; fun scaleRate() { window.attributes.preferredRefreshRate *= 2f }",
+            ),
+            (
+                f"{ANDROID_KOTLIN}/view/DesktopActivity.kt",
+                "DesktopReadinessGate {}; fun incMode() { window.attributes.preferredDisplayModeId++ }",
+            ),
+            (
+                f"{ANDROID_KOTLIN}/view/DesktopActivity.kt",
+                "class DesktopActivity {\n"
+                "    val gate = DesktopReadinessGate {}\n"
+                "    fun multilineBypass(req: RefreshRequest) {\n"
+                "        applyRefreshRequest(req) { rate, modeId ->\n"
+                "            preferredRefreshRate = rate\n"
+                "            preferredDisplayModeId = modeId\n"
+                + ("            // comment line\n" * 40)
+                + "                .plus(1)\n"
+                "        }\n"
+                "    }\n"
+                "}\n",
             ),
         ):
             with self.subTest(relative=relative, snippet=snippet):
