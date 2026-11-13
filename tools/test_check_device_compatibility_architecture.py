@@ -148,6 +148,12 @@ class DeviceCompatibilityArchitectureGuardTest(unittest.TestCase):
                     "    private val fadeObj: Runnable = object : Runnable { override fun run() { hideOverlay() } }\n"
                     "    fun launchSession() {}\n"
                     "    val refreshRateLimit = 60\n"
+                    "    fun telemetry(mode: android.view.Display.Mode) {\n"
+                    "        run { val value = mode.refreshRate; println(value) }\n"
+                    "        run { val value = 30; require(value <= 60) }\n"
+                    "        val outerRate = mode.refreshRate; println(outerRate)\n"
+                    "        run { val outerRate = 30; require(outerRate <= 60) }\n"
+                    "    }\n"
                     "    fun timeoutOk(delayMillis: Long) = handler.postDelayed(timeoutTask, delayMillis)\n"
                     "    fun namedFade() = collapsedFadeHandler.postDelayed(::fadeCollapsedControl, delayMillis = 250L)\n"
                     "    fun samFade() = collapsedFadeHandler.postDelayed(Runnable { hideOverlay() }, 250)\n"
@@ -372,6 +378,22 @@ class DeviceCompatibilityArchitectureGuardTest(unittest.TestCase):
             (
                 f"{TERMUX_X11}/input/InputEventSender.java",
                 "class InputEventSender { ActivePointerTracker t; int activeId; boolean[] active = new boolean[16]; void a(android.view.MotionEvent e) { activeId = e.getPointerId(0); } void b() { active[activeId] = true; } }",
+            ),
+            (
+                f"{TERMUX_X11}/input/InputEventSender.java",
+                "class InputEventSender { ActivePointerTracker t; int activeId; boolean[] active = new boolean[16]; void a(android.view.MotionEvent e) { this.activeId = e.getPointerId(0); } void b() { active[activeId] = true; } }",
+            ),
+            (
+                f"{TERMUX_X11}/input/InputEventSender.java",
+                "class InputEventSender { ActivePointerTracker t; int activeId; boolean[] active = new boolean[16]; void a(android.view.MotionEvent e, int activeId) { this.activeId = e.getPointerId(0); } void b() { active[this.activeId] = true; } }",
+            ),
+            (
+                f"{TERMUX_X11}/input/InputEventSender.java",
+                "class InputEventSender { ActivePointerTracker t; int activeId; boolean[] active = new boolean[16]; class Inner { int activeId = 0; void a(android.view.MotionEvent e) { InputEventSender.this.activeId = e.getPointerId(0); } } void b() { active[activeId] = true; } }",
+            ),
+            (
+                f"{TERMUX_X11}/input/InputEventSender.java",
+                "class InputEventSender { ActivePointerTracker t; boolean[] active = new boolean[16]; void a(android.view.MotionEvent e, boolean c) { int id = c\n ? e.getPointerId(0) : 0; active[id] = true; } }",
             ),
             (
                 f"{TERMUX_X11}/input/TouchInputHandler.java",
@@ -674,6 +696,22 @@ class DeviceCompatibilityArchitectureGuardTest(unittest.TestCase):
             (
                 f"{TERMUX_X11}/LorieView.java",
                 "class LorieView { boolean is60(android.view.Display.Mode m) { return Integer.compare(Math.round(m.getRefreshRate()), 60) == 0; } }",
+            ),
+            (
+                f"{ANDROID_KOTLIN}/MainActivity.kt",
+                "class MainActivity { var cachedRate = 0f; fun a(m: android.view.Display.Mode) { this.cachedRate = m.refreshRate }; fun b() = cachedRate == 60f }",
+            ),
+            (
+                f"{ANDROID_KOTLIN}/MainActivity.kt",
+                "fun bad(mode: android.view.Display.Mode) { val value = mode.refreshRate; run { require(value <= 60f) } }",
+            ),
+            (
+                f"{ANDROID_KOTLIN}/MainActivity.kt",
+                "fun badRange(mode: android.view.Display.Mode) { val value = mode.refreshRate; require(value in 59.94f..60f) }",
+            ),
+            (
+                f"{ANDROID_KOTLIN}/MainActivity.kt",
+                "var topRate = 0f\nfun a(m: android.view.Display.Mode) { topRate = m.refreshRate }\nfun b() = topRate == 60f",
             ),
             (
                 f"{ANDROID_KOTLIN}/view/DesktopActivity.kt",
