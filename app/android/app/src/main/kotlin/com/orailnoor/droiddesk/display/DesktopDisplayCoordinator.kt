@@ -4,14 +4,16 @@ import android.os.Looper
 import android.content.Context
 import android.app.Activity
 import android.content.Intent
-import com.orailnoor.droiddesk.display.capability.PlacementMode
+import com.orailnoor.droiddesk.display.capability.*
 import com.orailnoor.droiddesk.display.placement.DesktopOpenRequest
 import com.orailnoor.droiddesk.display.placement.DesktopPlacementPort
 import com.orailnoor.droiddesk.display.placement.DesktopPlacementStrategy
 import com.orailnoor.droiddesk.display.placement.PlacementSelection
 import com.orailnoor.droiddesk.display.placement.bootstrapCurrentDevicePlacementStrategy
 import com.orailnoor.droiddesk.display.placement.bootstrapPlacementStrategy
+import com.orailnoor.droiddesk.display.policy.PresentationPolicy
 import com.orailnoor.droiddesk.display.startup.*
+import com.orailnoor.droiddesk.runtime.*
 import com.orailnoor.droiddesk.service.DesktopStopReason
 import com.orailnoor.droiddesk.service.DroidDeskService
 import java.util.WeakHashMap
@@ -99,6 +101,9 @@ class DesktopDisplayCoordinator(
     private var settingsStore: DisplaySettingsStore? = null,
     placementStrategy: DesktopPlacementStrategy? = null,
     private var stopForEnvironmentChange: (((Result<Unit>) -> Unit) -> Unit)? = null,
+    private var presentationContextProvider: ((Int) -> PresentationContext?)? = null,
+    private val presentationPolicy: PresentationPolicy = PresentationPolicy(),
+    private var runtimeCapabilitiesProvider: (() -> RuntimeCapabilities)? = null,
 ) {
     private var strategyWasProvided = placementStrategy != null
     private val placementStrategy = ReplaceableDesktopPlacementStrategy(
@@ -160,6 +165,8 @@ class DesktopDisplayCoordinator(
     private val startupResultFinalizers = ArrayDeque<() -> Unit>()
     private var deliveringStartupResults = false
     private var appliedKind: ProfileKind? = null
+    private var appliedPresentationClass: PresentationClass? = null
+    private var classifiedPresentationClass: PresentationClass? = null
     private var renderSize: PixelSize? = null
     private var profileRefresher: (((Result<Unit>) -> Unit) -> Unit)? = null
     private var move: Move? = null
@@ -538,7 +545,13 @@ class DesktopDisplayCoordinator(
         val discovery = DisplayRepository(context)
         repository = discovery
         host = AndroidDesktopDisplayHost(context.applicationContext, discovery, placementStrategy)
-        val app = context.applicationContext
+        val app = context.applicationContext; val probe = AndroidPresentationEvidenceProbe(app, discovery)
+        if (presentationContextProvider == null) presentationContextProvider = { id ->
+            probe.presentationContext(id).let { raw ->
+                if (raw.isDefaultDisplay && raw.input.touch == TouchEvidence.UNKNOWN_ASSOCIATION && android.view.InputDevice.getDeviceIds().any { d -> android.view.InputDevice.getDevice(d)?.let { !it.isExternal && it.supportsSource(android.view.InputDevice.SOURCE_TOUCHSCREEN) } == true }) raw.copyWithSnapshot(input = raw.input.copy(touch = TouchEvidence.CURRENT_DISPLAY)) else raw
+            }
+        }
+        if (runtimeCapabilitiesProvider == null) runtimeCapabilitiesProvider = { ProcessLinuxEnvironmentRegistry.get(app).capabilityCache.current() }
         stopForEnvironmentChange = { completion ->
             DroidDeskService.stopDesktop(app, DesktopStopReason.ENVIRONMENT_CHANGE, completion)
         }
@@ -1000,20 +1013,21 @@ class DesktopDisplayCoordinator(
         assertMainThread()
         val display = displays().firstOrNull { it.key == displayKey }
             ?: throw DesktopDisplayException("DISPLAY_UNAVAILABLE", "The selected connection is no longer available")
-        val settings = checkNotNull(settingsStore).load(kindFor(display), display.settingsKey)
-            ?: DisplayProfilePolicy.defaults(kindFor(display))
+        val store = checkNotNull(settingsStore); val key = settingsKeyFor(display)
+        val settings = store.load(key) ?: defaultSettingsFor(display, key.presentationClass)
         return mapOf(
-            "displayKey" to display.key, "renderPolicy" to settings.renderPolicy.wireName,
-            "uiScalePercent" to settings.uiScalePercent, "inputMode" to settings.inputMode,
-            "inputRoute" to settings.inputRoute.wireName,
+            "displayKey" to display.key, "presentationClass" to key.presentationClass.wireName,
+            "stableDisplayKey" to key.stableDisplayKey, "settingsScope" to store.resolveScope(key).wireName,
+            "renderPolicy" to settings.renderPolicy.wireName, "uiScalePercent" to settings.uiScalePercent,
+            "inputMode" to settings.inputMode, "inputRoute" to settings.inputRoute.wireName,
         )
     }
 
+    fun loadSettings(presentationClass: PresentationClass, displayId: Int? = null): DisplaySettings? =
+        checkNotNull(settingsStore).load(DisplaySettingsKey(presentationClass, resolveKindTarget(presentationPolicy.profileKind(presentationClass), displayId).second))
     fun loadSettings(kind: ProfileKind, displayId: Int? = null): DisplaySettings? {
-        val displaySettingsKey = displayId?.let { id ->
-            displays().firstOrNull { it.id == id }?.settingsKey
-        }
-        return checkNotNull(settingsStore).load(kind, displaySettingsKey)
+        val (display, stableKey) = resolveKindTarget(kind, displayId); val targetId = displayId ?: display?.id
+        return checkNotNull(settingsStore).load(DisplaySettingsKey((classifiedPresentationClass ?: appliedPresentationClass)?.takeIf { owner?.lease?.displayId == targetId && presentationPolicy.profileKind(it) == kind } ?: classForKind(kind, targetId), stableKey))
     }
 
     fun setAutoOpenOnMonitor(enabled: Boolean) {
@@ -1038,21 +1052,22 @@ class DesktopDisplayCoordinator(
         if (isCurrent(lease)) profileRefresher = refresh
     }
 
-    fun saveProfileSettings(
-        kind: ProfileKind,
-        settings: DisplaySettings,
-        completion: (Result<Unit>) -> Unit = {},
-    ) {
+    fun saveProfileSettings(presentationClass: PresentationClass, settings: DisplaySettings, displayId: Int? = owner?.lease?.displayId, completion: (Result<Unit>) -> Unit = {}) {
         assertMainThread()
-        checkNotNull(settingsStore).save(kind, settings)
-        applySavedProfile(kind, completion)
+        val store = checkNotNull(settingsStore); val key = DisplaySettingsKey(presentationClass, resolveKindTarget(presentationPolicy.profileKind(presentationClass), displayId).second)
+        store.save(key, if (key.stableDisplayKey != null && store.hasExactOverride(key)) DisplaySettingsScope.THIS_DISPLAY else DisplaySettingsScope.CLASS_DEFAULT, settings)
+        applySavedProfile(appliedPresentationClass == presentationClass && owner != null, completion)
+    }
+    fun saveProfileSettings(kind: ProfileKind, settings: DisplaySettings, completion: (Result<Unit>) -> Unit = {}) {
+        assertMainThread(); val display = resolveKindTarget(kind, owner?.lease?.displayId).first
+        saveProfileSettings((classifiedPresentationClass ?: appliedPresentationClass)?.takeIf { presentationPolicy.profileKind(it) == kind } ?: classForKind(kind, display?.id), settings, display?.id, completion)
     }
 
     private fun applySavedProfile(
-        kind: ProfileKind,
+        shouldRefresh: Boolean,
         completion: (Result<Unit>) -> Unit,
     ) {
-        if (appliedKind == kind && owner != null) {
+        if (shouldRefresh && owner != null) {
             val refresh = profileRefresher
             if (refresh == null) completion(Result.failure(DesktopDisplayException(
                 "PROFILE_APPLY_FAILED", "Display settings were saved but the active view cannot apply them",
@@ -1081,13 +1096,26 @@ class DesktopDisplayCoordinator(
         publish()
     }
 
-    fun saveSettingsFor(displayKey: String, settings: DisplaySettings, completion: (Result<Unit>) -> Unit) {
+    @JvmOverloads
+    fun saveSettingsFor(displayKey: String, settings: DisplaySettings, scope: DisplaySettingsScope? = null, completion: (Result<Unit>) -> Unit) =
+        saveSettingsFor(ScopedDisplaySettingsUpdate(displayKey, settings, scope), completion)
+
+    fun saveSettingsFor(update: ScopedDisplaySettingsUpdate, completion: (Result<Unit>) -> Unit) {
         assertMainThread()
-        val display = displays().firstOrNull { it.key == displayKey }
+        val display = displays().firstOrNull { it.key == update.displayKey }
             ?: throw DesktopDisplayException("DISPLAY_UNAVAILABLE", "The selected display connection is unavailable")
-        val kind = kindFor(display)
-        checkNotNull(settingsStore).save(kind, settings, display.settingsKey)
-        applySavedProfile(kind, completion)
+        val resolved = settingsKeyFor(display)
+        require(update.stableDisplayKey == null || update.stableDisplayKey == resolved.stableDisplayKey) { "Mismatched stableDisplayKey" }
+        val cls = update.presentationClass?.also {
+            require((presentationPolicy.profileKind(it) == ProfileKind.MONITOR) == !display.isDefault) { "Presentation class does not match display" }
+        } ?: resolved.presentationClass
+        val key = DisplaySettingsKey(cls, resolved.stableDisplayKey)
+        val scope = update.settingsScope ?: if (key.stableDisplayKey != null) DisplaySettingsScope.THIS_DISPLAY else DisplaySettingsScope.CLASS_DEFAULT
+        checkNotNull(settingsStore).save(key, scope, update.settings)
+        val shouldRefresh = owner?.let { active ->
+            appliedPresentationClass == key.presentationClass && (scope == DisplaySettingsScope.CLASS_DEFAULT || active.lease.displayId == display.id || active.actualDisplay() == display.id)
+        } == true
+        applySavedProfile(shouldRefresh, completion)
     }
 
     fun profileApplied(lease: RendererLease, outcome: Result<Unit>) {
@@ -1105,13 +1133,39 @@ class DesktopDisplayCoordinator(
         }
     }
 
-    fun reportGeometry(lease: RendererLease, kind: ProfileKind, size: PixelSize) {
-        assertMainThread()
-        if (!isCurrent(lease)) return
-        if (appliedKind == kind && renderSize == size) return
-        appliedKind = kind
-        renderSize = size
-        publish()
+    fun reportPresentationClass(lease: RendererLease, presentationClass: PresentationClass) { assertMainThread(); if (isCurrent(lease)) classifiedPresentationClass = presentationClass }
+    fun presentationClassForDisplay(displayId: Int): PresentationClass = knownDisplays().firstOrNull { it.id == displayId }?.let(::presentationClassFor)
+        ?: (classifiedPresentationClass ?: appliedPresentationClass)?.takeIf { owner?.lease?.displayId == displayId } ?: probeContextOrNull(displayId)?.let(presentationPolicy::classify) ?: if (displayId == 0) PresentationClass.PHONE_TOUCH else PresentationClass.EXTERNAL_POINTER
+    @JvmOverloads
+    fun reportGeometry(lease: RendererLease, kind: ProfileKind, size: PixelSize, presentationClass: PresentationClass? = null) {
+        assertMainThread(); if (!isCurrent(lease)) return
+        val resolvedClass = (presentationClass ?: classifiedPresentationClass?.takeIf { presentationPolicy.profileKind(it) == kind } ?: classForKind(kind, lease.displayId)).also { classifiedPresentationClass = it }
+        if (appliedKind == kind && renderSize == size && appliedPresentationClass == resolvedClass) return
+        appliedKind = kind; appliedPresentationClass = resolvedClass; renderSize = size; publish()
+    }
+    private fun knownDisplays() = if (host == null) emptyList() else displays() + boundActivities.values.mapNotNull { it.display } + listOfNotNull(move?.request?.display, lastTarget)
+    private fun settingsKeyFor(display: DesktopDisplay) = DisplaySettingsKey(presentationClassFor(display), display.settingsKey.takeIf { it.isNotBlank() })
+    private fun resolveKindTarget(kind: ProfileKind, displayId: Int?): Pair<DesktopDisplay?, String?> {
+        if (host == null) return null to if (kind != ProfileKind.MONITOR) "default" else null
+        val display = displayId?.let { id -> knownDisplays().firstOrNull { it.id == id && it.isDefault == (kind != ProfileKind.MONITOR) } } ?: if (kind != ProfileKind.MONITOR) displays().firstOrNull { it.isDefault } else null
+        return display to display?.settingsKey?.takeIf { it.isNotBlank() }
+    }
+    private fun probeContextOrNull(displayId: Int) = try { presentationContextProvider?.invoke(displayId) } catch (_: DesktopDisplayException) { null }
+    private fun classForKind(kind: ProfileKind, displayId: Int?) = if (kind == ProfileKind.PHONE) PresentationClass.PHONE_TOUCH else if (kind == ProfileKind.WIDE) PresentationClass.LARGE_TOUCH else displayId?.let(::probeContextOrNull)?.let(presentationPolicy::classify) ?: PresentationClass.EXTERNAL_POINTER
+    private fun presentationClassFor(display: DesktopDisplay): PresentationClass {
+        if (owner?.lease?.displayId == display.id) {
+            (classifiedPresentationClass ?: appliedPresentationClass)?.let { return it }
+            if (appliedKind == ProfileKind.PHONE) return PresentationClass.PHONE_TOUCH; if (appliedKind == ProfileKind.WIDE) return PresentationClass.LARGE_TOUCH
+        }
+        return probeContextOrNull(display.id)?.let(presentationPolicy::classify) ?: classForKind(kindFor(display), null)
+    }
+    private fun defaultSettingsFor(display: DesktopDisplay, cls: PresentationClass): DisplaySettings {
+        val raw = probeContextOrNull(display.id) ?: return checkNotNull(settingsStore).defaultSettingsFor(cls)
+        val promoteTouch = cls == PresentationClass.EXTERNAL_TOUCH || (cls != PresentationClass.EXTERNAL_POINTER && raw.input.touch == TouchEvidence.UNKNOWN_ASSOCIATION)
+        val context = if (promoteTouch && raw.input.touch != TouchEvidence.CURRENT_DISPLAY) raw.copyWithSnapshot(input = raw.input.copy(touch = TouchEvidence.CURRENT_DISPLAY)) else raw
+        val u = CapabilityEvidence(EvidenceState.PRESENT_UNVERIFIED)
+        val runtime = runtimeCapabilitiesProvider?.invoke() ?: RuntimeCapabilities(0, "", u, u, u, u, u, u, u, u, u, u, RendererBackend.UNKNOWN, u, 0L, 0L, DistributionContract(DistributionChannel.SIDELOAD_LOCAL_LINUX, 34, true))
+        return presentationPolicy.resolve(context, cls, placementDiagnostics(display.id).environment ?: if (display.isDefault) DisplayEnvironment.PHONE else DisplayEnvironment.OTHER_EXTERNAL, null, runtime, 1f, 1f).settings
     }
 
     private fun kindFor(display: DesktopDisplay): ProfileKind {
@@ -1701,6 +1755,8 @@ class DesktopDisplayCoordinator(
         profileRefresher = null
         releaseSessionStartClaim(value.lease)
         appliedKind = null
+        appliedPresentationClass = null
+        classifiedPresentationClass = null
         renderSize = null
     }
 

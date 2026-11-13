@@ -116,7 +116,7 @@ internal data class DesktopPresentationSnapshot(
 
 internal class DesktopPresentationPlanner(
     private val policy: PresentationPolicy = PresentationPolicy(), private val onClassified: (PresentationClass) -> Unit = {},
-    private val readSnapshot: ((Int) -> PixelSize?) -> DesktopPresentationSnapshot?, private val loadSettings: (ProfileKind, Int) -> DisplaySettings?,
+    private val readSnapshot: ((Int) -> PixelSize?) -> DesktopPresentationSnapshot?, private val loadSettings: (PresentationClass, Int) -> DisplaySettings?,
     private val applyPlan: (PresentationPlan, PixelSize?) -> ExternalDesktopInputTarget? = { _, _ -> null },
     private val openRelay: () -> Unit = {}, private val closeRelay: () -> Unit = {},
 ) {
@@ -135,8 +135,8 @@ internal class DesktopPresentationPlanner(
         if (promotedTouchDevices.isEmpty()) promotedTouchDisplayId = null
         val committed = lastMeasuredContent?.takeIf { measuredDisplayId == displayId }
         val ctx = snap.rawContext.copyWithSnapshot(windowSizePx = committed ?: snap.rawContext.windowSizePx, input = effectiveInputCapabilities(snap.rawContext.isDefaultDisplay, snap.hasInternalTouchscreen, promotedTouchDisplayId == displayId, snap.rawContext.input))
-        val cls = policy.classify(ctx).also(onClassified); val kind = policy.profileKind(cls)
-        val plan = policy.resolve(ctx, cls, snap.environment, loadSettings(kind, displayId), snap.runtimeCapabilities, sanitizeScrollFactor(snap.horizontalScrollFactor), sanitizeScrollFactor(snap.verticalScrollFactor)).also { currentPlan = it }
+        val cls = policy.classify(ctx).also(onClassified)
+        val plan = policy.resolve(ctx, cls, snap.environment, loadSettings(cls, displayId), snap.runtimeCapabilities, sanitizeScrollFactor(snap.horizontalScrollFactor), sanitizeScrollFactor(snap.verticalScrollFactor)).also { currentPlan = it }
         applyPlan(plan, committed)?.let { target ->
             val sync = forceRelaySync || lastAppliedTarget !== target || lastAppliedInput != plan.input; lastAppliedTarget = target; lastAppliedInput = plan.input
             if (plan.input.externalInputRoute == ExternalInputRoute.PHONE_RELAY) { ExternalDesktopInputBridge.attach(target, plan.input.relayPointerCapture); if (sync) openRelay() } else { ExternalDesktopInputBridge.detach(target); if (sync) closeRelay() }
@@ -201,7 +201,7 @@ class DesktopActivity : Activity() {
     private val evidenceProbe by lazy { AndroidPresentationEvidenceProbe(applicationContext, DisplayRepository(applicationContext)) }
     private var lastAppliedPlan: PresentationPlan? = null; private var lastAppliedController: X11InputController? = null
     private var appliedRefreshRequest: RefreshRequest? = null; private var forceNextRelaySync = false
-    private val presentationPlanner = DesktopPresentationPlanner(readSnapshot = ::readPresentationSnapshot, loadSettings = displayCoordinator::loadSettings, applyPlan = ::applyPresentationPlan, openRelay = { ExternalInputRelayActivity.open(this) }, closeRelay = ExternalInputRelayActivity::finishIfOpen)
+    private val presentationPlanner = DesktopPresentationPlanner(onClassified = { cls -> rendererLease?.takeIf(::isCurrentRenderer)?.let { displayCoordinator.reportPresentationClass(it, cls) } }, readSnapshot = ::readPresentationSnapshot, loadSettings = displayCoordinator::loadSettings, applyPlan = ::applyPresentationPlan, openRelay = { ExternalInputRelayActivity.open(this) }, closeRelay = ExternalInputRelayActivity::finishIfOpen)
     private var rendererLease: RendererLease? = null; private var readyGeneration = 0L; private var x11Attached = false
     private val readinessGate = DesktopReadinessGate(::onRendererReady)
     private val rendererCleanup = RendererCleanup()
@@ -584,7 +584,7 @@ class DesktopActivity : Activity() {
         lorieView?.display?.displayId?.takeIf { it != lease.displayId }?.let { displayCoordinator.observeActivityEnvironment(this, sessionEpoch); displayCoordinator.onActivityMoved(lease, it); return }
         lastAppliedPlan = null; forceNextRelaySync = false; val plan = presentationPlanner.refresh() ?: return
         if (presentationPlanner.measuredContentSize != null) {
-            lorieView?.renderedSize?.let { displayCoordinator.reportGeometry(lease, plan.profileKind, PixelSize(it.x, it.y)) }
+            lorieView?.renderedSize?.let { displayCoordinator.reportGeometry(lease, plan.profileKind, PixelSize(it.x, it.y), plan.presentationClass) }
             val retry = explicitProfileRetry; explicitProfileRetry = false; applyLiveProfile(force = retry)
         }
     }
@@ -599,9 +599,9 @@ class DesktopActivity : Activity() {
             inputController = X11InputController(
                 lorieView!!, lease.generation, presentationPlanner.currentPlan?.input?.defaultInputMode ?: 1,
                 onModeChanged = { mode ->
-                    val activePlan = presentationPlanner.currentPlan; val kind = activePlan?.profileKind ?: ProfileKind.PHONE
-                    val saved = displayCoordinator.loadSettings(kind, lease.displayId) ?: activePlan?.settings ?: DisplayProfilePolicy.defaults(kind)
-                    displayCoordinator.saveProfileSettings(kind, saved.copy(inputMode = mode)); refreshInputPolicyOnly()
+                    val activePlan = presentationPlanner.currentPlan; val cls = activePlan?.presentationClass ?: displayCoordinator.presentationClassForDisplay(lease.displayId)
+                    val saved = displayCoordinator.loadSettings(cls, lease.displayId) ?: activePlan?.settings ?: DisplayProfilePolicy.defaults(if (cls == PresentationClass.PHONE_TOUCH) ProfileKind.PHONE else if (cls == PresentationClass.LARGE_TOUCH) ProfileKind.WIDE else ProfileKind.MONITOR)
+                    displayCoordinator.saveProfileSettings(cls, saved.copy(inputMode = mode), lease.displayId); refreshInputPolicyOnly()
                 },
                 onThreeFingerTap = ::toggleKeyboard,
                 onViewportChanged = { _, _, transform ->
@@ -745,7 +745,7 @@ class DesktopActivity : Activity() {
             val plan = presentationPlanner.updateMeasuredWindow(content, forceNextRelaySync.also { forceNextRelaySync = false }) ?: run { currentInsets = previousInsets; return readinessGate.revoke(lease.generation, ReadinessSignal.GEOMETRY_COMMITTED) }
             if (hasPendingWindowGeometry(view)) return scheduleGeometry()
             val appliedRender = view.renderedSize ?: return readinessGate.revoke(lease.generation, ReadinessSignal.GEOMETRY_COMMITTED)
-            displayCoordinator.reportGeometry(lease, plan.profileKind, PixelSize(appliedRender.x, appliedRender.y))
+            displayCoordinator.reportGeometry(lease, plan.profileKind, PixelSize(appliedRender.x, appliedRender.y), plan.presentationClass)
             syncReadinessSignals(lease)
         } finally { applyingGeometry = false }
         val retry = explicitProfileRetry

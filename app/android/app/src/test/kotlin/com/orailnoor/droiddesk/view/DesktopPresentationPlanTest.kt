@@ -65,7 +65,7 @@ class DesktopPresentationPlanTest {
 
         assertEquals(1, harness.classifyCalls)
         assertEquals(1, harness.settingsLoads.size)
-        assertEquals(ProfileKind.PHONE to 0, harness.settingsLoads.single())
+        assertEquals(PresentationClass.PHONE_TOUCH to 0, harness.settingsLoads.single())
         assertEquals(1, harness.resolveInputCalls)
         assertEquals(1, harness.resolveRefreshCalls)
         assertEquals(PresentationClass.PHONE_TOUCH, narrowPlan.presentationClass)
@@ -93,7 +93,7 @@ class DesktopPresentationPlanTest {
 
         assertEquals(PresentationClass.LARGE_TOUCH, expandedPlan.presentationClass)
         assertEquals(ProfileKind.WIDE, expandedPlan.profileKind)
-        assertEquals(ProfileKind.WIDE to 0, harness.settingsLoads.last())
+        assertEquals(PresentationClass.LARGE_TOUCH to 0, harness.settingsLoads.last())
         assertEquals(RenderPolicy.NATIVE, expandedPlan.settings.renderPolicy)
         assertEquals(expandedContent, expandedPlan.renderSize)
         assertEquals(expandedContent, harness.appliedContents.last())
@@ -157,6 +157,7 @@ class DesktopPresentationPlanTest {
 
         val initial = checkNotNull(harness.planner.updateMeasuredWindow(PixelSize(1920, 1080)))
         assertEquals(PresentationClass.EXTERNAL_POINTER, initial.presentationClass)
+        assertEquals(PresentationClass.EXTERNAL_POINTER to 20, harness.settingsLoads.last())
         assertEquals(TouchInputHandler.InputMode.TRACKPAD, initial.input.defaultInputMode)
         assertTrue(initial.input.rendererPointerCapture)
 
@@ -166,6 +167,7 @@ class DesktopPresentationPlanTest {
 
         assertEquals(classifyBeforePromotion + 1, harness.classifyCalls)
         assertEquals(PresentationClass.EXTERNAL_TOUCH, promoted.presentationClass)
+        assertEquals(PresentationClass.EXTERNAL_TOUCH to 20, harness.settingsLoads.last())
         assertEquals(TouchInputHandler.InputMode.TOUCH, promoted.settings.inputMode)
         assertEquals(TouchInputHandler.InputMode.TOUCH, promoted.input.defaultInputMode)
         assertTrue(promoted.input.allowDirectTouch)
@@ -240,6 +242,203 @@ class DesktopPresentationPlanTest {
         assertEquals(listOf("open", "open", "open"), harness.relayEvents)
     }
 
+    @Test
+    fun locallyPromotedExternalTouchReadsSavesAndReportsExternalTouchSettings() {
+        val defaultDisplay = com.orailnoor.droiddesk.display.DesktopDisplay(
+            id = 0,
+            key = "conn-0",
+            name = "Phone",
+            isDefault = true,
+            eligible = true,
+            reason = null,
+            settingsKey = "default",
+        )
+        val externalDisplay = com.orailnoor.droiddesk.display.DesktopDisplay(
+            id = 20,
+            key = "conn-20",
+            name = "Portable Touch",
+            isDefault = false,
+            eligible = true,
+            reason = null,
+            settingsKey = "external:3:PRT|4:2020|14:Portable Touch",
+        )
+        val unassociatedExternalContext = PresentationFixtures.externalTouch.copyWithSnapshot(
+            displayId = externalDisplay.id,
+            input = InputCapabilities(
+                touch = TouchEvidence.UNKNOWN_ASSOCIATION,
+                pointerAssociation = PointerAssociationEvidence.TARGET_DISPLAY,
+                hasMouse = true,
+                hasTouchpad = false,
+                hasKeyboard = true,
+                hasStylus = false,
+            ),
+        )
+        val preferences = object : com.orailnoor.droiddesk.display.DisplayPreferences {
+            private val values = mutableMapOf<String, Any>()
+            override fun read(key: String): Any? = values[key]
+            override fun write(changes: Map<String, Any?>) {
+                changes.forEach { (k, v) -> if (v == null) values.remove(k) else values[k] = v }
+            }
+        }
+        val store = com.orailnoor.droiddesk.display.DisplaySettingsStore(
+            preferences = preferences,
+            legacyInputMode = { null },
+            diagnostic = {},
+        )
+        val pointerSettings = DisplaySettings(
+            renderPolicy = RenderPolicy.CAP_1080,
+            uiScalePercent = 100,
+            inputMode = TouchInputHandler.InputMode.TRACKPAD,
+            inputRoute = ExternalInputRoutePreference.PHONE_RELAY,
+        )
+        val touchSettings = DisplaySettings(
+            renderPolicy = RenderPolicy.NATIVE,
+            uiScalePercent = 150,
+            inputMode = TouchInputHandler.InputMode.SIMULATED_TOUCH,
+            inputRoute = ExternalInputRoutePreference.NATIVE,
+        )
+        store.save(
+            com.orailnoor.droiddesk.display.DisplaySettingsKey(
+                PresentationClass.EXTERNAL_POINTER,
+                externalDisplay.settingsKey,
+            ),
+            com.orailnoor.droiddesk.display.DisplaySettingsScope.THIS_DISPLAY,
+            pointerSettings,
+        )
+        store.save(
+            com.orailnoor.droiddesk.display.DisplaySettingsKey(
+                PresentationClass.EXTERNAL_TOUCH,
+                externalDisplay.settingsKey,
+            ),
+            com.orailnoor.droiddesk.display.DisplaySettingsScope.THIS_DISPLAY,
+            touchSettings,
+        )
+
+        val coordinator = com.orailnoor.droiddesk.display.DesktopDisplayCoordinator(
+            host = object : com.orailnoor.droiddesk.display.DesktopDisplayHost {
+                override fun currentDisplay() = externalDisplay
+                override fun displays() = listOf(defaultDisplay, externalDisplay)
+                override fun defaultProfileKind() = ProfileKind.PHONE
+                override fun sessionRunning() = true
+                override fun launch(request: com.orailnoor.droiddesk.display.DesktopLaunchRequest) = Unit
+                override fun focus(requestId: Long) = false
+                override fun cancelLaunch(requestId: Long) = Unit
+                override fun scheduleTimeout(delayMillis: Long, action: () -> Unit): () -> Unit = {}
+                override fun notifyReturnRequired(error: com.orailnoor.droiddesk.display.DesktopDisplayException) = Unit
+            },
+            settingsStore = store,
+            presentationContextProvider = { id -> if (id == externalDisplay.id) unassociatedExternalContext else null },
+        )
+        val lease = (coordinator.claim(externalDisplay.id) {} as com.orailnoor.droiddesk.display.RendererClaim.Accepted).lease
+        val target = object : ExternalDesktopInputTarget {
+            override fun dispatchExternalKeyEvent(event: KeyEvent): Boolean = false
+            override fun dispatchExternalMotionEvent(view: View, event: MotionEvent): Boolean = false
+        }.also(targets::add)
+
+        lateinit var planner: DesktopPresentationPlanner
+        var profileRefreshCount = 0
+        coordinator.setProfileRefresher(lease) { done ->
+            profileRefreshCount++
+            val refreshed = checkNotNull(planner.refresh())
+            if (planner.measuredContentSize != null) {
+                coordinator.reportGeometry(lease, refreshed.profileKind, refreshed.renderSize, refreshed.presentationClass)
+            }
+            done(Result.success(Unit))
+        }
+        planner = DesktopPresentationPlanner(
+            onClassified = { cls -> coordinator.reportPresentationClass(lease, cls) },
+            readSnapshot = { windowSizeForDisplay ->
+                val activeSize = windowSizeForDisplay(externalDisplay.id)
+                val ctx = if (activeSize != null) {
+                    unassociatedExternalContext.copyWithSnapshot(windowSizePx = activeSize)
+                } else {
+                    unassociatedExternalContext
+                }
+                DesktopPresentationSnapshot(
+                    rawContext = ctx,
+                    environment = DisplayEnvironment.OTHER_EXTERNAL,
+                    runtimeCapabilities = runtimeCapabilities(RendererBackend.SOFTWARE_LLVMPIPE),
+                    hasInternalTouchscreen = true,
+                    touchscreenDeviceIds = setOf(1, 41),
+                    horizontalScrollFactor = 48f,
+                    verticalScrollFactor = 64f,
+                )
+            },
+            loadSettings = coordinator::loadSettings,
+            applyPlan = { _, _ -> target },
+        )
+
+        // Before direct touch is observed, unknown touch association classifies as EXTERNAL_POINTER.
+        val initialUnmeasured = checkNotNull(planner.refresh())
+        assertEquals(PresentationClass.EXTERNAL_POINTER, initialUnmeasured.presentationClass)
+        assertEquals(pointerSettings, initialUnmeasured.settings)
+        assertEquals("externalPointer", coordinator.settingsFor(externalDisplay.key)["presentationClass"])
+
+        // Direct touch observed BEFORE measured geometry commits still loads and reports EXTERNAL_TOUCH.
+        assertTrue(planner.promoteDirectTouch(externalDisplay.id, 41))
+        val promotedUnmeasured = checkNotNull(planner.refresh())
+        assertEquals(PresentationClass.EXTERNAL_TOUCH, promotedUnmeasured.presentationClass)
+        assertEquals(touchSettings, promotedUnmeasured.settings)
+        assertEquals("externalTouch", coordinator.settingsFor(externalDisplay.key)["presentationClass"])
+        assertEquals(150, coordinator.settingsFor(externalDisplay.key)["uiScalePercent"])
+
+        // Commit measured geometry with plan.presentationClass, then save updated EXTERNAL_TOUCH settings via Coordinator.
+        val promotedMeasured = checkNotNull(planner.updateMeasuredWindow(PixelSize(1920, 1080)))
+        coordinator.reportGeometry(
+            lease,
+            promotedMeasured.profileKind,
+            promotedMeasured.renderSize,
+            promotedMeasured.presentationClass,
+        )
+        val updatedTouchSettings = touchSettings.copy(
+            uiScalePercent = 175,
+            inputMode = TouchInputHandler.InputMode.TOUCH,
+        )
+        coordinator.saveSettingsFor(
+            displayKey = externalDisplay.key,
+            settings = updatedTouchSettings,
+            scope = com.orailnoor.droiddesk.display.DisplaySettingsScope.THIS_DISPLAY,
+        ) { assertTrue(it.isSuccess) }
+
+        assertEquals(1, profileRefreshCount)
+        assertEquals(updatedTouchSettings, planner.currentPlan?.settings)
+        assertEquals(
+            pointerSettings,
+            store.load(
+                com.orailnoor.droiddesk.display.DisplaySettingsKey(
+                    PresentationClass.EXTERNAL_POINTER,
+                    externalDisplay.settingsKey,
+                ),
+            ),
+        )
+
+        // Input-mode toggle via saveProfileSettings(cls, ..., lease.displayId) updates EXTERNAL_TOUCH, not EXTERNAL_POINTER.
+        val activePlan = checkNotNull(planner.currentPlan)
+        val toggled = checkNotNull(coordinator.loadSettings(activePlan.presentationClass, lease.displayId))
+            .copy(inputMode = TouchInputHandler.InputMode.TRACKPAD)
+        coordinator.saveProfileSettings(activePlan.presentationClass, toggled, lease.displayId)
+        assertEquals(2, profileRefreshCount)
+        assertEquals(TouchInputHandler.InputMode.TRACKPAD, planner.currentPlan?.settings?.inputMode)
+        assertEquals(
+            TouchInputHandler.InputMode.TRACKPAD,
+            store.load(
+                com.orailnoor.droiddesk.display.DisplaySettingsKey(
+                    PresentationClass.EXTERNAL_TOUCH,
+                    externalDisplay.settingsKey,
+                ),
+            )?.inputMode,
+        )
+        assertEquals(
+            pointerSettings,
+            store.load(
+                com.orailnoor.droiddesk.display.DisplaySettingsKey(
+                    PresentationClass.EXTERNAL_POINTER,
+                    externalDisplay.settingsKey,
+                ),
+            ),
+        )
+    }
+
     private fun unknownTouchInput(hasMouse: Boolean) = InputCapabilities(
         touch = TouchEvidence.UNKNOWN_ASSOCIATION,
         pointerAssociation = if (hasMouse) PointerAssociationEvidence.UNKNOWN else PointerAssociationEvidence.NO_EXTERNAL_POINTER,
@@ -255,7 +454,7 @@ class DesktopPresentationPlanTest {
         var backend: RendererBackend = RendererBackend.SOFTWARE_LLVMPIPE,
         var hasInternalTouchscreen: Boolean = true,
         var touchscreenDeviceIds: Set<Int> = setOf(1),
-        val savedByKind: MutableMap<ProfileKind, DisplaySettings> = mutableMapOf(),
+        val savedByClass: MutableMap<PresentationClass, DisplaySettings> = mutableMapOf(),
     ) {
         val target = object : ExternalDesktopInputTarget {
             override fun dispatchExternalKeyEvent(event: KeyEvent): Boolean = false
@@ -265,7 +464,7 @@ class DesktopPresentationPlanTest {
         var classifyCalls = 0
         var resolveInputCalls = 0
         var resolveRefreshCalls = 0
-        val settingsLoads = mutableListOf<Pair<ProfileKind, Int>>()
+        val settingsLoads = mutableListOf<Pair<PresentationClass, Int>>()
         val appliedPlans = mutableListOf<PresentationPlan>()
         val appliedContents = mutableListOf<PixelSize?>()
         val appliedRenderSizes = mutableListOf<PixelSize>()
@@ -306,9 +505,9 @@ class DesktopPresentationPlanTest {
                     verticalScrollFactor = 64f,
                 )
             },
-            loadSettings = { kind, displayId ->
-                settingsLoads += kind to displayId
-                savedByKind[kind]
+            loadSettings = { cls, displayId ->
+                settingsLoads += cls to displayId
+                savedByClass[cls]
             },
             applyPlan = { plan, contentSize ->
                 appliedPlans += plan
