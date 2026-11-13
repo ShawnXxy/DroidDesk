@@ -138,8 +138,12 @@ class DeviceCompatibilityArchitectureGuardTest(unittest.TestCase):
                     "fun modes() = display.supportedModes.map { it.toEvidence() }\n"
                 ),
                 f"{ANDROID_KOTLIN}/view/DesktopActivity.kt": (
+                    "import com.orailnoor.droiddesk.display.DisplayProfilePolicy as ProfilePolicy\n"
                     "class DesktopActivity {\n"
                     "    companion object { private const val FADE_DELAY_MS = 250L; private const val TIMEOUT_MS = 250L * 4 }\n"
+                    "    val fallbackProfile = ProfilePolicy.phoneDefaultProfile()\n"
+                    "    val defaultSettings = ProfilePolicy.defaults(ProfileKind.PHONE)\n"
+                    "    fun scopeSafe(other: OtherHelper) = with(ProfilePolicy) { val resolve = 1; other.classify(); other::classify; defaults(ProfileKind.PHONE) }\n"
                                         "    private val fadeLambda: () -> Unit = { hideOverlay() }\n"
                     "    private val gate = DesktopReadinessGate {}\n"
                     "    private fun hideOverlay() {}\n"
@@ -317,6 +321,42 @@ class DeviceCompatibilityArchitectureGuardTest(unittest.TestCase):
             (
                 f"{ANDROID_KOTLIN}/view/DesktopActivity.kt",
                 "DesktopReadinessGate {}; val s = DisplayProfilePolicy.renderSize(bounds, policy)",
+            ),
+            (
+                f"{ANDROID_KOTLIN}/MainActivity.kt",
+                "import com.orailnoor.droiddesk.display.input.DesktopInputPolicy as InputPolicy\nval ref = InputPolicy::resolve",
+            ),
+            (
+                f"{ANDROID_KOTLIN}/view/DesktopActivity.kt",
+                "import com.orailnoor.droiddesk.display.DisplayProfilePolicy as ProfilePolicy\nclass DesktopActivity { val g = DesktopReadinessGate {}; val ref = ProfilePolicy::classify }",
+            ),
+            (
+                f"{ANDROID_KOTLIN}/MainActivity.kt",
+                "import com.orailnoor.droiddesk.display.DisplayProfilePolicy.classify\nval c = classify(ctx)",
+            ),
+            (
+                f"{ANDROID_KOTLIN}/MainActivity.kt",
+                "import com.orailnoor.droiddesk.display.input.externalInputRoute as route\nval r = route(pref)",
+            ),
+            (
+                f"{ANDROID_KOTLIN}/MainActivity.kt",
+                "typealias ProfilePolicy = com.orailnoor.droiddesk.display.DisplayProfilePolicy\nval p = ProfilePolicy.resolve(ctx)",
+            ),
+            (
+                f"{ANDROID_KOTLIN}/MainActivity.kt",
+                "import com.orailnoor.droiddesk.display.DisplayProfilePolicy as ProfilePolicy\nfun bad() = with(ProfilePolicy) { classify(ctx) }",
+            ),
+            (
+                f"{ANDROID_KOTLIN}/MainActivity.kt",
+                "import com.orailnoor.droiddesk.display.input.DesktopInputPolicy as `InputPolicy`\nval ref = `InputPolicy`::resolve",
+            ),
+            (
+                f"{ANDROID_KOTLIN}/MainActivity.kt",
+                "import com.orailnoor.droiddesk.display.input.DesktopInputPolicy as InputPolicy\nfun bad() = (InputPolicy).resolve(ctx)",
+            ),
+            (
+                f"{ANDROID_KOTLIN}/MainActivity.kt",
+                "val a = DisplayProfilePolicy\nval b = a\nval c = b\nval d = c.classify(ctx)",
             ),
         ):
             with self.subTest(relative=relative, snippet=snippet):
