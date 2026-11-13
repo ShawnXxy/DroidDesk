@@ -89,6 +89,11 @@ class DeviceCompatibilityArchitectureGuardTest(unittest.TestCase):
                     'private val logFlushRunnable = Runnable { flushLogBuffer() }\n'
                     'private fun flushLogBuffer() { logBuffer.setLength(0) }\n'
                     'fun flushLogs() = mainHandler.postDelayed(logFlushRunnable, 250)\n'
+                    'fun telemetry(mode: android.view.Display.Mode, timeoutSeconds: Int) {\n'
+                    '    val actualRate = mode.refreshRate\n'
+                    '    val loggingIntervalSeconds = 60\n'
+                    '    require(mode.refreshRate > 0f && timeoutSeconds <= 60)\n'
+                    '}\n'
                     'fun getDeviceInfo() = mapOf("model" to Build.MODEL, "brand" to Build.BRAND)\n'
                 ),
                 f"{ANDROID_KOTLIN}/display/DisplayRepository.kt": (
@@ -127,6 +132,8 @@ class DeviceCompatibilityArchitectureGuardTest(unittest.TestCase):
                     "    val refreshRateLimit = 60\n"
                     "    fun timeoutOk(delayMillis: Long) = handler.postDelayed(timeoutTask, delayMillis)\n"
                     "    fun namedFade() = collapsedFadeHandler.postDelayed(::fadeCollapsedControl, delayMillis = 250L)\n"
+                    "    fun samFade() = collapsedFadeHandler.postDelayed(Runnable { hideOverlay() }, 250)\n"
+                    "    fun objInlineFade() = collapsedFadeHandler.postDelayed(object : Runnable { override fun run() { hideOverlay() } }, 250)\n"
                     "    fun typedFade(a: Int) = when (a) { 0 -> collapsedFadeHandler.removeCallbacks(fadeTyped); else -> { collapsedFadeHandler.postDelayed(fadeTyped, 250); collapsedFadeHandler.postDelayed(fadeObj, 250); collapsedFadeHandler.postDelayed(fadeLambda, 250) } }\n"
                     "    fun timeoutConst() = handler.postDelayed(timeoutTask, TIMEOUT_MS)\n"
                     "    fun fadeUi() = collapsedFadeHandler.postDelayed(::fadeCollapsedControl, 250)\n"
@@ -314,6 +321,18 @@ class DeviceCompatibilityArchitectureGuardTest(unittest.TestCase):
                 "class InputEventSender { ActivePointerTracker t; boolean[] active = new boolean[16]; void f(int pointerId) { active[pointerId] = true; } }",
             ),
             (
+                f"{TERMUX_X11}/input/InputEventSender.java",
+                "class InputEventSender { ActivePointerTracker t; boolean[] active = new boolean[16]; void f(android.view.MotionEvent event) { int id = event.getPointerId(0); active[id] = true; } }",
+            ),
+            (
+                f"{TERMUX_X11}/input/InputEventSender.java",
+                "class InputEventSender { ActivePointerTracker t; boolean[] active = new boolean[16]; void f(android.view.MotionEvent event) { int idx = event.getActionIndex(), id = event\n.getPointerId(idx); active[id] = true; } }",
+            ),
+            (
+                f"{TERMUX_X11}/input/InputEventSender.java",
+                "class InputEventSender { ActivePointerTracker t; boolean[] active = new boolean[16]; void f(android.view.MotionEvent e) { active[e.getPointerId(e.getActionIndex())] = true; } }",
+            ),
+            (
                 f"{TERMUX_X11}/input/TouchInputHandler.java",
                 "public class TouchInputHandler { void onTouch() {} }",
             ),
@@ -453,6 +472,10 @@ class DeviceCompatibilityArchitectureGuardTest(unittest.TestCase):
             ),
             (
                 f"{ANDROID_KOTLIN}/view/DesktopActivity.kt",
+                "class DesktopActivity { val g = DesktopReadinessGate {}; fun f() = collapsedFadeHandler.postDelayed(Runnable { launchSession() }, 250) }",
+            ),
+            (
+                f"{ANDROID_KOTLIN}/view/DesktopActivity.kt",
                 "class DesktopActivity { fun onCreate() {} }",
             ),
             (
@@ -570,6 +593,22 @@ class DeviceCompatibilityArchitectureGuardTest(unittest.TestCase):
             (
                 f"{TERMUX_X11}/LorieView.java",
                 "class LorieView { boolean is60(android.view.Display.Mode m) { return m.getRefreshRate() == 60f; } }",
+            ),
+            (
+                f"{TERMUX_X11}/LorieView.java",
+                "class LorieView { boolean is60(android.view.Display.Mode m) { return Math.round(\n    m.getRefreshRate()\n) == 60; } }",
+            ),
+            (
+                f"{TERMUX_X11}/LorieView.java",
+                "class LorieView { boolean is60(android.view.Display.Mode m) { return Float.compare(m.getRefreshRate(), 60f) == 0; } }",
+            ),
+            (
+                f"{TERMUX_X11}/LorieView.java",
+                "class LorieView { boolean is60(android.view.Display.Mode m) { return 60 == (int) m.getRefreshRate(); } }",
+            ),
+            (
+                f"{TERMUX_X11}/LorieView.java",
+                "class LorieView { boolean is60(android.view.Display.Mode m) { return Integer.compare(Math.round(m.getRefreshRate()), 60) == 0; } }",
             ),
             (
                 f"{ANDROID_KOTLIN}/view/DesktopActivity.kt",
