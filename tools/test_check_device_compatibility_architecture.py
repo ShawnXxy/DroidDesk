@@ -157,13 +157,29 @@ class DeviceCompatibilityArchitectureGuardTest(unittest.TestCase):
                 f"{ANDROID_KOTLIN}/display/capability/AndroidPresentationEvidenceProbe.kt": (
                     "fun modes() = display.supportedModes.map { it.toEvidence() }\n"
                 ),
+                f"{ANDROID_KOTLIN}/display/StartupTiming.kt": (
+                    "package com.orailnoor.droiddesk.display\n"
+                    "internal const val STARTUP_DELAY_MS = 250L\n"
+                ),
+                f"{ANDROID_KOTLIN}/view/SafeTiming.kt": (
+                    "package com.orailnoor.droiddesk.view\n"
+                    "internal const val STARTUP_DELAY_MS = 1000L\n"
+                ),
+                f"{ANDROID_KOTLIN}/view/WildcardShadowOk.kt": (
+                    "package com.orailnoor.droiddesk.view\n"
+                    "import com.orailnoor.droiddesk.display.*\n"
+                    "class WildcardShadowOk { fun ok(handler: android.os.Handler) = handler.postDelayed({ launchSession() }, STARTUP_DELAY_MS) }\n"
+                ),
                 f"{ANDROID_KOTLIN}/view/DesktopActivity.kt": (
                     "import com.orailnoor.droiddesk.display.DisplayProfilePolicy as ProfilePolicy\n"
+                    "import com.orailnoor.droiddesk.display.STARTUP_DELAY_MS\n"
                     "class DesktopActivity {\n"
                     "    companion object { private const val FADE_DELAY_MS = 250L; private const val TIMEOUT_MS = 250L * 4 }\n"
+                    "    class CtorShadowOk(@param:[Suppress(\"UNUSED_PARAMETER\")] val FADE_DELAY_MS: Long = 1000L) { fun ok(handler: android.os.Handler) = handler.postDelayed({ launchSession() }, FADE_DELAY_MS) }\n"
                     "    val fallbackProfile = ProfilePolicy.phoneDefaultProfile()\n"
                     "    val defaultSettings = ProfilePolicy.defaults(ProfileKind.PHONE)\n"
                     "    class OtherHelper(val onDone: () -> Unit = {}) {\n"
+                    "        val renderSize: (Int, Int) -> Int = { a, b -> a + b }\n"
                     "        fun classify(x: Int) = x\n"
                     "        fun classify(onItem: () -> Unit, onPair: (Int, Int) -> Unit) = 1\n"
                     "        fun resolve(name: String) = name.length\n"
@@ -178,7 +194,9 @@ class DeviceCompatibilityArchitectureGuardTest(unittest.TestCase):
                     "    fun ExtRouter.externalInputRoute() = 0\n"
                     "    fun routeSafe(r: ExtRouter) = with(r) { externalInputRoute() }\n"
                     "    fun extNoLocalSafe(ext: ExtTarget) = with(ProfilePolicy) { with(ext) { resolve(); classify() }; with(ExtTarget()) { resolve() } }\n"
-                    "    fun scopeSafe(other: OtherHelper, ext: ExtTarget) = with(ProfilePolicy) { val resolve = 1; other.classify(1); other::classify; with(other) { classify(\n1,\n); classify({}, { _, _ -> }); resolve(\"phone\") }; other.run { classify(1) }; other.apply { classify(1) }; with(ext) { resolve() }; defaults(ProfileKind.PHONE) }\n"
+                    "    fun scopeSafe(other: OtherHelper, ext: ExtTarget) = with(ProfilePolicy) { val resolve = 1; other.classify(1); other::classify; with(other) { classify(\n1,\n); classify({}, { _, _ -> }); resolve(\"phone\"); renderSize(1, 2) }; other.run { classify(1) }; other.apply { classify(1) }; with(ext) { resolve() }; defaults(ProfileKind.PHONE) }\n"
+                    "    fun annotatedParamShadowOk(@Suppress(\"UNUSED_PARAMETER\", \"SHADOWING\") FADE_DELAY_MS: Long = 1000L) = handler.postDelayed({ launchSession() }, FADE_DELAY_MS)\n"
+                    "    fun importedConstShadowOk(STARTUP_DELAY_MS: Long = 1000L) = handler.postDelayed({ launchSession() }, STARTUP_DELAY_MS)\n"
                     "    fun shadowParamSafe(ProfilePolicy: OtherHelper) { val x = ProfilePolicy; x.classify(1); listOf(DisplayProfilePolicy).forEach { ProfilePolicy: DisplayProfilePolicy -> ProfilePolicy.defaults(ProfileKind.PHONE) } }\n"
                     "    fun earlierClobberSafe(collapsedFadeView: android.view.MotionEvent) {}\n"
                     "    private val fadeLambda: () -> Unit = { hideOverlay() }\n"
@@ -535,6 +553,22 @@ class DeviceCompatibilityArchitectureGuardTest(unittest.TestCase):
             (
                 f"{ANDROID_KOTLIN}/MainActivity.kt",
                 "import com.orailnoor.droiddesk.display.DisplayProfilePolicy as ProfilePolicy\nclass EmptyHelper\ndata class OtherHelper(val id: Int) { fun classify(a: Boolean, b: Int, c: Boolean) = 0 }\nfun stealBody(empty: EmptyHelper) = with(ProfilePolicy) { with(empty) { classify(true, 600, false) } }",
+            ),
+            (
+                f"{ANDROID_KOTLIN}/MainActivity.kt",
+                "class Helper { val classify = 1 }\nfun hideByNonCallableProp(h: Helper) = with(DisplayProfilePolicy) { with(h) { classify(true, 600, false) } }",
+            ),
+            (
+                f"{ANDROID_KOTLIN}/MainActivity.kt",
+                "class Helper { val classify: (Int) -> Int = { it } }\nfun hideByWrongArityProp(h: Helper) = with(DisplayProfilePolicy) { with(h) { classify(true, 600, false) } }",
+            ),
+            (
+                f"{ANDROID_KOTLIN}/MainActivity.kt",
+                "class Helper { fun zero() = 1; val classify = ::zero }\nfun hideByZeroArityRefProp(h: Helper) = with(DisplayProfilePolicy) { with(h) { classify(true, 600, false) } }",
+            ),
+            (
+                f"{ANDROID_KOTLIN}/MainActivity.kt",
+                "fun localValRefBypass() = with(DisplayProfilePolicy) { val classify = 1; val r = ::classify }",
             ),
         ):
             with self.subTest(relative=relative, snippet=snippet):
@@ -1034,6 +1068,31 @@ class DeviceCompatibilityArchitectureGuardTest(unittest.TestCase):
         ):
             with self.subTest(relative=relative, snippet=snippet):
                 self.assert_fails_with({relative: snippet}, "250 ms startup delay")
+
+        for files in (
+            {
+                f"{ANDROID_KOTLIN}/display/StartupTiming.kt": "package com.orailnoor.droiddesk.display\ninternal const val STARTUP_DELAY_MS = 250L\n",
+                f"{ANDROID_KOTLIN}/view/DesktopActivity.kt": "package com.orailnoor.droiddesk.view\nimport com.orailnoor.droiddesk.display.STARTUP_DELAY_MS\nclass DesktopActivity { val g = DesktopReadinessGate {}; fun s() = handler.postDelayed({ launchSession() }, STARTUP_DELAY_MS) }\n",
+            },
+            {
+                f"{ANDROID_KOTLIN}/view/StartupTiming.kt": "package com.orailnoor.droiddesk.view\ninternal const val STARTUP_DELAY_MS = 250L\n",
+                f"{ANDROID_KOTLIN}/view/DesktopActivity.kt": "package com.orailnoor.droiddesk.view\nclass DesktopActivity { val g = DesktopReadinessGate {}; fun s() = handler.postDelayed({ launchSession() }, STARTUP_DELAY_MS) }\n",
+            },
+            {
+                f"{ANDROID_KOTLIN}/display/StartupTiming.kt": "package com.orailnoor.droiddesk.display\nobject StartupTiming { const val STARTUP_DELAY_MS = 250L }\n",
+                f"{ANDROID_KOTLIN}/view/DesktopActivity.kt": "package com.orailnoor.droiddesk.view\nimport com.orailnoor.droiddesk.display.StartupTiming\nclass DesktopActivity { val g = DesktopReadinessGate {}; fun s() = handler.postDelayed({ launchSession() }, StartupTiming.STARTUP_DELAY_MS) }\n",
+            },
+            {
+                f"{ANDROID_KOTLIN}/display/StartupTiming.kt": "package com.orailnoor.droiddesk.display\nobject StartupTiming { const val STARTUP_DELAY_MS = 250L }\n",
+                f"{ANDROID_KOTLIN}/view/DesktopActivity.kt": "package com.orailnoor.droiddesk.view\nimport com.orailnoor.droiddesk.display.StartupTiming.STARTUP_DELAY_MS as DELAY\nclass DesktopActivity { val g = DesktopReadinessGate {}; fun s() = handler.postDelayed({ launchSession() }, DELAY) }\n",
+            },
+            {
+                f"{ANDROID_KOTLIN}/display/StartupTiming.kt": "package com.orailnoor.droiddesk.display\ninternal const val STARTUP_DELAY_MS = 250L\n",
+                f"{ANDROID_KOTLIN}/view/DesktopActivity.kt": "package com.orailnoor.droiddesk.view\nimport com.orailnoor.droiddesk.display.*\nclass DesktopActivity { val g = DesktopReadinessGate {}; fun s() = handler.postDelayed({ launchSession() }, STARTUP_DELAY_MS) }\n",
+            },
+        ):
+            with self.subTest(files=files):
+                self.assert_fails_with(files, "250 ms startup delay")
 
     def test_direct_refresh_mode_selection_fails(self) -> None:
         for relative, snippet in (
