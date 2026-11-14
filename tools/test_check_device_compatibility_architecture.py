@@ -259,7 +259,12 @@ class DeviceCompatibilityArchitectureGuardTest(unittest.TestCase):
                     "    private fun pongDelay(): Long = pingDelay()\n"
                     "    private fun clampDelay(ms: Long = 250L): Long = ms\n"
                     "    private fun addOffsetSafe(x: Long): Long { val sum = x + 50L; return sum }\n"
+                    "    private fun safeDelay(base: Long): Long { var d = 250L; d = base; return d }\n"
+                    "    private fun safeStepDelay(base: Long): Long { var d = 250L; d = base; d++; return d }\n"
                     "    private fun safeBlockDelay(): Long { fun inner250(): Long { return 250L }; return 1000L }\n"
+                    "    companion object { private var compStepDelay = 250L }\n"
+                    "    class DelayHolder { var ms = 250L }\n"
+                    "    fun incAndHelperSafe(dyn: Long) { Companion.compStepDelay++; handler.postDelayed({ launchSession() }, Companion.compStepDelay); val box = DelayHolder(); box.ms++; handler.postDelayed({ launchSession() }, box.ms); handler.postDelayed({ launchSession() }, safeDelay(1000L)); handler.postDelayed({ launchSession() }, safeStepDelay(1000L)) }\n"
                     "    fun helperSafe(dyn: Long) { val unused250 = addOffsetSafe(200L); handler.postDelayed({ launchSession() }, addOffsetSafe(1000L)); handler.postDelayed({ launchSession() }, loopDelay()); handler.postDelayed({ launchSession() }, pingDelay()); handler.postDelayed({ launchSession() }, clampDelay(1000L)); handler.postDelayed({ launchSession() }, clampDelay(dyn)); handler.postDelayed({ launchSession() }, safeBlockDelay()); run { fun clampDelay(): Long = 1000L; handler.postDelayed({ launchSession() }, clampDelay()) } }\n"
                     "    fun unrelatedLocalHelper() { fun applyRefreshRequest(x: Int) = x; applyRefreshRequest(1) }\n"
                     "    fun modes() = target?.supportedModes?.mapNotNull { it?.toEvidenceOrNull() }\n"
@@ -341,10 +346,14 @@ class DeviceCompatibilityArchitectureGuardTest(unittest.TestCase):
                 f"{TERMUX_X11}/LorieView.java": (
                     "import static androidx.core.os.HandlerCompat.postDelayed;\n"
                     "public class LorieView {\n"
+                    "    long fieldDelay = 250L;\n"
+                    "    static long statDelay = 250L;\n"
                     "    Object modes(android.view.Display d) { float r = d.getMode().getRefreshRate(); return d.getSupportedModes(); }\n"
                     "    void non250Loop(android.os.Handler h, Runnable r) { for (long d : new long[] {4 * 250, 1000}) h.postDelayed(r, d); }\n"
                     "    void schedule(android.os.Handler h, Runnable r, long delay) { delay = 1000L; h.postDelayed(r, delay); }\n"
                     "    void bootOverwriteOk(android.os.Handler h, Runnable r) { schedule(h, r, 250L); }\n"
+                    "    private long resetParam(long base) { base = 250L; base = 1000L; return base; }\n"
+                    "    void incAwayOk(android.os.Handler h, Runnable r) { long delay = 250L; delay++; h.postDelayed(r, delay); long d2 = 250L; --d2; h.postDelayed(r, d2); long d3 = 250L; h.postDelayed(r, ++d3); this.fieldDelay++; h.postDelayed(r, this.fieldDelay); LorieView.statDelay++; h.postDelayed(r, LorieView.statDelay); h.postDelayed(r, resetParam(250L)); }\n"
                     "    void compatOk(android.os.Handler h, Runnable r) { android.os.Handler out; HandlerCompat.postDelayed(out = h, r, 250, 1000L); postDelayed(h, r, 250, 1000L); }\n"
                     "}\n"
                 ),
@@ -1259,6 +1268,58 @@ class DeviceCompatibilityArchitectureGuardTest(unittest.TestCase):
             (
                 f"{TERMUX_X11}/LorieView.java",
                 "class LorieView { private long startupDelay() { return 250L; } void boot(android.os.Handler h, Runnable r) { h.postDelayed(r, startupDelay()); } }",
+            ),
+            (
+                f"{TERMUX_X11}/LorieView.java",
+                "class LorieView { void boot(android.os.Handler h, Runnable r) { long delay = 249L; delay++; h.postDelayed(r, delay); } }",
+            ),
+            (
+                f"{TERMUX_X11}/LorieView.java",
+                "class LorieView { void boot(android.os.Handler h, Runnable r) { long delay = 251L; --delay; h.postDelayed(r, delay); } }",
+            ),
+            (
+                f"{TERMUX_X11}/LorieView.java",
+                "class LorieView { void boot(android.os.Handler h, Runnable r) { long delay = 248L; delay++; ++delay; h.postDelayed(r, delay); } }",
+            ),
+            (
+                f"{TERMUX_X11}/LorieView.java",
+                "class LorieView { void boot(android.os.Handler h, Runnable r) { long delay = 249L; h.postDelayed(r, ++delay); } }",
+            ),
+            (
+                f"{TERMUX_X11}/LorieView.java",
+                "class LorieView { void boot(android.os.Handler h, Runnable r) { long delay = 250L; h.postDelayed(r, delay++); } }",
+            ),
+            (
+                f"{TERMUX_X11}/LorieView.java",
+                "class LorieView { long delay = 249L; void boot(android.os.Handler h, Runnable r) { this.delay++; h.postDelayed(r, this.delay); } }",
+            ),
+            (
+                f"{TERMUX_X11}/LorieView.java",
+                "class LorieView { static long delay = 251L; void boot(android.os.Handler h, Runnable r) { LorieView.delay--; h.postDelayed(r, LorieView.delay); } }",
+            ),
+            (
+                f"{ANDROID_KOTLIN}/view/DesktopActivity.kt",
+                "class DesktopActivity { val g = DesktopReadinessGate {}; companion object { var delay = 249L }; fun s() { Companion.delay++; handler.postDelayed({ launchSession() }, Companion.delay) } }",
+            ),
+            (
+                f"{ANDROID_KOTLIN}/view/DesktopActivity.kt",
+                "object Delays { var ms = 249L }\nclass DesktopActivity { val g = DesktopReadinessGate {}; fun s() { Delays.ms++; handler.postDelayed({ launchSession() }, Delays.ms) } }",
+            ),
+            (
+                f"{ANDROID_KOTLIN}/view/DesktopActivity.kt",
+                "class Box { var ms = 249L }\nclass DesktopActivity { val g = DesktopReadinessGate {}; fun s() { val b = Box(); b.ms++; handler.postDelayed({ launchSession() }, b.ms) } }",
+            ),
+            (
+                f"{ANDROID_KOTLIN}/view/DesktopActivity.kt",
+                "class DesktopActivity { val g = DesktopReadinessGate {}; private fun maybeDelay(base: Long, c: Boolean): Long { var d = 250L; if (c) d = base; return d }; fun s() = handler.postDelayed({ launchSession() }, maybeDelay(1000L, true)) }",
+            ),
+            (
+                f"{TERMUX_X11}/LorieView.java",
+                "class LorieView { private long maybeParam(long base, boolean c) { if (c) base = 1000L; return base; } void boot(android.os.Handler h, Runnable r) { h.postDelayed(r, maybeParam(250L, false)); } }",
+            ),
+            (
+                f"{ANDROID_KOTLIN}/view/DesktopActivity.kt",
+                "class DesktopActivity { val g = DesktopReadinessGate {}; private fun stepDelay(base: Long): Long { var d = base; d++; return d }; fun s() = handler.postDelayed({ launchSession() }, stepDelay(249L)) }",
             ),
             (
                 f"{ANDROID_KOTLIN}/view/DesktopActivity.kt",
