@@ -180,6 +180,18 @@ class DeviceCompatibilityArchitectureGuardTest(unittest.TestCase):
                 f"{ANDROID_KOTLIN}/view/DesktopActivity.kt": (
                     "import com.orailnoor.droiddesk.display.DisplayProfilePolicy as ProfilePolicy\n"
                     "import com.orailnoor.droiddesk.display.STARTUP_DELAY_MS\n"
+                    "internal fun applyRefreshRequest(\n"
+                    "    request: RefreshRequest,\n"
+                    "    updateWindowRefresh: (preferredRefreshRate: Float, preferredDisplayModeId: Int) -> Unit,\n"
+                    ") {\n"
+                    "    if (request.preferredRefreshRate == null && request.preferredModeId == null) {\n"
+                    "        return\n"
+                    "    }\n"
+                    "    updateWindowRefresh(\n"
+                    "        request.preferredRefreshRate ?: 0f,\n"
+                    "        request.preferredModeId ?: 0,\n"
+                    "    )\n"
+                    "}\n"
                     "class DesktopActivity {\n"
                     "    companion object { private const val FADE_DELAY_MS = 250L; private const val TIMEOUT_MS = 250L * 4; private const val SAFE_ARITH_MS = 500L + 500L; private const val delayMillis = 1000L }\n"
                     "    class CtorShadowOk(@param:[Suppress(\"UNUSED_PARAMETER\")] val FADE_DELAY_MS: Long = 1000L) { fun ok(handler: android.os.Handler) = handler.postDelayed({ launchSession() }, FADE_DELAY_MS) }\n"
@@ -242,6 +254,14 @@ class DeviceCompatibilityArchitectureGuardTest(unittest.TestCase):
                     "    fun fadeConst() = collapsedFadeHandler.postDelayed(::fadeCollapsedControl, FADE_DELAY_MS)\n"
                     "    fun animUi() = collapsedFadeHandler.postDelayed({ bar.animate().alpha(0f).\n        start(); hideOverlay() }, 250)\n"
                     "    fun laterClobberSafe(collapsedFadeView: android.view.MotionEvent) {}\n"
+                    "    private fun loopDelay(): Long = loopDelay()\n"
+                    "    private fun pingDelay(): Long = pongDelay()\n"
+                    "    private fun pongDelay(): Long = pingDelay()\n"
+                    "    private fun clampDelay(ms: Long = 250L): Long = ms\n"
+                    "    private fun addOffsetSafe(x: Long): Long { val sum = x + 50L; return sum }\n"
+                    "    private fun safeBlockDelay(): Long { fun inner250(): Long { return 250L }; return 1000L }\n"
+                    "    fun helperSafe(dyn: Long) { val unused250 = addOffsetSafe(200L); handler.postDelayed({ launchSession() }, addOffsetSafe(1000L)); handler.postDelayed({ launchSession() }, loopDelay()); handler.postDelayed({ launchSession() }, pingDelay()); handler.postDelayed({ launchSession() }, clampDelay(1000L)); handler.postDelayed({ launchSession() }, clampDelay(dyn)); handler.postDelayed({ launchSession() }, safeBlockDelay()); run { fun clampDelay(): Long = 1000L; handler.postDelayed({ launchSession() }, clampDelay()) } }\n"
+                    "    fun unrelatedLocalHelper() { fun applyRefreshRequest(x: Int) = x; applyRefreshRequest(1) }\n"
                     "    fun modes() = target?.supportedModes?.mapNotNull { it?.toEvidenceOrNull() }\n"
                     "    fun refresh(request: RefreshRequest) {\n"
                     "        var calls = 0\n"
@@ -1202,6 +1222,46 @@ class DeviceCompatibilityArchitectureGuardTest(unittest.TestCase):
             ),
             (
                 f"{ANDROID_KOTLIN}/view/DesktopActivity.kt",
+                "class DesktopActivity { val g = DesktopReadinessGate {}; private fun startupDelay(): Long = 250L; fun s() = handler.postDelayed({ launchSession() }, startupDelay()) }",
+            ),
+            (
+                f"{ANDROID_KOTLIN}/view/DesktopActivity.kt",
+                "class DesktopActivity { val g = DesktopReadinessGate {}; private fun startupDelay(): Long { val base = 200L; return base + 50L }; fun s() = handler.postDelayed({ launchSession() }, startupDelay()) }",
+            ),
+            (
+                f"{ANDROID_KOTLIN}/view/DesktopActivity.kt",
+                "class DesktopActivity { val g = DesktopReadinessGate {}; private fun halfDelay() = 125L; private fun startupDelay(fast: Boolean) = if (fast) halfDelay() * 2L else 1000L; fun s() = handler.postDelayed({ launchSession() }, startupDelay(true)) }",
+            ),
+            (
+                f"{ANDROID_KOTLIN}/view/DesktopActivity.kt",
+                "class DesktopActivity { val g = DesktopReadinessGate {}; private fun retryDelay(n: Int): Long = if (n <= 0) 250L else retryDelay(n - 1); fun s() = handler.postDelayed({ launchSession() }, retryDelay(1)) }",
+            ),
+            (
+                f"{ANDROID_KOTLIN}/view/DesktopActivity.kt",
+                "class DesktopActivity { val g = DesktopReadinessGate {}; private fun addOffset(base: Long): Long = base + 50L; fun s() = handler.postDelayed({ launchSession() }, addOffset(200L)) }",
+            ),
+            (
+                f"{ANDROID_KOTLIN}/view/DesktopActivity.kt",
+                "class DesktopActivity { val g = DesktopReadinessGate {}; private fun defaultDelay(ms: Long = 250L): Long = ms; fun s() = handler.postDelayed({ launchSession() }, defaultDelay()) }",
+            ),
+            (
+                f"{ANDROID_KOTLIN}/view/DesktopActivity.kt",
+                "class DesktopActivity { companion object { private fun startupDelay() = 250L }; val g = DesktopReadinessGate {}; fun s() = handler.postDelayed({ launchSession() }, startupDelay()) }",
+            ),
+            (
+                f"{ANDROID_KOTLIN}/view/DesktopActivity.kt",
+                "class DesktopActivity { val g = DesktopReadinessGate {}; fun s() = handler.postDelayed({ launchSession() }, startupDelay()); private val startupDelay = { 250L } }",
+            ),
+            (
+                f"{ANDROID_KOTLIN}/view/DesktopActivity.kt",
+                "class DesktopActivity { val g = DesktopReadinessGate {}; private val startupDelay = { 250L }; fun s() = handler.postDelayed({ launchSession() }, startupDelay.invoke()) }",
+            ),
+            (
+                f"{TERMUX_X11}/LorieView.java",
+                "class LorieView { private long startupDelay() { return 250L; } void boot(android.os.Handler h, Runnable r) { h.postDelayed(r, startupDelay()); } }",
+            ),
+            (
+                f"{ANDROID_KOTLIN}/view/DesktopActivity.kt",
                 "class DesktopActivity { fun onCreate() {} }",
             ),
             (
@@ -1244,6 +1304,10 @@ class DeviceCompatibilityArchitectureGuardTest(unittest.TestCase):
             {
                 f"{ANDROID_KOTLIN}/display/StartupTiming.kt": "package com.orailnoor.droiddesk.display\ninternal const val STARTUP_DELAY_MS = 500L / 2\n",
                 f"{ANDROID_KOTLIN}/view/DesktopActivity.kt": "package com.orailnoor.droiddesk.view\nimport com.orailnoor.droiddesk.display.STARTUP_DELAY_MS\nclass DesktopActivity { val g = DesktopReadinessGate {}; fun s() = handler.postDelayed({ launchSession() }, STARTUP_DELAY_MS) }\n",
+            },
+            {
+                f"{ANDROID_KOTLIN}/display/StartupTiming.kt": "package com.orailnoor.droiddesk.display\ninternal fun remoteStartupDelay(): Long = 250L\n",
+                f"{ANDROID_KOTLIN}/view/DesktopActivity.kt": "package com.orailnoor.droiddesk.view\nimport com.orailnoor.droiddesk.display.remoteStartupDelay\nclass DesktopActivity { val g = DesktopReadinessGate {}; fun s() = handler.postDelayed({ launchSession() }, remoteStartupDelay()) }\n",
             },
         ):
             with self.subTest(files=files):
@@ -1411,12 +1475,112 @@ class DeviceCompatibilityArchitectureGuardTest(unittest.TestCase):
                 "    }\n"
                 "}\n",
             ),
+            (
+                f"{ANDROID_KOTLIN}/view/DesktopActivity.kt",
+                "class DesktopActivity {\n"
+                "    val gate = DesktopReadinessGate {}\n"
+                "    fun spoofLocal(req: RefreshRequest) {\n"
+                "        fun applyRefreshRequest(r: RefreshRequest, cb: (Float, Int) -> Unit) = cb(120f, 2)\n"
+                "        applyRefreshRequest(req) { rate, modeId ->\n"
+                "            preferredRefreshRate = rate\n"
+                "            window.attributes.preferredDisplayModeId = modeId\n"
+                "        }\n"
+                "    }\n"
+                "}\n",
+            ),
+            (
+                f"{ANDROID_KOTLIN}/view/DesktopActivity.kt",
+                "class DesktopActivity {\n"
+                "    val gate = DesktopReadinessGate {}\n"
+                "    fun spoofMember(req: RefreshRequest) {\n"
+                "        applyRefreshRequest(req) { rate, modeId ->\n"
+                "            preferredRefreshRate = rate\n"
+                "            window.attributes.preferredDisplayModeId = modeId\n"
+                "        }\n"
+                "    }\n"
+                "    private fun applyRefreshRequest(r: RefreshRequest, cb: (Float, Int) -> Unit) = cb(120f, 2)\n"
+                "}\n",
+            ),
+            (
+                f"{ANDROID_KOTLIN}/view/DesktopActivity.kt",
+                "class Spoof { fun applyRefreshRequest(r: RefreshRequest, cb: (Float, Int) -> Unit) = cb(120f, 2) }\n"
+                "class DesktopActivity {\n"
+                "    val gate = DesktopReadinessGate {}\n"
+                "    fun spoofRecv(s: Spoof, req: RefreshRequest) {\n"
+                "        s.applyRefreshRequest(req) { rate, modeId ->\n"
+                "            preferredRefreshRate = rate\n"
+                "            window.attributes.preferredDisplayModeId = modeId\n"
+                "        }\n"
+                "    }\n"
+                "}\n",
+            ),
+            (
+                f"{ANDROID_KOTLIN}/view/DesktopActivity.kt",
+                "class Spoof { fun applyRefreshRequest(r: RefreshRequest, cb: (Float, Int) -> Unit) = cb(120f, 2) }\n"
+                "class DesktopActivity {\n"
+                "    val gate = DesktopReadinessGate {}\n"
+                "    fun spoofWith(s: Spoof, req: RefreshRequest) = with(s) {\n"
+                "        applyRefreshRequest(req) { rate, modeId ->\n"
+                "            preferredRefreshRate = rate\n"
+                "            window.attributes.preferredDisplayModeId = modeId\n"
+                "        }\n"
+                "    }\n"
+                "}\n",
+            ),
+            (
+                f"{ANDROID_KOTLIN}/view/DesktopActivity.kt",
+                "class DesktopActivity {\n"
+                "    val gate = DesktopReadinessGate {}\n"
+                "    fun spoofVal(req: RefreshRequest) {\n"
+                "        val applyRefreshRequest: (RefreshRequest, (Float, Int) -> Unit) -> Unit = { _, cb -> cb(120f, 2) }\n"
+                "        applyRefreshRequest(req) { rate, modeId ->\n"
+                "            preferredRefreshRate = rate\n"
+                "            window.attributes.preferredDisplayModeId = modeId\n"
+                "        }\n"
+                "    }\n"
+                "}\n",
+            ),
+            (
+                f"{ANDROID_KOTLIN}/view/DesktopActivity.kt",
+                "internal fun applyRefreshRequest(request: RefreshRequest, updateWindowRefresh: (Float, Int) -> Unit) { updateWindowRefresh(120f, 2) }\n"
+                "class DesktopActivity {\n"
+                "    val gate = DesktopReadinessGate {}\n"
+                "    fun spoofTop(req: RefreshRequest) {\n"
+                "        applyRefreshRequest(req) { rate, modeId ->\n"
+                "            preferredRefreshRate = rate\n"
+                "            window.attributes.preferredDisplayModeId = modeId\n"
+                "        }\n"
+                "    }\n"
+                "}\n",
+            ),
+            (
+                f"{ANDROID_KOTLIN}/view/DesktopActivity.kt",
+                "class DesktopActivity {\n"
+                "    val gate = DesktopReadinessGate {}\n"
+                "    fun spoofCompVal(req: RefreshRequest) {\n"
+                "        applyRefreshRequest(req) { rate, modeId ->\n"
+                "            preferredRefreshRate = rate\n"
+                "            window.attributes.preferredDisplayModeId = modeId\n"
+                "        }\n"
+                "    }\n"
+                "    companion object {\n"
+                "        val applyRefreshRequest: (RefreshRequest, (Float, Int) -> Unit) -> Unit = { _, cb -> cb(120f, 2) }\n"
+                "    }\n"
+                "}\n",
+            ),
         ):
             with self.subTest(relative=relative, snippet=snippet):
                 self.assert_fails_with(
                     {relative: snippet},
                     "direct refresh-mode selection",
                 )
+        self.assert_fails_with(
+            {
+                f"{ANDROID_KOTLIN}/view/BaseRefresh.kt": "package com.orailnoor.droiddesk.view\nopen class BaseRefresh { fun applyRefreshRequest(r: RefreshRequest, cb: (Float, Int) -> Unit) = cb(120f, 2) }\n",
+                f"{ANDROID_KOTLIN}/view/DesktopActivity.kt": "package com.orailnoor.droiddesk.view\nclass DesktopActivity : BaseRefresh() { val g = DesktopReadinessGate {}; fun s(req: RefreshRequest) = applyRefreshRequest(req) { rate, modeId -> preferredRefreshRate = rate; window.attributes.preferredDisplayModeId = modeId } }\n",
+            },
+            "direct refresh-mode selection",
+        )
 
     def test_smallest_screen_width_dp_fails_with_exact_line_after_block_comment(
         self,
