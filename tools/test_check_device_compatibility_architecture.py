@@ -180,8 +180,9 @@ class DeviceCompatibilityArchitectureGuardTest(unittest.TestCase):
                     "import com.orailnoor.droiddesk.display.DisplayProfilePolicy as ProfilePolicy\n"
                     "import com.orailnoor.droiddesk.display.STARTUP_DELAY_MS\n"
                     "class DesktopActivity {\n"
-                    "    companion object { private const val FADE_DELAY_MS = 250L; private const val TIMEOUT_MS = 250L * 4; private const val delayMillis = 1000L }\n"
+                    "    companion object { private const val FADE_DELAY_MS = 250L; private const val TIMEOUT_MS = 250L * 4; private const val SAFE_ARITH_MS = 500L + 500L; private const val delayMillis = 1000L }\n"
                     "    class CtorShadowOk(@param:[Suppress(\"UNUSED_PARAMETER\")] val FADE_DELAY_MS: Long = 1000L) { fun ok(handler: android.os.Handler) = handler.postDelayed({ launchSession() }, FADE_DELAY_MS) }\n"
+                    "    class OuterDelay250CmpDefaultOk { private val delayMillis = 250L; fun later(flag: Boolean = 1 < 2, delayMillis: Long = 1000L) = handler.postDelayed({ launchSession() }, delayMillis); fun laterExpr(a: Int = 1, b: Int = 2, flag: Boolean = a < b && b > 0, delayMillis: Long = 1000L) { handler.postDelayed({ launchSession() }, delayMillis) } }\n"
                     "    class CtorSelfDefaultOk(delayMillis: Long = delayMillis) { init { handler.postDelayed({ launchSession() }, delayMillis) } }\n"
                     "    class CtorValSelfDefaultOk(val delayMillis: Long = delayMillis) { init { handler.postDelayed({ launchSession() }, delayMillis) } }\n"
                     "    class CtorEarlierParamShadowOk(FADE_DELAY_MS: Long = 1000L, effectiveDelay: Long = FADE_DELAY_MS) { init { handler.postDelayed({ launchSession() }, effectiveDelay) } }\n"
@@ -234,6 +235,7 @@ class DeviceCompatibilityArchitectureGuardTest(unittest.TestCase):
                     "    fun objInlineFade() = collapsedFadeHandler.postDelayed(object : Runnable { override fun run() { hideOverlay() } }, 250)\n"
                     "    fun typedFade(a: Int) = when (a) { 0 -> collapsedFadeHandler.removeCallbacks(fadeTyped); else -> { collapsedFadeHandler.postDelayed(fadeTyped, 250); collapsedFadeHandler.postDelayed(fadeObj, 250); collapsedFadeHandler.postDelayed(fadeLambda, 250) } }\n"
                     "    fun timeoutConst() = handler.postDelayed(timeoutTask, TIMEOUT_MS)\n"
+                    "    fun non250ArithOk() { handler.postDelayed(timeoutTask, 500L * 2); handler.postDelayed(timeoutTask, 1200L - 200L); handler.postDelayed(timeoutTask, 2000L / 2); handler.postDelayed(timeoutTask, SAFE_ARITH_MS) }\n"
                     "    fun fadeUi() = collapsedFadeHandler.postDelayed(::fadeCollapsedControl, 250)\n"
                     "    fun fadeConst() = collapsedFadeHandler.postDelayed(::fadeCollapsedControl, FADE_DELAY_MS)\n"
                     "    fun animUi() = collapsedFadeHandler.postDelayed({ bar.animate().alpha(0f).\n        start(); hideOverlay() }, 250)\n"
@@ -319,6 +321,8 @@ class DeviceCompatibilityArchitectureGuardTest(unittest.TestCase):
                     "public class LorieView {\n"
                     "    Object modes(android.view.Display d) { float r = d.getMode().getRefreshRate(); return d.getSupportedModes(); }\n"
                     "    void non250Loop(android.os.Handler h, Runnable r) { for (long d : new long[] {4 * 250, 1000}) h.postDelayed(r, d); }\n"
+                    "    void schedule(android.os.Handler h, Runnable r, long delay) { delay = 1000L; h.postDelayed(r, delay); }\n"
+                    "    void bootOverwriteOk(android.os.Handler h, Runnable r) { schedule(h, r, 250L); }\n"
                     "    void compatOk(android.os.Handler h, Runnable r) { android.os.Handler out; HandlerCompat.postDelayed(out = h, r, 250, 1000L); postDelayed(h, r, 250, 1000L); }\n"
                     "}\n"
                 ),
@@ -1080,6 +1084,54 @@ class DeviceCompatibilityArchitectureGuardTest(unittest.TestCase):
             ),
             (
                 f"{ANDROID_KOTLIN}/view/DesktopActivity.kt",
+                "class DesktopActivity { val g = DesktopReadinessGate {}; fun s() = handler.postDelayed({ launchSession() }, 500L / 2) }",
+            ),
+            (
+                f"{ANDROID_KOTLIN}/view/DesktopActivity.kt",
+                "class DesktopActivity { val g = DesktopReadinessGate {}; fun s() = handler.postDelayed({ launchSession() }, 125L * 2) }",
+            ),
+            (
+                f"{ANDROID_KOTLIN}/view/DesktopActivity.kt",
+                "class DesktopActivity { val g = DesktopReadinessGate {}; fun s() = handler.postDelayed({ launchSession() }, 200L + 50L) }",
+            ),
+            (
+                f"{ANDROID_KOTLIN}/view/DesktopActivity.kt",
+                "class DesktopActivity { val g = DesktopReadinessGate {}; fun s() = handler.postDelayed({ launchSession() }, 300L - 50L) }",
+            ),
+            (
+                f"{ANDROID_KOTLIN}/view/DesktopActivity.kt",
+                "class DesktopActivity { val g = DesktopReadinessGate {}; fun s() = handler.postDelayed({ launchSession() }, (100 + 25) * 2L) }",
+            ),
+            (
+                f"{ANDROID_KOTLIN}/view/DesktopActivity.kt",
+                "class DesktopActivity { val g = DesktopReadinessGate {}; fun s() = handler.postDelayed({ launchSession() }, 125L shl 1) }",
+            ),
+            (
+                f"{ANDROID_KOTLIN}/view/DesktopActivity.kt",
+                "class DesktopActivity { companion object { private const val STARTUP_DELAY_MS = 500L / 2 }; val g = DesktopReadinessGate {}; fun s() = handler.postDelayed({ launchSession() }, STARTUP_DELAY_MS) }",
+            ),
+            (
+                f"{ANDROID_KOTLIN}/view/DesktopActivity.kt",
+                "class DesktopActivity { companion object { private const val HALF_DELAY_MS = 125L }; val g = DesktopReadinessGate {}; fun s() = handler.postDelayed({ launchSession() }, HALF_DELAY_MS * 2) }",
+            ),
+            (
+                f"{ANDROID_KOTLIN}/view/DesktopActivity.kt",
+                "class DesktopActivity { private val delayMillis = 1000L; val g = DesktopReadinessGate {}; fun later(flag: Boolean = 1 < 2, delayMillis: Long = 500L / 2) = handler.postDelayed({ launchSession() }, delayMillis) }",
+            ),
+            (
+                f"{TERMUX_X11}/LorieView.java",
+                "class LorieView { void schedule(android.os.Handler h, Runnable r, long delay, boolean c) { if (c) delay = 1000L; h.postDelayed(r, delay); } void boot(android.os.Handler h, Runnable r) { schedule(h, r, 250L, false); } }",
+            ),
+            (
+                f"{TERMUX_X11}/LorieView.java",
+                "class LorieView { void schedule(android.os.Handler h, Runnable r, long delay) { delay = 250L; h.postDelayed(r, delay); } void boot(android.os.Handler h, Runnable r) { schedule(h, r, 1000L); } }",
+            ),
+            (
+                f"{TERMUX_X11}/LorieView.java",
+                "class LorieView { void helper(android.os.Handler h, Runnable r, long d) { h.postDelayed(r, d); } void boot(android.os.Handler h, Runnable r) { helper(h, r, 500L / 2); } }",
+            ),
+            (
+                f"{ANDROID_KOTLIN}/view/DesktopActivity.kt",
                 "class DesktopActivity { fun onCreate() {} }",
             ),
             (
@@ -1118,6 +1170,10 @@ class DeviceCompatibilityArchitectureGuardTest(unittest.TestCase):
             {
                 f"{ANDROID_KOTLIN}/display/StartupTiming.kt": "package com.orailnoor.droiddesk.display\ninternal const val STARTUP_DELAY_MS = 250L\n",
                 f"{ANDROID_KOTLIN}/view/DesktopActivity.kt": "package com.orailnoor.droiddesk.view\nimport com.orailnoor.droiddesk.display.*\nclass DesktopActivity { val g = DesktopReadinessGate {}; fun s() = handler.postDelayed({ launchSession() }, STARTUP_DELAY_MS) }\n",
+            },
+            {
+                f"{ANDROID_KOTLIN}/display/StartupTiming.kt": "package com.orailnoor.droiddesk.display\ninternal const val STARTUP_DELAY_MS = 500L / 2\n",
+                f"{ANDROID_KOTLIN}/view/DesktopActivity.kt": "package com.orailnoor.droiddesk.view\nimport com.orailnoor.droiddesk.display.STARTUP_DELAY_MS\nclass DesktopActivity { val g = DesktopReadinessGate {}; fun s() = handler.postDelayed({ launchSession() }, STARTUP_DELAY_MS) }\n",
             },
         ):
             with self.subTest(files=files):
