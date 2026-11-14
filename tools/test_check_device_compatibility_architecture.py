@@ -113,9 +113,27 @@ class DeviceCompatibilityArchitectureGuardTest(unittest.TestCase):
                     '}\n'
                 ),
                 f"{ANDROID_KOTLIN}/display/DisplayRepository.kt": (
+                    "package com.orailnoor.droiddesk.display\n"
                     "import android.os.Build as SdkBuild\n"
+                    "import com.orailnoor.droiddesk.util.AndroidBuild\n"
                     'const val DOC = "Build.MODEL"\n'
+                    "class Holder { val `PS` = 1 }\n"
+                    "val backtickMemberOk = Holder().`PS`\n"
                     "val isAtLeastR = SdkBuild.VERSION.SDK_INT >= SdkBuild.VERSION_CODES.R\n"
+                    "val isAtLeastS = AndroidBuild.VERSION.SDK_INT >= 31\n"
+                ),
+                f"{ANDROID_KOTLIN}/util/BuildAliases.kt": (
+                    "package com.orailnoor.droiddesk.util\n"
+                    "typealias AndroidBuild = android.os.Build\n"
+                    "typealias CrossHC = androidx.core.os.HandlerCompat\n"
+                ),
+                f"{ANDROID_KOTLIN}/display/input/PrivateAliases.kt": (
+                    "package com.orailnoor.droiddesk.display.input\n"
+                    "private typealias SecretInputPolicy = DesktopInputPolicy\n"
+                ),
+                f"{ANDROID_KOTLIN}/display/ShadowedAliases.kt": (
+                    "package com.orailnoor.droiddesk.display\n"
+                    "typealias ShadowedPolicy = DisplayProfilePolicy\n"
                 ),
                 f"{ANDROID_KOTLIN}/runtime/LinuxRuntime.kt": (
                     "import android.os.Build as `SdkBuild`\n"
@@ -126,6 +144,8 @@ class DeviceCompatibilityArchitectureGuardTest(unittest.TestCase):
                     "}\n"
                 ),
                 f"{ANDROID_KOTLIN}/display/DesktopDisplayCoordinator.kt": (
+                    "package com.orailnoor.droiddesk.display\n"
+                    "typealias PS = DesktopPlacementSelector\n"
                     "class DesktopDisplayCoordinator(\n"
                     "    val selector: DesktopPlacementSelector = DesktopPlacementSelector(DeviceQuirkCatalog()),\n"
                     ") {\n"
@@ -175,15 +195,25 @@ class DeviceCompatibilityArchitectureGuardTest(unittest.TestCase):
                     "package com.orailnoor.droiddesk.view\n"
                     "internal const val STARTUP_DELAY_MS = 1000L\n"
                 ),
+                f"{ANDROID_KOTLIN}/view/SamePkgShadow.kt": (
+                    "package com.orailnoor.droiddesk.view\n"
+                    "enum class ShadowedPolicy { A; fun classify() = 1 }\n"
+                ),
                 f"{ANDROID_KOTLIN}/view/WildcardShadowOk.kt": (
                     "package com.orailnoor.droiddesk.view\n"
                     "import com.orailnoor.droiddesk.display.*\n"
-                    "class WildcardShadowOk { fun ok(handler: android.os.Handler) = handler.postDelayed({ launchSession() }, STARTUP_DELAY_MS) }\n"
+                    "import com.orailnoor.droiddesk.display.input.*\n"
+                    "class SecretInputPolicy { fun resolve() = 1 }\n"
+                    "class WildcardShadowOk {\n"
+                    "    fun ok(handler: android.os.Handler) = handler.postDelayed({ launchSession() }, STARTUP_DELAY_MS)\n"
+                    "    fun shadowedTaOk(p: ShadowedPolicy, s: SecretInputPolicy) = p::classify to s::resolve\n"
+                    "}\n"
                 ),
                 f"{ANDROID_KOTLIN}/view/DesktopActivity.kt": (
                     "import androidx.core.os.HandlerCompat as HC\n"
                     "import androidx.core.os.HandlerCompat.postDelayed as postCompat\n"
                     "import androidx.core.os.postDelayed as postAfter\n"
+                    "import com.orailnoor.droiddesk.util.CrossHC\n"
                     "import com.orailnoor.droiddesk.display.DisplayProfilePolicy as ProfilePolicy\n"
                     "import com.orailnoor.droiddesk.display.STARTUP_DELAY_MS\n"
                     "import com.orailnoor.droiddesk.display.SafeObj as SO\n"
@@ -277,7 +307,7 @@ class DeviceCompatibilityArchitectureGuardTest(unittest.TestCase):
                     "    fun incAndHelperSafe(dyn: Long, m: Int) { Companion.compStepDelay++; handler.postDelayed({ launchSession() }, Companion.compStepDelay); val box = DelayHolder(); box.ms++; handler.postDelayed({ launchSession() }, box.ms); handler.postDelayed({ launchSession() }, safeDelay(1000L)); handler.postDelayed({ launchSession() }, safeStepDelay(1000L)); val many = when (m) { 0 -> 1000L; 1 -> 1001L; 2 -> 1002L; 3 -> 1003L; 4 -> 1004L; 5 -> 1005L; 6 -> 1006L; 7 -> 1007L; 8 -> 1008L; 9 -> 1009L; else -> 1010L }; handler.postDelayed({ launchSession() }, many); handler.postDelayed({ launchSession() }, manySafeDelay(m)); handler.postDelayed({ launchSession() }, 125L shl 33); handler.postDelayed({ launchSession() }, 250.toLong() shl 32); handler.postDelayed({ launchSession() }, 125L shl 64) }\n"
                     "    fun helperSafe(dyn: Long) { val unused250 = addOffsetSafe(200L); handler.postDelayed({ launchSession() }, addOffsetSafe(1000L)); handler.postDelayed({ launchSession() }, loopDelay()); handler.postDelayed({ launchSession() }, pingDelay()); handler.postDelayed({ launchSession() }, clampDelay(1000L)); handler.postDelayed({ launchSession() }, clampDelay(dyn)); handler.postDelayed({ launchSession() }, safeBlockDelay()); run { fun clampDelay(): Long = 1000L; handler.postDelayed({ launchSession() }, clampDelay()) } }\n"
                     "    private fun bootLater(h: android.os.Handler, ms: Long, r: Runnable) {}\n"
-                    "    fun aliasCompatAndShadowOk(h: android.os.Handler, r: Runnable) { HC.postDelayed(h, r, 250, 1000L); HC2.postDelayed(h, r, 250, 1000L); postCompat(h, r, 250, 1000L); h.postAfter(1000L, 250) { launchSession() }; bootLater(h, 250L, r); SO.scheduleObj(h, 250L, r) }\n"
+                    "    fun aliasCompatAndShadowOk(h: android.os.Handler, r: Runnable) { HC.postDelayed(h, r, 250, 1000L); HC2.postDelayed(h, r, 250, 1000L); CrossHC.postDelayed(collapsedFadeHandler, fadeTyped, null, 250L); CrossHC.postDelayed(this.collapsedFadeHandler, { hideOverlay() }, null, 250L); postCompat(h, r, 250, 1000L); h.postAfter(1000L, 250) { launchSession() }; bootLater(h, 250L, r); SO.scheduleObj(h, 250L, r) }\n"
                     "    fun unrelatedLocalHelper() { fun applyRefreshRequest(x: Int) = x; applyRefreshRequest(1) }\n"
                     "    fun modes() = target?.supportedModes?.mapNotNull { it?.toEvidenceOrNull() }\n"
                     "    fun refresh(request: RefreshRequest) {\n"
@@ -418,6 +448,18 @@ class DeviceCompatibilityArchitectureGuardTest(unittest.TestCase):
         ):
             with self.subTest(relative=relative, snippet=snippet):
                 self.assert_fails_with({relative: snippet}, "oem identity leakage")
+        for files in (
+            {
+                f"{ANDROID_KOTLIN}/util/BuildAliases.kt": "package com.orailnoor.droiddesk.util\ntypealias AndroidBuild = android.os.Build\n",
+                f"{ANDROID_KOTLIN}/display/DisplayRepository.kt": "package com.orailnoor.droiddesk.display\nimport com.orailnoor.droiddesk.util.AndroidBuild\nval m = AndroidBuild.MODEL\n",
+            },
+            {
+                f"{ANDROID_KOTLIN}/util/BuildAliases.kt": "package com.orailnoor.droiddesk.util\ntypealias AndroidBuild = android.os.Build\n",
+                f"{ANDROID_KOTLIN}/display/DisplayRepository.kt": "package com.orailnoor.droiddesk.display\nval d = com.orailnoor.droiddesk.util.AndroidBuild.DEVICE\n",
+            },
+        ):
+            with self.subTest(files=files):
+                self.assert_fails_with(files, "oem identity leakage")
 
     def test_display_local_branching_leakage_fails(self) -> None:
         self.assert_fails_with(
@@ -465,6 +507,13 @@ class DeviceCompatibilityArchitectureGuardTest(unittest.TestCase):
                     {relative: snippet},
                     "display-local branching leakage",
                 )
+        self.assert_fails_with(
+            {
+                f"{ANDROID_KOTLIN}/display/placement/RestartAliases.kt": "package com.orailnoor.droiddesk.util\nimport com.orailnoor.droiddesk.display.placement.*\ntypealias RestartAlias = DisplayLocalRestartAdapter\n",
+                f"{ANDROID_KOTLIN}/MainActivity.kt": "package com.orailnoor.droiddesk\nimport com.orailnoor.droiddesk.util.RestartAlias\nval a = RestartAlias(selection)\n",
+            },
+            "display-local branching leakage",
+        )
 
     def test_misplaced_input_or_placement_policy_fails(self) -> None:
         self.assert_fails_with(
@@ -670,6 +719,59 @@ class DeviceCompatibilityArchitectureGuardTest(unittest.TestCase):
                     {relative: snippet},
                     "misplaced input/placement policy",
                 )
+        for files in (
+            {
+                f"{ANDROID_KOTLIN}/display/input/InputAliases.kt": "package com.orailnoor.droiddesk.display.input\ntypealias InputPolicy = DesktopInputPolicy\n",
+                f"{ANDROID_KOTLIN}/MainActivity.kt": "package com.orailnoor.droiddesk\nimport com.orailnoor.droiddesk.display.input.InputPolicy\nfun misplaced(p: InputPolicy) = p::resolve\n",
+            },
+            {
+                f"{ANDROID_KOTLIN}/display/DisplayProfile.kt": "package com.orailnoor.droiddesk.display\ntypealias ProfilePolicy = DisplayProfilePolicy\n",
+                f"{ANDROID_KOTLIN}/view/DesktopActivity.kt": "package com.orailnoor.droiddesk.view\nimport com.orailnoor.droiddesk.display.ProfilePolicy\nclass DesktopActivity { val g = DesktopReadinessGate {}; fun misplaced(p: ProfilePolicy) = p::classify }\n",
+            },
+            {
+                f"{ANDROID_KOTLIN}/display/input/InputAliases.kt": "package com.orailnoor.droiddesk.display.input\ntypealias InputPolicy = DesktopInputPolicy\n",
+                f"{ANDROID_KOTLIN}/MainActivity.kt": "package com.orailnoor.droiddesk\nimport com.orailnoor.droiddesk.display.input.InputPolicy\nval d = InputPolicy.resolve(ctx)\n",
+            },
+            {
+                f"{ANDROID_KOTLIN}/display/input/InputAliases.kt": "package com.orailnoor.droiddesk.display.input\nprivate typealias BaseInputPolicy = DesktopInputPolicy\ninternal typealias InputPolicy = BaseInputPolicy\n",
+                f"{ANDROID_KOTLIN}/util/ReExport.kt": "package com.orailnoor.droiddesk.util\nimport com.orailnoor.droiddesk.display.input.InputPolicy as IP\ntypealias SharedInputPolicy = IP\n",
+                f"{ANDROID_KOTLIN}/MainActivity.kt": "package com.orailnoor.droiddesk\nimport com.orailnoor.droiddesk.util.SharedInputPolicy as LocalIP\nval ref = LocalIP::resolve\n",
+            },
+            {
+                f"{ANDROID_KOTLIN}/view/ViewAliases.kt": "package com.orailnoor.droiddesk.view\ntypealias ViewInputPolicy = com.orailnoor.droiddesk.display.input.DesktopInputPolicy\n",
+                f"{ANDROID_KOTLIN}/view/DesktopActivity.kt": "package com.orailnoor.droiddesk.view\nclass DesktopActivity { val g = DesktopReadinessGate {}; fun bad() = ViewInputPolicy.resolve(ctx) }\n",
+            },
+            {
+                f"{ANDROID_KOTLIN}/display/DisplayProfile.kt": "package com.orailnoor.droiddesk.display\ntypealias ProfilePolicy = DisplayProfilePolicy\n",
+                f"{ANDROID_KOTLIN}/view/DesktopActivity.kt": "package com.orailnoor.droiddesk.view\nimport com.orailnoor.droiddesk.display.*\nclass DesktopActivity { val g = DesktopReadinessGate {}; fun bad(p: ProfilePolicy) = p.renderSize(bounds, policy) }\n",
+            },
+            {
+                f"{ANDROID_KOTLIN}/display/input/InputAliases.kt": "package com.orailnoor.droiddesk.display.input\ntypealias InputPolicy = DesktopInputPolicy\n",
+                f"{ANDROID_KOTLIN}/MainActivity.kt": "package com.orailnoor.droiddesk\nfun bad(p: com.orailnoor.droiddesk.display.input.InputPolicy) = p.resolve(ctx)\n",
+            },
+            {
+                f"{ANDROID_KOTLIN}/display/DisplayProfile.kt": "package com.orailnoor.droiddesk.display\ntypealias ProfilePolicy = DisplayProfilePolicy\n",
+                f"{ANDROID_KOTLIN}/MainActivity.kt": "package com.orailnoor.droiddesk\nval c = com.orailnoor.droiddesk.display.ProfilePolicy.classify(ctx)\n",
+            },
+            {
+                f"{ANDROID_KOTLIN}/display/input/InputAliases.kt": "package com.orailnoor.droiddesk.display.input\ntypealias InputPolicy = DesktopInputPolicy\n",
+                f"{ANDROID_KOTLIN}/MainActivity.kt": "package com.orailnoor.droiddesk\nimport com.orailnoor.droiddesk.display.input.InputPolicy\nfun InputPolicy.sneaky() = ::resolve\n",
+            },
+            {
+                f"{ANDROID_KOTLIN}/display/placement/PlacementAliases.kt": "package com.orailnoor.droiddesk.display.placement\ntypealias PlacementSelector = DesktopPlacementSelector\n",
+                f"{ANDROID_KOTLIN}/MainActivity.kt": "package com.orailnoor.droiddesk\nimport com.orailnoor.droiddesk.display.placement.PlacementSelector\nval s = PlacementSelector(quirks)\n",
+            },
+            {
+                f"{ANDROID_KOTLIN}/display/input/InputAliases.kt": "package com.orailnoor.droiddesk.display.`input`\ntypealias GenericInput<A, B> = DesktopInputPolicy\ntypealias InputPolicy = GenericInput<Int, (Int) -> Unit>\n",
+                f"{ANDROID_KOTLIN}/MainActivity.kt": "package com.orailnoor.droiddesk\nimport com.orailnoor.droiddesk.display.`input`.InputPolicy\nfun misplaced(p: InputPolicy) = p::resolve\n",
+            },
+            {
+                f"{ANDROID_KOTLIN}/display/placement/PlacementAliases.kt": "package com.orailnoor.droiddesk.display.placement\ntypealias PlacementSelector = DesktopPlacementSelector\n",
+                f"{ANDROID_KOTLIN}/MainActivity.kt": "package com.orailnoor.droiddesk\nval s = com.orailnoor.droiddesk.display.placement.`PlacementSelector`(quirks)\n",
+            },
+        ):
+            with self.subTest(files=files):
+                self.assert_fails_with(files, "misplaced input/placement policy")
 
     def test_fixed_pointer_array_or_missing_tracker_fails(self) -> None:
         for relative, snippet in (
@@ -1523,6 +1625,26 @@ class DeviceCompatibilityArchitectureGuardTest(unittest.TestCase):
             {
                 f"{ANDROID_KOTLIN}/display/StartupTiming.kt": "package com.orailnoor.droiddesk.display\nclass Timer\ninternal fun Timer.extDelay(): Long = 250L\n",
                 f"{ANDROID_KOTLIN}/view/DesktopActivity.kt": "package com.orailnoor.droiddesk.view\nimport com.orailnoor.droiddesk.display.Timer as T\nimport com.orailnoor.droiddesk.display.extDelay as ms\nclass DesktopActivity { val g = DesktopReadinessGate {}; fun s(t: T) = handler.postDelayed({ launchSession() }, t.ms()) }\n",
+            },
+            {
+                f"{ANDROID_KOTLIN}/display/StartupTiming.kt": "package com.orailnoor.droiddesk.display\nclass BootCls { companion object { fun scheduleBoot(h: android.os.Handler, ms: Long, r: Runnable) = h.postDelayed(r, ms) } }\ntypealias BootComp = BootCls.Companion\n",
+                f"{ANDROID_KOTLIN}/view/DesktopActivity.kt": "package com.orailnoor.droiddesk.view\nimport com.orailnoor.droiddesk.display.BootComp\nclass DesktopActivity { val g = DesktopReadinessGate {}; fun s(h: android.os.Handler, r: Runnable) = BootComp.scheduleBoot(h, 250L, r) }\n",
+            },
+            {
+                f"{ANDROID_KOTLIN}/display/StartupTiming.kt": "package com.orailnoor.droiddesk.display\nobject StartupTiming { const val STARTUP_DELAY_MS = 250L }\ntypealias DelayBox = StartupTiming\n",
+                f"{ANDROID_KOTLIN}/view/DesktopActivity.kt": "package com.orailnoor.droiddesk.view\nimport com.orailnoor.droiddesk.display.DelayBox\nclass DesktopActivity { val g = DesktopReadinessGate {}; fun s(h: android.os.Handler, r: Runnable) = h.postDelayed(r, DelayBox.STARTUP_DELAY_MS) }\n",
+            },
+            {
+                f"{ANDROID_KOTLIN}/display/StartupTiming.kt": "package com.orailnoor.droiddesk.display\nclass BootCls { fun runBoot(h: android.os.Handler, ms: Long, r: Runnable) = h.postDelayed(r, ms) }\ntypealias BootAlias = BootCls\n",
+                f"{ANDROID_KOTLIN}/view/DesktopActivity.kt": "package com.orailnoor.droiddesk.view\nimport com.orailnoor.droiddesk.display.BootAlias\nclass DesktopActivity { val g = DesktopReadinessGate {}; fun s(b: BootAlias, h: android.os.Handler, r: Runnable) = b.runBoot(h, 250L, r) }\n",
+            },
+            {
+                f"{ANDROID_KOTLIN}/util/HcAliases.kt": "package com.orailnoor.droiddesk.util\ntypealias CrossHC = androidx.core.os.HandlerCompat\n",
+                f"{ANDROID_KOTLIN}/view/DesktopActivity.kt": "package com.orailnoor.droiddesk.view\nimport com.orailnoor.droiddesk.util.CrossHC\nclass DesktopActivity { val g = DesktopReadinessGate {}; fun hideOverlay() {}; fun pickHandler(isFade: Boolean): android.os.Handler = TODO(); fun s(isFade: Boolean) = CrossHC.postDelayed(pickHandler(isFade), { hideOverlay() }, null, 250L) }\n",
+            },
+            {
+                f"{ANDROID_KOTLIN}/display/StartupTiming.kt": "package com.orailnoor.droiddesk.display\nclass BootCls { companion object { const val MS = 250L } }\ntypealias BootAlias = BootCls\n",
+                f"{ANDROID_KOTLIN}/view/DesktopActivity.kt": "package com.orailnoor.droiddesk.view\nclass DesktopActivity { val g = DesktopReadinessGate {}; fun s(h: android.os.Handler, r: Runnable) = h.postDelayed(r, com.orailnoor.droiddesk.display.BootAlias.Companion.MS) }\n",
             },
         ):
             with self.subTest(files=files):
