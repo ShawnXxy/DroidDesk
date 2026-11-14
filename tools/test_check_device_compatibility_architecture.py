@@ -262,9 +262,10 @@ class DeviceCompatibilityArchitectureGuardTest(unittest.TestCase):
                     "    private fun safeDelay(base: Long): Long { var d = 250L; d = base; return d }\n"
                     "    private fun safeStepDelay(base: Long): Long { var d = 250L; d = base; d++; return d }\n"
                     "    private fun safeBlockDelay(): Long { fun inner250(): Long { return 250L }; return 1000L }\n"
+                    "    private fun manySafeDelay(m: Int): Long = when (m) { 0 -> 1000L; 1 -> 1001L; 2 -> 1002L; 3 -> 1003L; 4 -> 1004L; 5 -> 1005L; 6 -> 1006L; 7 -> 1007L; 8 -> 1008L; 9 -> 1009L; else -> 1010L }\n"
                     "    companion object { private var compStepDelay = 250L }\n"
                     "    class DelayHolder { var ms = 250L }\n"
-                    "    fun incAndHelperSafe(dyn: Long) { Companion.compStepDelay++; handler.postDelayed({ launchSession() }, Companion.compStepDelay); val box = DelayHolder(); box.ms++; handler.postDelayed({ launchSession() }, box.ms); handler.postDelayed({ launchSession() }, safeDelay(1000L)); handler.postDelayed({ launchSession() }, safeStepDelay(1000L)) }\n"
+                    "    fun incAndHelperSafe(dyn: Long, m: Int) { Companion.compStepDelay++; handler.postDelayed({ launchSession() }, Companion.compStepDelay); val box = DelayHolder(); box.ms++; handler.postDelayed({ launchSession() }, box.ms); handler.postDelayed({ launchSession() }, safeDelay(1000L)); handler.postDelayed({ launchSession() }, safeStepDelay(1000L)); val many = when (m) { 0 -> 1000L; 1 -> 1001L; 2 -> 1002L; 3 -> 1003L; 4 -> 1004L; 5 -> 1005L; 6 -> 1006L; 7 -> 1007L; 8 -> 1008L; 9 -> 1009L; else -> 1010L }; handler.postDelayed({ launchSession() }, many); handler.postDelayed({ launchSession() }, manySafeDelay(m)); handler.postDelayed({ launchSession() }, 125L shl 33); handler.postDelayed({ launchSession() }, 250.toLong() shl 32); handler.postDelayed({ launchSession() }, 125L shl 64) }\n"
                     "    fun helperSafe(dyn: Long) { val unused250 = addOffsetSafe(200L); handler.postDelayed({ launchSession() }, addOffsetSafe(1000L)); handler.postDelayed({ launchSession() }, loopDelay()); handler.postDelayed({ launchSession() }, pingDelay()); handler.postDelayed({ launchSession() }, clampDelay(1000L)); handler.postDelayed({ launchSession() }, clampDelay(dyn)); handler.postDelayed({ launchSession() }, safeBlockDelay()); run { fun clampDelay(): Long = 1000L; handler.postDelayed({ launchSession() }, clampDelay()) } }\n"
                     "    fun unrelatedLocalHelper() { fun applyRefreshRequest(x: Int) = x; applyRefreshRequest(1) }\n"
                     "    fun modes() = target?.supportedModes?.mapNotNull { it?.toEvidenceOrNull() }\n"
@@ -1320,6 +1321,82 @@ class DeviceCompatibilityArchitectureGuardTest(unittest.TestCase):
             (
                 f"{ANDROID_KOTLIN}/view/DesktopActivity.kt",
                 "class DesktopActivity { val g = DesktopReadinessGate {}; private fun stepDelay(base: Long): Long { var d = base; d++; return d }; fun s() = handler.postDelayed({ launchSession() }, stepDelay(249L)) }",
+            ),
+            (
+                f"{ANDROID_KOTLIN}/view/DesktopActivity.kt",
+                "class DesktopActivity { val g = DesktopReadinessGate {}; fun s(mode: Int) { val delay = when (mode) { 0 -> 1000L; 1 -> 1001L; 2 -> 1002L; 3 -> 1003L; 4 -> 1004L; 5 -> 1005L; 6 -> 1006L; 7 -> 1007L; 8 -> 1008L; 9 -> 1009L; else -> 250L }; handler.postDelayed({ launchSession() }, delay) } }",
+            ),
+            (
+                f"{ANDROID_KOTLIN}/view/DesktopActivity.kt",
+                "class DesktopActivity { val g = DesktopReadinessGate {}; private fun pickDelay(m: Int): Long { if (m == 0) return 1000L; if (m == 1) return 1001L; if (m == 2) return 1002L; if (m == 3) return 1003L; if (m == 4) return 1004L; if (m == 5) return 1005L; if (m == 6) return 1006L; if (m == 7) return 1007L; if (m == 8) return 1008L; return 250L }; fun s(m: Int) = handler.postDelayed({ launchSession() }, pickDelay(m)) }",
+            ),
+            (
+                f"{TERMUX_X11}/LorieView.java",
+                "class LorieView { void schedule(android.os.Handler h, Runnable r, long d) { h.postDelayed(r, d); } void boot(android.os.Handler h, Runnable r) { schedule(h, r, 1000L); schedule(h, r, 1001L); schedule(h, r, 1002L); schedule(h, r, 1003L); schedule(h, r, 1004L); schedule(h, r, 1005L); schedule(h, r, 1006L); schedule(h, r, 1007L); schedule(h, r, 1008L); schedule(h, r, 250L); } }",
+            ),
+            (
+                f"{ANDROID_KOTLIN}/view/DesktopActivity.kt",
+                "class DesktopActivity { val g = DesktopReadinessGate {}; fun s(c: Boolean) { var d = 0L; while (c) { d++ }; handler.postDelayed({ launchSession() }, d) } }",
+            ),
+            (
+                f"{TERMUX_X11}/LorieView.java",
+                "class LorieView { void boot(android.os.Handler h, Runnable r) { h.postDelayed(r, 125L << 65); } }",
+            ),
+            (
+                f"{TERMUX_X11}/LorieView.java",
+                "class LorieView { void boot(android.os.Handler h, Runnable r) { h.postDelayed(r, 250L << 64); } }",
+            ),
+            (
+                f"{TERMUX_X11}/LorieView.java",
+                "class LorieView { void boot(android.os.Handler h, Runnable r) { h.postDelayed(r, 125 << 33); } }",
+            ),
+            (
+                f"{TERMUX_X11}/LorieView.java",
+                "class LorieView { void boot(android.os.Handler h, Runnable r) { h.postDelayed(r, 250 << 32); } }",
+            ),
+            (
+                f"{ANDROID_KOTLIN}/view/DesktopActivity.kt",
+                "class DesktopActivity { val g = DesktopReadinessGate {}; fun s() = handler.postDelayed({ launchSession() }, 125L shl 65) }",
+            ),
+            (
+                f"{ANDROID_KOTLIN}/view/DesktopActivity.kt",
+                "class DesktopActivity { val g = DesktopReadinessGate {}; fun s() = handler.postDelayed({ launchSession() }, 250L shl 64) }",
+            ),
+            (
+                f"{ANDROID_KOTLIN}/view/DesktopActivity.kt",
+                "class DesktopActivity { val g = DesktopReadinessGate {}; fun s() = handler.postDelayed({ launchSession() }, 500L shr 65) }",
+            ),
+            (
+                f"{ANDROID_KOTLIN}/view/DesktopActivity.kt",
+                "class DesktopActivity { val g = DesktopReadinessGate {}; fun s() = handler.postDelayed({ launchSession() }, (-6 shl 24) ushr 24) }",
+            ),
+            (
+                f"{TERMUX_X11}/LorieView.java",
+                "class LorieView { void boot(android.os.Handler h, Runnable r) { h.postDelayed(r, (-6 << 24) >>> 24); } }",
+            ),
+            (
+                f"{TERMUX_X11}/LorieView.java",
+                "class LorieView { void boot(android.os.Handler h, Runnable r) { h.postDelayed(r, 125L << -63); } }",
+            ),
+            (
+                f"{TERMUX_X11}/LorieView.java",
+                "class LorieView { void boot(android.os.Handler h, Runnable r) { long d = 125; h.postDelayed(r, d << 65); } }",
+            ),
+            (
+                f"{ANDROID_KOTLIN}/view/DesktopActivity.kt",
+                "class DesktopActivity { val g = DesktopReadinessGate {}; fun s() { val d: Long = 125; handler.postDelayed({ launchSession() }, d shl 65) } }",
+            ),
+            (
+                f"{TERMUX_X11}/LorieView.java",
+                "class LorieView { void boot(android.os.Handler h, Runnable r) { h.postDelayed(r, ((int) 125L) << 33); } }",
+            ),
+            (
+                f"{ANDROID_KOTLIN}/view/DesktopActivity.kt",
+                "class DesktopActivity { val g = DesktopReadinessGate {}; fun s() = handler.postDelayed({ launchSession() }, 0x1_0000_00faL.toInt().toLong()) }",
+            ),
+            (
+                f"{TERMUX_X11}/LorieView.java",
+                "class LorieView { void boot(android.os.Handler h, Runnable r) { h.postDelayed(r, (-0x80000000 / -1) - (-0x80000000) + 250); } }",
             ),
             (
                 f"{ANDROID_KOTLIN}/view/DesktopActivity.kt",
