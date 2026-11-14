@@ -148,6 +148,7 @@ class DeviceCompatibilityArchitectureGuardTest(unittest.TestCase):
                     "    fun scheduleTimeout(delayMillis: Long = 1000L, timeout: Runnable) { handler.postDelayed(timeout, delayMillis) }\n"
                     "    private fun retryShadow(timeout: Runnable) { val d = 250L; listOf(1000L).forEach { d -> handler.postDelayed(timeout, d) } }\n"
                     "    private fun overwritten(timeout: Runnable) { var d = 250L; d = 1000L; handler.postDelayed(timeout, d) }\n"
+                                    "    private fun safeCondAndMod(ready: Boolean, cfg: Long?, timeout: Runnable) { val d1 = if (ready) 500L else 1000L; val d2 = cfg ?: 1000L; var d3 = 250L; d3 %= 200L; handler.postDelayed(timeout, d1); handler.postDelayed(timeout, d2); handler.postDelayed(timeout, d3) }\n"
                     "}\n"
                 ),
                 f"{ANDROID_KOTLIN}/display/policy/PresentationPolicy.kt": (
@@ -188,6 +189,7 @@ class DeviceCompatibilityArchitectureGuardTest(unittest.TestCase):
                     "    class CtorEarlierParamShadowOk(FADE_DELAY_MS: Long = 1000L, effectiveDelay: Long = FADE_DELAY_MS) { init { handler.postDelayed({ launchSession() }, effectiveDelay) } }\n"
                     "    class CtorCompanionSelfDefaultOk(ownDelay: Long = ownDelay) { companion object { private const val ownDelay = 1000L }; init { handler.postDelayed({ launchSession() }, ownDelay) } }\n"
                     "    val fallbackProfile = ProfilePolicy.phoneDefaultProfile()\n"
+                    "    fun safeBangDefaults(p: ProfilePolicy?) = p!!.defaults(ProfileKind.PHONE)\n"
                     "    val defaultSettings = ProfilePolicy.defaults(ProfileKind.PHONE)\n"
                     "    class OtherHelper(val onDone: () -> Unit = {}) {\n"
                     "        val renderSize: (Int, Int) -> Int = { a, b -> a + b }\n"
@@ -586,6 +588,34 @@ class DeviceCompatibilityArchitectureGuardTest(unittest.TestCase):
             (
                 f"{ANDROID_KOTLIN}/MainActivity.kt",
                 "fun localValRefBypass() = with(DisplayProfilePolicy) { val classify = 1; val r = ::classify }",
+            ),
+            (
+                f"{ANDROID_KOTLIN}/MainActivity.kt",
+                "fun badBang(p: DisplayProfilePolicy?) = p!!.classify(true, 600, false)",
+            ),
+            (
+                f"{ANDROID_KOTLIN}/MainActivity.kt",
+                "fun badBangRef(p: DesktopInputPolicy?) = p!!::resolve",
+            ),
+            (
+                f"{ANDROID_KOTLIN}/MainActivity.kt",
+                "fun badBangAlias(p: DisplayProfilePolicy?) { val q = p!!; q.classify(true, 600, false) }",
+            ),
+            (
+                f"{ANDROID_KOTLIN}/MainActivity.kt",
+                "fun badBangRun(p: DisplayProfilePolicy?) = p!!.run { classify(true, 600, false) }",
+            ),
+            (
+                f"{ANDROID_KOTLIN}/MainActivity.kt",
+                "fun badBangWith(p: DisplayProfilePolicy?) = with(p!!) { classify(true, 600, false) }",
+            ),
+            (
+                f"{ANDROID_KOTLIN}/MainActivity.kt",
+                "fun badBangLet(p: DisplayProfilePolicy?) = p?.let { it!!.classify(true, 600, false) }",
+            ),
+            (
+                f"{ANDROID_KOTLIN}/MainActivity.kt",
+                "fun badBangFnRef() { val fn: (() -> Int)? = ::externalInputRoute; fn!!() }",
             ),
         ):
             with self.subTest(relative=relative, snippet=snippet):
@@ -1129,6 +1159,46 @@ class DeviceCompatibilityArchitectureGuardTest(unittest.TestCase):
             (
                 f"{TERMUX_X11}/LorieView.java",
                 "class LorieView { void helper(android.os.Handler h, Runnable r, long d) { h.postDelayed(r, d); } void boot(android.os.Handler h, Runnable r) { helper(h, r, 500L / 2); } }",
+            ),
+            (
+                f"{ANDROID_KOTLIN}/view/DesktopActivity.kt",
+                "class DesktopActivity { val g = DesktopReadinessGate {}; fun s(ready: Boolean) { val delayMillis = if (ready) 250L else 1000L; handler.postDelayed({ launchSession() }, delayMillis) } }",
+            ),
+            (
+                f"{ANDROID_KOTLIN}/view/DesktopActivity.kt",
+                "class DesktopActivity {\n    val g = DesktopReadinessGate {}\n    fun s(ready: Boolean) {\n        val delayMillis = if (ready)\n            250L\n        else\n            1000L\n        handler.postDelayed({ launchSession() }, delayMillis)\n    }\n}",
+            ),
+            (
+                f"{ANDROID_KOTLIN}/view/DesktopActivity.kt",
+                "class DesktopActivity { val g = DesktopReadinessGate {}; fun s(configuredDelay: Long?) { val delayMillis = configuredDelay ?: 250L; handler.postDelayed({ launchSession() }, delayMillis) } }",
+            ),
+            (
+                f"{ANDROID_KOTLIN}/view/DesktopActivity.kt",
+                "class DesktopActivity { val g = DesktopReadinessGate {}; fun getConfiguredDelay(): Long? = null; fun s() = handler.postDelayed({ launchSession() }, getConfiguredDelay() ?: (500L / 2)) }",
+            ),
+            (
+                f"{ANDROID_KOTLIN}/view/DesktopActivity.kt",
+                "class DesktopActivity { val g = DesktopReadinessGate {}; fun nop() {}; fun s(mode: Int) { val delayMillis = when (mode) { 0 -> { nop(); 250L }; else -> 1000L }; handler.postDelayed({ launchSession() }, delayMillis) } }",
+            ),
+            (
+                f"{ANDROID_KOTLIN}/view/DesktopActivity.kt",
+                "class DesktopActivity { val g = DesktopReadinessGate {}; fun s(ready: Boolean) = handler.postDelayed({ launchSession() }, (if (ready) 125L else 500L) * 2L) }",
+            ),
+            (
+                f"{TERMUX_X11}/LorieView.java",
+                "class LorieView { void boot(android.os.Handler h, Runnable r, boolean ready) { long delay = ready ? 250L : 1000L; h.postDelayed(r, delay); } }",
+            ),
+            (
+                f"{TERMUX_X11}/LorieView.java",
+                "class LorieView { void boot(android.os.Handler h, Runnable r) { long delay = 1000L; delay %= 750L; h.postDelayed(r, delay); } }",
+            ),
+            (
+                f"{ANDROID_KOTLIN}/view/DesktopActivity.kt",
+                "class DesktopActivity { var delay = 1000L; val g = DesktopReadinessGate {}; fun s() { this.delay %= 750L; handler.postDelayed({ launchSession() }, delay) } }",
+            ),
+            (
+                f"{TERMUX_X11}/LorieView.java",
+                "class LorieView { void boot(android.os.Handler h, Runnable r) { long delay = 125L; delay <<= 1; h.postDelayed(r, delay); } }",
             ),
             (
                 f"{ANDROID_KOTLIN}/view/DesktopActivity.kt",
