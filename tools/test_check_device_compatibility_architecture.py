@@ -107,7 +107,17 @@ class DeviceCompatibilityArchitectureGuardTest(unittest.TestCase):
                     'fun getDeviceInfo() = mapOf("model" to Build.MODEL, "brand" to Build.BRAND)\n'
                 ),
                 f"{ANDROID_KOTLIN}/display/DisplayRepository.kt": (
+                    "import android.os.Build as SdkBuild\n"
                     'const val DOC = "Build.MODEL"\n'
+                    "val isAtLeastR = SdkBuild.VERSION.SDK_INT >= SdkBuild.VERSION_CODES.R\n"
+                ),
+                f"{ANDROID_KOTLIN}/runtime/LinuxRuntime.kt": (
+                    "import android.os.Build as `SdkBuild`\n"
+                    "class LinuxRuntime {\n"
+                    "    val sdk = `SdkBuild`.VERSION.SDK_INT\n"
+                    "    private fun hideOverlay() {}\n"
+                    "    fun fadeToast(collapsedFadeHandler: android.os.Handler) = collapsedFadeHandler.postDelayed({ hideOverlay() }, 250L)\n"
+                    "}\n"
                 ),
                 f"{ANDROID_KOTLIN}/display/DesktopDisplayCoordinator.kt": (
                     "class DesktopDisplayCoordinator(\n"
@@ -226,6 +236,51 @@ class DeviceCompatibilityArchitectureGuardTest(unittest.TestCase):
                     "    }\n"
                     "}\n"
                 ),
+                f"{TERMUX_X11}/input/KotlinPointerMapHandler.kt": (
+                    "package com.termux.x11.input\n"
+                    "import android.util.SparseArray\n"
+                    "import java.util.TreeMap\n"
+                    "import java.util.concurrent.ConcurrentHashMap\n"
+                    "class KotlinPointerMapHandler(\n"
+                    "    private val ctorMap: MutableMap<Int, Boolean> = mutableMapOf(),\n"
+                    ") {\n"
+                    "    private val pointers: MutableMap<Int, android.graphics.PointF> = mutableMapOf()\n"
+                    "    private val mPointers = SparseArray<android.graphics.PointF>()\n"
+                    "    fun record(e: android.view.MotionEvent, pointerId: Int, pt: android.graphics.PointF) {\n"
+                    "        val id = e.getPointerId(0)\n"
+                    "        pointers[pointerId] = pt\n"
+                    "        pointers[e.getPointerId(0)] = pt\n"
+                    "        pointers[0] = pt\n"
+                    "        mPointers[id] = pt\n"
+                    "        ctorMap[pointerId] = true\n"
+                    "        lateSparse[id] = true\n"
+                    "        val byFactory = mapOf(pointerId to pt)\n"
+                    "        val byHash = hashMapOf<Int, Boolean>()\n"
+                    "        val byLinked = linkedMapOf<Int, Int>()\n"
+                    "        val bySorted = sortedMapOf<Int, Int>()\n"
+                    "        val byEmpty = emptyMap<Int, Int>()\n"
+                    "        val byConc = ConcurrentHashMap<Int, Boolean>()\n"
+                    "        val sBool = android.util.SparseBooleanArray()\n"
+                    "        val sInt = android.util.SparseIntArray(16)\n"
+                    "        val sLong = android.util.SparseLongArray()\n"
+                    "        byHash[e.getPointerId(0)] = byFactory[pointerId] != null\n"
+                    "        byLinked[id] = byEmpty[pointerId] ?: 0\n"
+                    "        bySorted[pointerId] = 1\n"
+                    "        byConc[id] = true\n"
+                    "        sBool[pointerId] = true\n"
+                    "        sInt[e.getPointerId(0)] = 1\n"
+                    "        sLong[id] = 1L\n"
+                    "    }\n"
+                    "    fun lookup(@Suppress(\"UNUSED\") m: Map<Int, Boolean>, tm: TreeMap<Int, Boolean>, pointers: IntArray, pointerId: Int): Any? {\n"
+                    "        val unit = \"100$µs\"\n"
+                    "        var swapped: Map<Int, Boolean> = emptyMap(); swapped = m; swapped[pointerId]\n"
+                    "        val anon = object { private val mPointers = android.util.SparseIntArray(); fun g(id: Int) = this.mPointers[id] }\n"
+                    "        this.pointers[pointerId]\n"
+                    "        return if (unit.isNotEmpty() && anon.g(pointerId) == 0) m[pointerId] ?: tm[pointerId] else null\n"
+                    "    }\n"
+                    "    private val lateSparse = SparseArray<Boolean>()\n"
+                    "}\n"
+                ),
                 f"{TERMUX_X11}/LorieView.java": (
                     "import static androidx.core.os.HandlerCompat.postDelayed;\n"
                     "public class LorieView {\n"
@@ -260,6 +315,9 @@ class DeviceCompatibilityArchitectureGuardTest(unittest.TestCase):
             (f"{ANDROID_KOTLIN}/MainActivity.kt", 'val b = Build.BRAND.lowercase() == "nubia"'),
             (f"{ANDROID_KOTLIN}/MainActivity.kt", "fun check() = when (Build.MODEL) { else -> Unit }"),
             (f"{ANDROID_KOTLIN}/display/DisplayRepository.kt", "import android.os.Build as DeviceBuild\nval m = DeviceBuild.MODEL"),
+            (f"{ANDROID_KOTLIN}/runtime/LinuxRuntime.kt", "import android.os.Build as `SdkBuild`\nval d = `SdkBuild`.DEVICE"),
+            (f"{ANDROID_KOTLIN}/display/DisplayRepository.kt", "typealias SdkBuild = android.os.Build\nval b = SdkBuild.BRAND"),
+            (f"{ANDROID_KOTLIN}/display/DisplayRepository.kt", "import android.os.Build.MODEL as DeviceModel\nval m = DeviceModel"),
             (f"{ANDROID_KOTLIN}/MainActivity.kt", "import android.os.Build.*\nval m = MODEL"),
             (f"{TERMUX_X11}/LorieView.java", "import static android.os.Build.*;\nclass LorieView { String m = MODEL; }"),
             (f"{ANDROID_KOTLIN}/display/DisplayRepository.kt", "val tnt = 1_00_003"),
@@ -563,6 +621,54 @@ class DeviceCompatibilityArchitectureGuardTest(unittest.TestCase):
                 "class InputEventSender { ActivePointerTracker t; boolean[] active = new boolean[16]; void chain(android.view.MotionEvent e) { int a0 = e.getPointerId(0); int a1 = a0; int a2 = a1; int a3 = a2; int a4 = a3; int a5 = a4; int a6 = a5; active[a6] = true; } }",
             ),
             (
+                f"{TERMUX_X11}/input/KotlinBadPointers.kt",
+                "class KotlinBadPointers { val pointers = IntArray(16); fun f(pointerId: Int) { pointers[pointerId] = 1 } }",
+            ),
+            (
+                f"{TERMUX_X11}/input/KotlinBadPointers.kt",
+                "class KotlinBadPointers { val active: BooleanArray = BooleanArray(16); fun f(e: android.view.MotionEvent) { active[e.getPointerId(0)] = true } }",
+            ),
+            (
+                f"{TERMUX_X11}/input/KotlinBadPointers.kt",
+                "class KotlinBadPointers { val slots: Array<Any?> = arrayOfNulls(16); fun f(pointerId: Int) { slots[pointerId] = null } }",
+            ),
+            (
+                f"{TERMUX_X11}/input/KotlinBadPointers.kt",
+                "class KotlinBadPointers { val slots = arrayOf(1, 2, 3); fun f(pointerId: Int) { slots[pointerId] = 1 } }",
+            ),
+            (
+                f"{TERMUX_X11}/input/KotlinBadPointers.kt",
+                "class KotlinBadPointers { val pointers = mutableMapOf<Int, Int>(); fun f(pointerId: Int) { val pointers = IntArray(16); pointers[pointerId] = 1 } }",
+            ),
+            (
+                f"{TERMUX_X11}/input/KotlinBadPointers.kt",
+                "class KotlinBadPointers { val pointers = mutableMapOf<Int, Int>(); fun f(pointerId: Int) { listOf(IntArray(16)).forEach { pointers -> pointers[pointerId] = 1 } } }",
+            ),
+            (
+                f"{TERMUX_X11}/input/KotlinBadPointers.kt",
+                "class KotlinBadPointers { val pointers = mutableMapOf<Int, Int>(); fun f(pointerId: Int) { for (pointers in listOf(IntArray(16))) { pointers[pointerId] = 1 } } }",
+            ),
+            (
+                f"{TERMUX_X11}/input/KotlinBadPointers.kt",
+                "class KotlinBadPointers { val pointers = mutableMapOf<Int, Int>().values.toIntArray(); fun f(pointerId: Int) { pointers[pointerId] = 1 } }",
+            ),
+            (
+                f"{TERMUX_X11}/input/KotlinBadPointers.kt",
+                "class KotlinBadPointers { val pointers = mutableMapOf<Int, Int>(); fun f(pointerId: Int) { if (pointerId < 10) pointers[pointerId] = 1 } }",
+            ),
+            (
+                f"{TERMUX_X11}/input/KotlinBadPointers.kt",
+                "class KotlinBadPointers { val pointers = mutableMapOf<Int, Int>(); fun f(@Suppress(\"UNUSED\") pointers: IntArray, pointerId: Int) { pointers[pointerId] = 1 } }",
+            ),
+            (
+                f"{TERMUX_X11}/input/KotlinBadPointers.kt",
+                "class KotlinBadPointers { private val pointers = mutableMapOf<Int, Int>(); val l = object { private val pointers = IntArray(16); fun f(e: android.view.MotionEvent) { this.pointers[e.getPointerId(0)] = 1 } } }",
+            ),
+            (
+                f"{TERMUX_X11}/input/InputEventSender.java",
+                "class InputEventSender { ActivePointerTracker t; java.util.Map<Integer, Integer>[] pointers; void f(int pointerId) { pointers[pointerId] = null; } }",
+            ),
+            (
                 f"{TERMUX_X11}/input/TouchInputHandler.java",
                 "public class TouchInputHandler { void onTouch() {} }",
             ),
@@ -863,6 +969,14 @@ class DeviceCompatibilityArchitectureGuardTest(unittest.TestCase):
             (
                 f"{TERMUX_X11}/LorieView.java",
                 "class LorieView { void helper(android.os.Handler h, Runnable r, long d) { h.postDelayed(r, d); } void boot(android.os.Handler h, Runnable r) { helper(h, r, 250L); } }",
+            ),
+            (
+                f"{ANDROID_KOTLIN}/runtime/LinuxRuntime.kt",
+                "class LinuxRuntime { fun boot(handler: android.os.Handler) = handler.postDelayed({ launchRuntime() }, 250L) }",
+            ),
+            (
+                f"{ANDROID_KOTLIN}/compositor/CompositorService.kt",
+                "class CompositorService { fun start(handler: android.os.Handler, r: Runnable) = handler.postDelayed(r, 250) }",
             ),
             (
                 f"{ANDROID_KOTLIN}/view/DesktopActivity.kt",
