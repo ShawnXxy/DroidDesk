@@ -270,7 +270,12 @@ class DeviceCompatibilityArchitectureGuardTest(unittest.TestCase):
                     "        sBool[pointerId] = true\n"
                     "        sInt[e.getPointerId(0)] = 1\n"
                     "        sLong[id] = 1L\n"
+                    "        val active = mutableMapOf<Int, Boolean>(); val hop1 = active; val hop2 = (hop1); val pointers = hop2; pointers[pointerId] = true\n"
+                    "        val thisAlias = this.mPointers; thisAlias[id] = pt\n"
+                    "        mutableVar[pointerId] = true\n"
                     "    }\n"
+                    "    private var mutableVar = mutableMapOf<Int, Boolean>()\n"
+                    "    fun shadowVar() { var mutableVar = 0; mutableVar = 1; val box = object { var mutableVar = 0 }; box.\n        mutableVar = 2 }\n"
                     "    fun lookup(@Suppress(\"UNUSED\") m: Map<Int, Boolean>, tm: TreeMap<Int, Boolean>, pointers: IntArray, pointerId: Int): Any? {\n"
                     "        val unit = \"100$µs\"\n"
                     "        var swapped: Map<Int, Boolean> = emptyMap(); swapped = m; swapped[pointerId]\n"
@@ -665,6 +670,18 @@ class DeviceCompatibilityArchitectureGuardTest(unittest.TestCase):
                 "class KotlinBadPointers { private val pointers = mutableMapOf<Int, Int>(); val l = object { private val pointers = IntArray(16); fun f(e: android.view.MotionEvent) { this.pointers[e.getPointerId(0)] = 1 } } }",
             ),
             (
+                f"{TERMUX_X11}/input/KotlinBadPointers.kt",
+                "class KotlinBadPointers { val active = mutableMapOf<Int, Boolean>(); fun f(pointerId: Int) { val active = IntArray(16); val pointers = active; pointers[pointerId] = 1 } }",
+            ),
+            (
+                f"{TERMUX_X11}/input/KotlinBadPointers.kt",
+                "class KotlinBadPointers { fun f(pointerId: Int) { var pointers = mutableMapOf<Int, Int>(); pointers = IntArray(16); pointers[pointerId] = 1 } }",
+            ),
+            (
+                f"{TERMUX_X11}/input/KotlinBadPointers.kt",
+                "class KotlinBadPointers { fun f(pointerId: Int) { pointers = IntArray(16); pointers[pointerId] = 1 }; var pointers = mutableMapOf<Int, Int>() }",
+            ),
+            (
                 f"{TERMUX_X11}/input/InputEventSender.java",
                 "class InputEventSender { ActivePointerTracker t; java.util.Map<Integer, Integer>[] pointers; void f(int pointerId) { pointers[pointerId] = null; } }",
             ),
@@ -797,6 +814,26 @@ class DeviceCompatibilityArchitectureGuardTest(unittest.TestCase):
             (
                 f"{ANDROID_KOTLIN}/view/DesktopActivity.kt",
                 "class DesktopActivity { companion object { private const val STARTUP_DELAY_MS = 250 }; val g = DesktopReadinessGate {}; fun s() = handler.postDelayed({ launchSession() }, STARTUP_DELAY_MS.toLong()) }",
+            ),
+            (
+                f"{ANDROID_KOTLIN}/view/DesktopActivity.kt",
+                "class DesktopActivity { val g = DesktopReadinessGate {}; fun s() = handler.postDelayed({ launchSession() }, 2_50L) }",
+            ),
+            (
+                f"{ANDROID_KOTLIN}/view/DesktopActivity.kt",
+                "class DesktopActivity { val g = DesktopReadinessGate {}; fun schedule(ms: Long) = handler.postDelayed({ launchSession() }, ms); fun boot() = schedule(2_5_0_L) }",
+            ),
+            (
+                f"{ANDROID_KOTLIN}/view/DesktopActivity.kt",
+                "class DesktopActivity { val g = DesktopReadinessGate {}; fun schedule(ms: Long) = handler.postDelayed({ launchSession() }, ms); fun boot() = schedule(2_50u.toLong()) }",
+            ),
+            (
+                f"{TERMUX_X11}/MainActivity.java",
+                "class MainActivity { void c(android.os.Handler h) { h.postDelayed(() -> refresh(), 0_372L); } }",
+            ),
+            (
+                f"{ANDROID_KOTLIN}/view/DesktopActivity.kt",
+                "class DesktopActivity { val g = DesktopReadinessGate {}; fun s() { for (d in listOf(0x0_f_aL)) handler.postDelayed({ launchSession() }, d) } }",
             ),
             (
                 f"{TERMUX_X11}/MainActivity.java",
