@@ -126,6 +126,7 @@ class DeviceCompatibilityArchitectureGuardTest(unittest.TestCase):
                     "package com.orailnoor.droiddesk.util\n"
                     "typealias AndroidBuild = android.os.Build\n"
                     "typealias CrossHC = androidx.core.os.HandlerCompat\n"
+                    "typealias CrossRefreshPolicy = com.orailnoor.droiddesk.display.refresh.DisplayRefreshPolicy\n"
                 ),
                 f"{ANDROID_KOTLIN}/display/input/PrivateAliases.kt": (
                     "package com.orailnoor.droiddesk.display.input\n"
@@ -214,11 +215,15 @@ class DeviceCompatibilityArchitectureGuardTest(unittest.TestCase):
                     "import androidx.core.os.HandlerCompat.postDelayed as postCompat\n"
                     "import androidx.core.os.postDelayed as postAfter\n"
                     "import com.orailnoor.droiddesk.util.CrossHC\n"
+                    "import com.orailnoor.droiddesk.util.CrossRefreshPolicy\n"
+                    "import com.orailnoor.droiddesk.display.refresh.DisplayRefreshPolicy as RefreshPolicy\n"
+                    "import com.orailnoor.droiddesk.display.refresh.DisplayRefreshPolicy.resolve as resolveRefresh\n"
                     "import com.orailnoor.droiddesk.display.DisplayProfilePolicy as ProfilePolicy\n"
                     "import com.orailnoor.droiddesk.display.STARTUP_DELAY_MS\n"
                     "import com.orailnoor.droiddesk.display.SafeObj as SO\n"
                     "import com.orailnoor.droiddesk.display.scheduleBoot as bootLater\n"
                     "typealias HC2 = HC\n"
+                    "typealias RefreshAlias = RefreshPolicy\n"
                     "internal fun applyRefreshRequest(\n"
                     "    request: RefreshRequest,\n"
                     "    updateWindowRefresh: (preferredRefreshRate: Float, preferredDisplayModeId: Int) -> Unit,\n"
@@ -307,9 +312,19 @@ class DeviceCompatibilityArchitectureGuardTest(unittest.TestCase):
                     "    fun incAndHelperSafe(dyn: Long, m: Int) { Companion.compStepDelay++; handler.postDelayed({ launchSession() }, Companion.compStepDelay); val box = DelayHolder(); box.ms++; handler.postDelayed({ launchSession() }, box.ms); handler.postDelayed({ launchSession() }, safeDelay(1000L)); handler.postDelayed({ launchSession() }, safeStepDelay(1000L)); val many = when (m) { 0 -> 1000L; 1 -> 1001L; 2 -> 1002L; 3 -> 1003L; 4 -> 1004L; 5 -> 1005L; 6 -> 1006L; 7 -> 1007L; 8 -> 1008L; 9 -> 1009L; else -> 1010L }; handler.postDelayed({ launchSession() }, many); handler.postDelayed({ launchSession() }, manySafeDelay(m)); handler.postDelayed({ launchSession() }, 125L shl 33); handler.postDelayed({ launchSession() }, 250.toLong() shl 32); handler.postDelayed({ launchSession() }, 125L shl 64) }\n"
                     "    fun helperSafe(dyn: Long) { val unused250 = addOffsetSafe(200L); handler.postDelayed({ launchSession() }, addOffsetSafe(1000L)); handler.postDelayed({ launchSession() }, loopDelay()); handler.postDelayed({ launchSession() }, pingDelay()); handler.postDelayed({ launchSession() }, clampDelay(1000L)); handler.postDelayed({ launchSession() }, clampDelay(dyn)); handler.postDelayed({ launchSession() }, safeBlockDelay()); run { fun clampDelay(): Long = 1000L; handler.postDelayed({ launchSession() }, clampDelay()) } }\n"
                     "    private fun bootLater(h: android.os.Handler, ms: Long, r: Runnable) {}\n"
-                    "    fun aliasCompatAndShadowOk(h: android.os.Handler, r: Runnable) { HC.postDelayed(h, r, 250, 1000L); HC2.postDelayed(h, r, 250, 1000L); CrossHC.postDelayed(collapsedFadeHandler, fadeTyped, null, 250L); CrossHC.postDelayed(this.collapsedFadeHandler, { hideOverlay() }, null, 250L); postCompat(h, r, 250, 1000L); h.postAfter(1000L, 250) { launchSession() }; bootLater(h, 250L, r); SO.scheduleObj(h, 250L, r) }\n"
+                    "    fun aliasCompatAndShadowOk(h: android.os.Handler, r: Runnable) { HC.postDelayed(h, r, 250, 1000L); HC2.postDelayed(h, r, 250, 1000L); CrossHC.postDelayed(collapsedFadeHandler, fadeTyped, null, 250L); CrossHC.postDelayed(this.collapsedFadeHandler, { hideOverlay() }, null, 250L); postCompat(h, r, 250, 1000L); h.postAfter(1000L, 250) { launchSession() }; bootLater(h, 250L, r); SO.scheduleObj(h, 250L, r); handler.postDelayed({ launchSession() }, 250L and 255L shl 1); handler.postDelayed({ launchSession() }, 250L xor 256L and 0L); handler.postDelayed({ launchSession() }, 125L and (255L shl 1)) }\n"
                     "    fun unrelatedLocalHelper() { fun applyRefreshRequest(x: Int) = x; applyRefreshRequest(1) }\n"
                     "    fun modes() = target?.supportedModes?.mapNotNull { it?.toEvidenceOrNull() }\n"
+                    "    fun refreshResolveAliases(it: Any) {\n"
+                    "        RefreshPolicy.resolve(it.currentMode, it.supportedModes)\n"
+                    "        RefreshAlias.resolve(it.currentMode, it.supportedModes)\n"
+                    "        `RefreshPolicy`.resolve(it.currentMode, it.supportedModes)\n"
+                    "        (RefreshPolicy).resolve(it.currentMode, it.supportedModes)\n"
+                    "        CrossRefreshPolicy.resolve(it.currentMode, it.supportedModes)\n"
+                    "        com.orailnoor.droiddesk.util.CrossRefreshPolicy.resolve(it.currentMode, it.supportedModes)\n"
+                    "        com.orailnoor.droiddesk.display.refresh.DisplayRefreshPolicy.resolve(it.currentMode, it.supportedModes)\n"
+                    "        resolveRefresh(it.currentMode, it.supportedModes)\n"
+                    "    }\n"
                     "    fun refresh(request: RefreshRequest) {\n"
                     "        var calls = 0\n"
                     "        applyRefreshRequest(request) { rate, modeId ->\n"
@@ -396,7 +411,7 @@ class DeviceCompatibilityArchitectureGuardTest(unittest.TestCase):
                     "    void bootOverwriteOk(android.os.Handler h, Runnable r) { schedule(h, r, 250L); }\n"
                     "    private long resetParam(long base) { base = 250L; base = 1000L; return base; }\n"
                     "    void incAwayOk(android.os.Handler h, Runnable r) { long delay = 250L; delay++; h.postDelayed(r, delay); long d2 = 250L; --d2; h.postDelayed(r, d2); long d3 = 250L; h.postDelayed(r, ++d3); this.fieldDelay++; h.postDelayed(r, this.fieldDelay); LorieView.statDelay++; h.postDelayed(r, LorieView.statDelay); h.postDelayed(r, resetParam(250L)); }\n"
-                    "    void compatOk(android.os.Handler h, Runnable r) { android.os.Handler out; HandlerCompat.postDelayed(out = h, r, 250, 1000L); postDelayed(h, r, 250, 1000L); }\n"
+                    "    void compatOk(android.os.Handler h, Runnable r) { android.os.Handler out; HandlerCompat.postDelayed(out = h, r, 250, 1000L); postDelayed(h, r, 250, 1000L); h.postDelayed(r, 125L & 255L << 1); }\n"
                     "}\n"
                 ),
                 "app/lib/screens/display_settings_screen.dart": (
@@ -407,6 +422,32 @@ class DeviceCompatibilityArchitectureGuardTest(unittest.TestCase):
             }
         )
         self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+        alias_only = self.run_guard(
+            {
+                f"{ANDROID_KOTLIN}/view/DesktopActivity.kt": (
+                    "package com.orailnoor.droiddesk.view\n"
+                    "import com.orailnoor.droiddesk.display.refresh.DisplayRefreshPolicy as RefreshPolicy\n"
+                    "import com.orailnoor.droiddesk.display.refresh.DisplayRefreshPolicy.resolve\n"
+                    "import com.orailnoor.droiddesk.display.refresh.RefreshRequest as RefreshReq\n"
+                    "import com.orailnoor.droiddesk.display.capability.PresentationContext as PresCtx\n"
+                    "internal fun applyRefreshRequest(request: RefreshReq, updateWindowRefresh: (Float, Int) -> Unit) = updateWindowRefresh(request.preferredRefreshRate ?: 0f, request.preferredModeId ?: 0)\n"
+                    "class DesktopActivity {\n"
+                    "    val gate = DesktopReadinessGate {}\n"
+                    "    fun plan(it: Any): Any {\n"
+                    "        if (it != Unit) (RefreshPolicy).resolve(it.currentMode, it.supportedModes)\n"
+                    "        (\n"
+                    "            RefreshPolicy\n"
+                    "        ).resolve(it.currentMode, it.supportedModes)\n"
+                    "        resolve(it.currentMode, it.supportedModes)\n"
+                    "        val modes = it.supportedModes.mapNotNull { m -> m.toEvidenceOrNull() }\n"
+                    "        return PresCtx(modes) to RefreshPolicy.resolve(it.currentMode, it.supportedModes)\n"
+                    "    }\n"
+                    "    fun apply(req: RefreshReq) = applyRefreshRequest(req) { rate, modeId -> preferredRefreshRate = rate; window.attributes.preferredDisplayModeId = modeId }\n"
+                    "}\n"
+                ),
+            }
+        )
+        self.assertEqual(0, alias_only.returncode, alias_only.stdout + alias_only.stderr)
 
     def test_oem_identity_leakage_tokens_and_build_reads_fail(self) -> None:
         for relative, snippet in (
@@ -938,6 +979,18 @@ class DeviceCompatibilityArchitectureGuardTest(unittest.TestCase):
         ):
             with self.subTest(relative=relative, snippet=snippet):
                 self.assert_fails_with({relative: snippet}, "fixed pointer array")
+
+    def test_kotlin_infix_operator_names_remain_usable_as_values(self) -> None:
+        result = self.run_guard(
+            {
+                f"{ANDROID_KOTLIN}/view/DesktopActivity.kt": (
+                    "class DesktopActivity { val g = DesktopReadinessGate {}; "
+                    "fun s() { val shl = 1000L; "
+                    "handler.postDelayed({ launchSession() }, shl) } }"
+                ),
+            }
+        )
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
 
     def test_startup_250ms_delay_or_missing_readiness_gate_fails(self) -> None:
         self.assert_fails_with(
@@ -1543,6 +1596,62 @@ class DeviceCompatibilityArchitectureGuardTest(unittest.TestCase):
             ),
             (
                 f"{ANDROID_KOTLIN}/view/DesktopActivity.kt",
+                "class DesktopActivity { val g = DesktopReadinessGate {}; fun s() = handler.postDelayed({ launchSession() }, 125L and 255L shl 1) }",
+            ),
+            (
+                f"{ANDROID_KOTLIN}/view/DesktopActivity.kt",
+                "class DesktopActivity { val g = DesktopReadinessGate {}; fun s() = handler.postDelayed({ launchSession() }, 256L or 250L and 255L) }",
+            ),
+            (
+                f"{ANDROID_KOTLIN}/view/DesktopActivity.kt",
+                "class DesktopActivity { val g = DesktopReadinessGate {}; fun s() = handler.postDelayed({ launchSession() }, 127L xor 2L shl 1) }",
+            ),
+            (
+                f"{ANDROID_KOTLIN}/view/DesktopActivity.kt",
+                "class DesktopActivity { val g = DesktopReadinessGate {}; fun s() = handler.postDelayed({ launchSession() }, 124L + 1L and 255L shl 2 - 1) }",
+            ),
+            (
+                f"{ANDROID_KOTLIN}/view/DesktopActivity.kt",
+                "class DesktopActivity { val g = DesktopReadinessGate {}; private val d = 125L `and` 255L `shl` 1; fun s() = handler.postDelayed({ launchSession() }, d) }",
+            ),
+            (
+                f"{ANDROID_KOTLIN}/view/DesktopActivity.kt",
+                "class DesktopActivity { val g = DesktopReadinessGate {}; fun s() = handler.postDelayed({ launchSession() }, 255L and (125L shl 1)) }",
+            ),
+            (
+                f"{ANDROID_KOTLIN}/view/DesktopActivity.kt",
+                "class DesktopActivity { val g = DesktopReadinessGate {}; fun s() = handler.postDelayed({ launchSession() }, 125L shl (2 - 1)) }",
+            ),
+            (
+                f"{ANDROID_KOTLIN}/view/DesktopActivity.kt",
+                "class DesktopActivity { val g = DesktopReadinessGate {}; fun s() = handler.postDelayed({ launchSession() }, 255L and (125L shl 1)) }",
+            ),
+            (
+                f"{ANDROID_KOTLIN}/view/DesktopActivity.kt",
+                "class DesktopActivity { val g = DesktopReadinessGate {}; fun s() { val shl = 250L; handler.postDelayed({ launchSession() }, shl) } }",
+            ),
+            (
+                f"{TERMUX_X11}/LorieView.java",
+                "class LorieView { void boot(android.os.Handler h, Runnable r) { h.postDelayed(r, (125L & 255L) << 1); } }",
+            ),
+            (
+                f"{TERMUX_X11}/LorieView.java",
+                "class LorieView { void boot(android.os.Handler h, Runnable r) { h.postDelayed(r, 248L | 6L & 1L << 1); } }",
+            ),
+            (
+                f"{TERMUX_X11}/LorieView.java",
+                "class LorieView { void boot(android.os.Handler h, Runnable r) { long shl = 250L; h.postDelayed(r, shl); } }",
+            ),
+            (
+                f"{TERMUX_X11}/LorieView.java",
+                "class LorieView { void boot(android.os.Handler h, Runnable r) { long shl = 249L; h.postDelayed(r, ++shl); } }",
+            ),
+            (
+                f"{TERMUX_X11}/LorieView.java",
+                "class LorieView { void boot(android.os.Handler h, Runnable r) { long shl = 250L; h.postDelayed(r, shl++); } }",
+            ),
+            (
+                f"{ANDROID_KOTLIN}/view/DesktopActivity.kt",
                 "class DesktopActivity { fun onCreate() {} }",
             ),
             (
@@ -1684,6 +1793,41 @@ class DeviceCompatibilityArchitectureGuardTest(unittest.TestCase):
                 "        applyRefreshRequest(req) { r, _ -> preferredRefreshRate = r }\n"
                 "        window.attributes.preferredDisplayModeId = 2\n"
                 "    }\n"
+                "}\n",
+            ),
+            (
+                f"{ANDROID_KOTLIN}/view/DesktopActivity.kt",
+                "DesktopReadinessGate {}; fun wrap(x: Any) = x; fun f(it: Any) = wrap(DisplayRefreshPolicy).resolve(it.currentMode, it.supportedModes)",
+            ),
+            (
+                f"{ANDROID_KOTLIN}/view/DesktopActivity.kt",
+                "DesktopReadinessGate {}; fun <T> wrap(x: T): T = x; fun f(it: Any) = wrap<Any>(DisplayRefreshPolicy).resolve(it.currentMode, it.supportedModes)",
+            ),
+            (
+                f"{ANDROID_KOTLIN}/view/DesktopActivity.kt",
+                "import com.orailnoor.droiddesk.display.capability.PresentationContext\n"
+                "class DesktopActivity {\n"
+                "    val gate = DesktopReadinessGate {}\n"
+                "    data class PresentationContext(val modes: Any)\n"
+                "    fun f(it: Any): Any { val modes = it.supportedModes.mapNotNull { m -> m.toEvidenceOrNull() }; return PresentationContext(modes) }\n"
+                "}\n",
+            ),
+            (
+                f"{ANDROID_KOTLIN}/view/DesktopActivity.kt",
+                "import com.orailnoor.droiddesk.display.refresh.DisplayRefreshPolicy as RefreshPolicy\n"
+                "class DesktopActivity {\n"
+                "    val gate = DesktopReadinessGate {}\n"
+                "    object RefreshPolicy : FakePolicy()\n"
+                "    fun f(it: Any) = RefreshPolicy.resolve(it.currentMode, it.supportedModes)\n"
+                "}\n",
+            ),
+            (
+                f"{ANDROID_KOTLIN}/view/DesktopActivity.kt",
+                "import com.orailnoor.droiddesk.display.refresh.DisplayRefreshPolicy as RefreshPolicy\n"
+                "class DesktopActivity {\n"
+                "    val gate = DesktopReadinessGate {}\n"
+                "    companion object RefreshPolicy { fun resolve(a: Any?, b: Any?) = b }\n"
+                "    fun f(it: Any) = RefreshPolicy.resolve(it.currentMode, it.supportedModes)\n"
                 "}\n",
             ),
             (
@@ -1905,12 +2049,69 @@ class DeviceCompatibilityArchitectureGuardTest(unittest.TestCase):
                 "    }\n"
                 "}\n",
             ),
+            (
+                f"{ANDROID_KOTLIN}/view/DesktopActivity.kt",
+                "import com.orailnoor.droiddesk.display.refresh.DisplayRefreshPolicy as RefreshPolicy\n"
+                "class DesktopActivity {\n"
+                "    val gate = DesktopReadinessGate {}\n"
+                "    fun shadowedParam(RefreshPolicy: Any, it: Any) = RefreshPolicy.resolve(it.currentMode, it.supportedModes)\n"
+                "}\n",
+            ),
+            (
+                f"{ANDROID_KOTLIN}/view/DesktopActivity.kt",
+                "import com.orailnoor.droiddesk.display.refresh.DisplayRefreshPolicy as RefreshPolicy\n"
+                "class DesktopActivity {\n"
+                "    val gate = DesktopReadinessGate {}\n"
+                "    fun shadowedVal(fake: Any, it: Any) { val RefreshPolicy = fake; RefreshPolicy.resolve(it.currentMode, it.supportedModes) }\n"
+                "}\n",
+            ),
+            (
+                f"{ANDROID_KOTLIN}/view/DesktopActivity.kt",
+                "import com.orailnoor.droiddesk.display.refresh.DisplayRefreshPolicy as RefreshPolicy\n"
+                "class DesktopActivity {\n"
+                "    val gate = DesktopReadinessGate {}\n"
+                "    object RefreshPolicy { fun resolve(a: Any?, b: Any?) = b }\n"
+                "    fun shadowedObj(it: Any) = RefreshPolicy.resolve(it.currentMode, it.supportedModes)\n"
+                "}\n",
+            ),
+            (
+                f"{ANDROID_KOTLIN}/view/DesktopActivity.kt",
+                "import com.other.FakeRefreshPolicy as RefreshPolicy\n"
+                "class DesktopActivity {\n"
+                "    val gate = DesktopReadinessGate {}\n"
+                "    fun wrongImport(it: Any) = RefreshPolicy.resolve(it.currentMode, it.supportedModes)\n"
+                "}\n",
+            ),
+            (
+                f"{ANDROID_KOTLIN}/view/DesktopActivity.kt",
+                "import com.orailnoor.droiddesk.display.refresh.DisplayRefreshPolicy as RefreshPolicy\n"
+                "class DesktopActivity {\n"
+                "    val gate = DesktopReadinessGate {}\n"
+                "    fun memberRecv(fake: Any, it: Any) = fake.RefreshPolicy.resolve(it.currentMode, it.supportedModes)\n"
+                "}\n",
+            ),
+            (
+                f"{ANDROID_KOTLIN}/view/DesktopActivity.kt",
+                "import com.orailnoor.droiddesk.display.refresh.DisplayRefreshPolicy.resolve as resolveRefresh\n"
+                "class DesktopActivity {\n"
+                "    val gate = DesktopReadinessGate {}\n"
+                "    private fun resolveRefresh(a: Any?, b: Any?) = b\n"
+                "    fun shadowedFn(it: Any) = resolveRefresh(it.currentMode, it.supportedModes)\n"
+                "}\n",
+            ),
         ):
             with self.subTest(relative=relative, snippet=snippet):
                 self.assert_fails_with(
                     {relative: snippet},
                     "direct refresh-mode selection",
                 )
+        self.assert_fails_with(
+            {
+                f"{ANDROID_KOTLIN}/view/SpoofPolicy.kt": "package com.orailnoor.droiddesk.view\nobject DisplayRefreshPolicy { fun resolve(a: Any?, b: Any?) = b }\n",
+                f"{ANDROID_KOTLIN}/view/DesktopActivity.kt": "package com.orailnoor.droiddesk.view\nclass DesktopActivity { val g = DesktopReadinessGate {}; fun s(it: Any) = DisplayRefreshPolicy.resolve(it.currentMode, it.supportedModes) }\n",
+            },
+            "direct refresh-mode selection",
+        )
         self.assert_fails_with(
             {
                 f"{ANDROID_KOTLIN}/view/BaseRefresh.kt": "package com.orailnoor.droiddesk.view\nopen class BaseRefresh { fun applyRefreshRequest(r: RefreshRequest, cb: (Float, Int) -> Unit) = cb(120f, 2) }\n",
