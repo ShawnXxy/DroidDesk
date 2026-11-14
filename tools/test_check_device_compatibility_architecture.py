@@ -167,6 +167,9 @@ class DeviceCompatibilityArchitectureGuardTest(unittest.TestCase):
                 f"{ANDROID_KOTLIN}/display/StartupTiming.kt": (
                     "package com.orailnoor.droiddesk.display\n"
                     "internal const val STARTUP_DELAY_MS = 250L\n"
+                    "internal fun scheduleBoot(h: android.os.Handler, ms: Long, r: Runnable) = h.postDelayed(r, ms)\n"
+                    "internal object BootObj { fun scheduleObj(h: android.os.Handler, ms: Long, r: Runnable) = h.postDelayed(r, ms) }\n"
+                    "internal object SafeObj { fun scheduleObj(h: android.os.Handler, ms: Long, r: Runnable) {} }\n"
                 ),
                 f"{ANDROID_KOTLIN}/view/SafeTiming.kt": (
                     "package com.orailnoor.droiddesk.view\n"
@@ -178,8 +181,14 @@ class DeviceCompatibilityArchitectureGuardTest(unittest.TestCase):
                     "class WildcardShadowOk { fun ok(handler: android.os.Handler) = handler.postDelayed({ launchSession() }, STARTUP_DELAY_MS) }\n"
                 ),
                 f"{ANDROID_KOTLIN}/view/DesktopActivity.kt": (
+                    "import androidx.core.os.HandlerCompat as HC\n"
+                    "import androidx.core.os.HandlerCompat.postDelayed as postCompat\n"
+                    "import androidx.core.os.postDelayed as postAfter\n"
                     "import com.orailnoor.droiddesk.display.DisplayProfilePolicy as ProfilePolicy\n"
                     "import com.orailnoor.droiddesk.display.STARTUP_DELAY_MS\n"
+                    "import com.orailnoor.droiddesk.display.SafeObj as SO\n"
+                    "import com.orailnoor.droiddesk.display.scheduleBoot as bootLater\n"
+                    "typealias HC2 = HC\n"
                     "internal fun applyRefreshRequest(\n"
                     "    request: RefreshRequest,\n"
                     "    updateWindowRefresh: (preferredRefreshRate: Float, preferredDisplayModeId: Int) -> Unit,\n"
@@ -267,6 +276,8 @@ class DeviceCompatibilityArchitectureGuardTest(unittest.TestCase):
                     "    class DelayHolder { var ms = 250L }\n"
                     "    fun incAndHelperSafe(dyn: Long, m: Int) { Companion.compStepDelay++; handler.postDelayed({ launchSession() }, Companion.compStepDelay); val box = DelayHolder(); box.ms++; handler.postDelayed({ launchSession() }, box.ms); handler.postDelayed({ launchSession() }, safeDelay(1000L)); handler.postDelayed({ launchSession() }, safeStepDelay(1000L)); val many = when (m) { 0 -> 1000L; 1 -> 1001L; 2 -> 1002L; 3 -> 1003L; 4 -> 1004L; 5 -> 1005L; 6 -> 1006L; 7 -> 1007L; 8 -> 1008L; 9 -> 1009L; else -> 1010L }; handler.postDelayed({ launchSession() }, many); handler.postDelayed({ launchSession() }, manySafeDelay(m)); handler.postDelayed({ launchSession() }, 125L shl 33); handler.postDelayed({ launchSession() }, 250.toLong() shl 32); handler.postDelayed({ launchSession() }, 125L shl 64) }\n"
                     "    fun helperSafe(dyn: Long) { val unused250 = addOffsetSafe(200L); handler.postDelayed({ launchSession() }, addOffsetSafe(1000L)); handler.postDelayed({ launchSession() }, loopDelay()); handler.postDelayed({ launchSession() }, pingDelay()); handler.postDelayed({ launchSession() }, clampDelay(1000L)); handler.postDelayed({ launchSession() }, clampDelay(dyn)); handler.postDelayed({ launchSession() }, safeBlockDelay()); run { fun clampDelay(): Long = 1000L; handler.postDelayed({ launchSession() }, clampDelay()) } }\n"
+                    "    private fun bootLater(h: android.os.Handler, ms: Long, r: Runnable) {}\n"
+                    "    fun aliasCompatAndShadowOk(h: android.os.Handler, r: Runnable) { HC.postDelayed(h, r, 250, 1000L); HC2.postDelayed(h, r, 250, 1000L); postCompat(h, r, 250, 1000L); h.postAfter(1000L, 250) { launchSession() }; bootLater(h, 250L, r); SO.scheduleObj(h, 250L, r) }\n"
                     "    fun unrelatedLocalHelper() { fun applyRefreshRequest(x: Int) = x; applyRefreshRequest(1) }\n"
                     "    fun modes() = target?.supportedModes?.mapNotNull { it?.toEvidenceOrNull() }\n"
                     "    fun refresh(request: RefreshRequest) {\n"
@@ -373,6 +384,12 @@ class DeviceCompatibilityArchitectureGuardTest(unittest.TestCase):
             (f"{ANDROID_KOTLIN}/view/DesktopActivity.kt", 'DesktopReadinessGate {}; val vendor = "Smartisan"'),
             ("app/lib/models/desktop_display.dart", "const model = 'NX888J';"),
             ("app/lib/state/app_state.dart", "const dev = 'pq85a02';"),
+            (
+                "app/lib/services/platform_bridge.dart",
+                "bool isNubia(Map<String, dynamic> deviceInfo) => deviceInfo['brand']?.toString().toLowerCase() == 'nubia';",
+            ),
+            ("app/lib/state/app_state.dart", "const maker = 'deltainno';"),
+            (f"{ANDROID_KOTLIN}/MainActivity.kt", 'val m = "DT2002C"'),
             (f"{ANDROID_KOTLIN}/display/DesktopDisplayCoordinator.kt", "val tnt = 100003"),
             (f"{ANDROID_KOTLIN}/display/DisplayRepository.kt", "val tnt = 100_003"),
             (f"{ANDROID_KOTLIN}/display/DisplayRepository.kt", "val m = Build.MODEL"),
@@ -1400,6 +1417,30 @@ class DeviceCompatibilityArchitectureGuardTest(unittest.TestCase):
             ),
             (
                 f"{ANDROID_KOTLIN}/view/DesktopActivity.kt",
+                'import androidx.core.os.HandlerCompat as HC\nclass DesktopActivity { val g = DesktopReadinessGate {}; fun s(h: android.os.Handler, r: Runnable) = HC.postDelayed(h, r, "tok", 250L) }',
+            ),
+            (
+                f"{ANDROID_KOTLIN}/view/DesktopActivity.kt",
+                "import androidx.core.os.HandlerCompat as HC\nclass DesktopActivity { val g = DesktopReadinessGate {}; fun s(HC: android.os.Handler, r: Runnable) = HC.postDelayed(r, 250L) }",
+            ),
+            (
+                f"{ANDROID_KOTLIN}/view/DesktopActivity.kt",
+                "import androidx.core.os.HandlerCompat as HC\nclass DesktopActivity { val g = DesktopReadinessGate {}; fun s(h: android.os.Handler, r: Runnable) { val HC = h; HC.postDelayed(r, 250L) } }",
+            ),
+            (
+                f"{ANDROID_KOTLIN}/view/DesktopActivity.kt",
+                "import androidx.core.os.HandlerCompat as HC\nclass DesktopActivity(private val HC: android.os.Handler) { val g = DesktopReadinessGate {}; fun s(r: Runnable) = HC.postDelayed(r, 250L) }",
+            ),
+            (
+                f"{ANDROID_KOTLIN}/view/DesktopActivity.kt",
+                'import androidx.core.os.HandlerCompat.postDelayed as postCompat\nclass DesktopActivity { val g = DesktopReadinessGate {}; fun s(h: android.os.Handler, r: Runnable) = postCompat(h, r, "tok", 250L) }',
+            ),
+            (
+                f"{ANDROID_KOTLIN}/view/DesktopActivity.kt",
+                "import androidx.core.os.postDelayed as postAfter\nclass DesktopActivity { val g = DesktopReadinessGate {}; fun s(h: android.os.Handler) = h.postAfter(250L) { launchSession() } }",
+            ),
+            (
+                f"{ANDROID_KOTLIN}/view/DesktopActivity.kt",
                 "class DesktopActivity { fun onCreate() {} }",
             ),
             (
@@ -1446,6 +1487,42 @@ class DeviceCompatibilityArchitectureGuardTest(unittest.TestCase):
             {
                 f"{ANDROID_KOTLIN}/display/StartupTiming.kt": "package com.orailnoor.droiddesk.display\ninternal fun remoteStartupDelay(): Long = 250L\n",
                 f"{ANDROID_KOTLIN}/view/DesktopActivity.kt": "package com.orailnoor.droiddesk.view\nimport com.orailnoor.droiddesk.display.remoteStartupDelay\nclass DesktopActivity { val g = DesktopReadinessGate {}; fun s() = handler.postDelayed({ launchSession() }, remoteStartupDelay()) }\n",
+            },
+            {
+                f"{ANDROID_KOTLIN}/display/StartupTiming.kt": "package com.orailnoor.droiddesk.display\ninternal fun scheduleBoot(h: android.os.Handler, ms: Long, r: Runnable) = h.postDelayed(r, ms)\n",
+                f"{ANDROID_KOTLIN}/view/DesktopActivity.kt": "package com.orailnoor.droiddesk.view\nimport com.orailnoor.droiddesk.display.scheduleBoot as bootLater\nclass DesktopActivity { val g = DesktopReadinessGate {}; fun s(h: android.os.Handler, r: Runnable) = bootLater(h, 250L, r) }\n",
+            },
+            {
+                f"{ANDROID_KOTLIN}/display/StartupTiming.kt": "package com.orailnoor.droiddesk.display\ninternal fun android.os.Handler.extBoot(ms: Long, r: Runnable) = postDelayed(r, ms)\n",
+                f"{ANDROID_KOTLIN}/view/DesktopActivity.kt": "package com.orailnoor.droiddesk.view\nimport com.orailnoor.droiddesk.display.extBoot as bootLater\nclass DesktopActivity { val g = DesktopReadinessGate {}; fun s(h: android.os.Handler, r: Runnable) = h.bootLater(250L, r) }\n",
+            },
+            {
+                f"{ANDROID_KOTLIN}/display/StartupTiming.kt": "package com.orailnoor.droiddesk.display\nobject BootObj { fun scheduleBoot(h: android.os.Handler, ms: Long, r: Runnable) = h.postDelayed(r, ms) }\n",
+                f"{ANDROID_KOTLIN}/view/DesktopActivity.kt": "package com.orailnoor.droiddesk.view\nimport com.orailnoor.droiddesk.display.BootObj.scheduleBoot as bootLater\nclass DesktopActivity { val g = DesktopReadinessGate {}; fun s(h: android.os.Handler, r: Runnable) = bootLater(h, 250L, r) }\n",
+            },
+            {
+                f"{ANDROID_KOTLIN}/display/StartupTiming.kt": "package com.orailnoor.droiddesk.display\nobject BootObj { fun scheduleBoot(h: android.os.Handler, ms: Long, r: Runnable) = h.postDelayed(r, ms) }\n",
+                f"{ANDROID_KOTLIN}/view/DesktopActivity.kt": "package com.orailnoor.droiddesk.view\nimport com.orailnoor.droiddesk.display.BootObj as BO\nclass DesktopActivity { val g = DesktopReadinessGate {}; fun s(h: android.os.Handler, r: Runnable) = BO.scheduleBoot(h, 250L, r) }\n",
+            },
+            {
+                f"{ANDROID_KOTLIN}/display/StartupTiming.kt": "package com.orailnoor.droiddesk.display\nclass BootCls { companion object { fun scheduleBoot(h: android.os.Handler, ms: Long, r: Runnable) = h.postDelayed(r, ms) }; fun runBoot(h: android.os.Handler, ms: Long, r: Runnable) = h.postDelayed(r, ms) }\n",
+                f"{ANDROID_KOTLIN}/view/DesktopActivity.kt": "package com.orailnoor.droiddesk.view\nimport com.orailnoor.droiddesk.display.BootCls.Companion as BCC\nclass DesktopActivity { val g = DesktopReadinessGate {}; fun s(h: android.os.Handler, r: Runnable) = BCC.scheduleBoot(h, 250L, r) }\n",
+            },
+            {
+                f"{ANDROID_KOTLIN}/display/StartupTiming.kt": "package com.orailnoor.droiddesk.display\nclass BootCls { fun runBoot(h: android.os.Handler, ms: Long, r: Runnable) = h.postDelayed(r, ms) }\n",
+                f"{ANDROID_KOTLIN}/view/DesktopActivity.kt": "package com.orailnoor.droiddesk.view\nimport com.orailnoor.droiddesk.display.BootCls as BC\ntypealias LocalBC = BC\nclass DesktopActivity { val g = DesktopReadinessGate {}; fun s(b: LocalBC, h: android.os.Handler, r: Runnable) = b.runBoot(h, 250L, r) }\n",
+            },
+            {
+                f"{ANDROID_KOTLIN}/display/StartupTiming.kt": "package com.orailnoor.droiddesk.display\ninternal fun remoteStartupDelay(): Long = 250L\n",
+                f"{ANDROID_KOTLIN}/view/DesktopActivity.kt": "package com.orailnoor.droiddesk.view\nimport com.orailnoor.droiddesk.display.remoteStartupDelay as bootDelay\nclass DesktopActivity { val g = DesktopReadinessGate {}; fun s() = handler.postDelayed({ launchSession() }, bootDelay()) }\n",
+            },
+            {
+                f"{ANDROID_KOTLIN}/display/StartupTiming.kt": "package com.orailnoor.droiddesk.display\nclass BootCls { companion object { fun scheduleBoot(h: android.os.Handler, ms: Long, r: Runnable) = h.postDelayed(r, ms) } }\n",
+                f"{ANDROID_KOTLIN}/view/DesktopActivity.kt": "package com.orailnoor.droiddesk.view\nimport com.orailnoor.droiddesk.display.BootCls.Companion.scheduleBoot as bootLater\nclass DesktopActivity { val g = DesktopReadinessGate {}; fun s(h: android.os.Handler, r: Runnable) = bootLater(h, 250L, r) }\n",
+            },
+            {
+                f"{ANDROID_KOTLIN}/display/StartupTiming.kt": "package com.orailnoor.droiddesk.display\nclass Timer\ninternal fun Timer.extDelay(): Long = 250L\n",
+                f"{ANDROID_KOTLIN}/view/DesktopActivity.kt": "package com.orailnoor.droiddesk.view\nimport com.orailnoor.droiddesk.display.Timer as T\nimport com.orailnoor.droiddesk.display.extDelay as ms\nclass DesktopActivity { val g = DesktopReadinessGate {}; fun s(t: T) = handler.postDelayed({ launchSession() }, t.ms()) }\n",
             },
         ):
             with self.subTest(files=files):
