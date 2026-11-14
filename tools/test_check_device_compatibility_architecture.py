@@ -105,6 +105,12 @@ class DeviceCompatibilityArchitectureGuardTest(unittest.TestCase):
                     '    require(mode.refreshRate > 0f && timeoutSeconds <= 60)\n'
                     '}\n'
                     'fun getDeviceInfo() = mapOf("model" to Build.MODEL, "brand" to Build.BRAND)\n'
+                    'fun handleChannel(call: String, result: io.flutter.plugin.common.MethodChannel.Result) = when (call) {\n'
+                    '    "getDeviceInfo" -> {\n'
+                    '        result.success(mapOf("model" to Build.MODEL, "brand" to Build.BRAND))\n'
+                    '    }\n'
+                    '    else -> Unit\n'
+                    '}\n'
                 ),
                 f"{ANDROID_KOTLIN}/display/DisplayRepository.kt": (
                     "import android.os.Build as SdkBuild\n"
@@ -174,8 +180,12 @@ class DeviceCompatibilityArchitectureGuardTest(unittest.TestCase):
                     "import com.orailnoor.droiddesk.display.DisplayProfilePolicy as ProfilePolicy\n"
                     "import com.orailnoor.droiddesk.display.STARTUP_DELAY_MS\n"
                     "class DesktopActivity {\n"
-                    "    companion object { private const val FADE_DELAY_MS = 250L; private const val TIMEOUT_MS = 250L * 4 }\n"
+                    "    companion object { private const val FADE_DELAY_MS = 250L; private const val TIMEOUT_MS = 250L * 4; private const val delayMillis = 1000L }\n"
                     "    class CtorShadowOk(@param:[Suppress(\"UNUSED_PARAMETER\")] val FADE_DELAY_MS: Long = 1000L) { fun ok(handler: android.os.Handler) = handler.postDelayed({ launchSession() }, FADE_DELAY_MS) }\n"
+                    "    class CtorSelfDefaultOk(delayMillis: Long = delayMillis) { init { handler.postDelayed({ launchSession() }, delayMillis) } }\n"
+                    "    class CtorValSelfDefaultOk(val delayMillis: Long = delayMillis) { init { handler.postDelayed({ launchSession() }, delayMillis) } }\n"
+                    "    class CtorEarlierParamShadowOk(FADE_DELAY_MS: Long = 1000L, effectiveDelay: Long = FADE_DELAY_MS) { init { handler.postDelayed({ launchSession() }, effectiveDelay) } }\n"
+                    "    class CtorCompanionSelfDefaultOk(ownDelay: Long = ownDelay) { companion object { private const val ownDelay = 1000L }; init { handler.postDelayed({ launchSession() }, ownDelay) } }\n"
                     "    val fallbackProfile = ProfilePolicy.phoneDefaultProfile()\n"
                     "    val defaultSettings = ProfilePolicy.defaults(ProfileKind.PHONE)\n"
                     "    class OtherHelper(val onDone: () -> Unit = {}) {\n"
@@ -337,6 +347,9 @@ class DeviceCompatibilityArchitectureGuardTest(unittest.TestCase):
             (f"{ANDROID_KOTLIN}/MainActivity.kt", 'val u = "https://a.test"; val d = Build.DEVICE'),
             (f"{ANDROID_KOTLIN}/MainActivity.kt", 'val b = Build.BRAND.lowercase() == "nubia"'),
             (f"{ANDROID_KOTLIN}/MainActivity.kt", "fun check() = when (Build.MODEL) { else -> Unit }"),
+            (f"{ANDROID_KOTLIN}/MainActivity.kt", 'fun shouldRestart() = mapOf("model" to Build.MODEL)["model"] == "OtherDevice"'),
+            (f"{ANDROID_KOTLIN}/MainActivity.kt", 'fun getDeviceInfo() = mapOf("model" to Build.MODEL)\nfun shouldRestart() = getDeviceInfo()["model"] == "OtherDevice"'),
+            (f"{ANDROID_KOTLIN}/MainActivity.kt", 'fun handle(c: String) = when (c) { "getDeviceInfo" -> { val m = mapOf("model" to Build.MODEL); m["model"] == "OtherDevice" } else -> false }'),
             (f"{ANDROID_KOTLIN}/display/DisplayRepository.kt", "import android.os.Build as DeviceBuild\nval m = DeviceBuild.MODEL"),
             (f"{ANDROID_KOTLIN}/runtime/LinuxRuntime.kt", "import android.os.Build as `SdkBuild`\nval d = `SdkBuild`.DEVICE"),
             (f"{ANDROID_KOTLIN}/display/DisplayRepository.kt", "typealias SdkBuild = android.os.Build\nval b = SdkBuild.BRAND"),
@@ -1048,6 +1061,22 @@ class DeviceCompatibilityArchitectureGuardTest(unittest.TestCase):
             (
                 f"{ANDROID_KOTLIN}/compositor/CompositorService.kt",
                 "class CompositorService { fun start(handler: android.os.Handler, r: Runnable) = handler.postDelayed(r, 250) }",
+            ),
+            (
+                f"{ANDROID_KOTLIN}/view/DesktopActivity.kt",
+                "private const val delayMillis = 250L\nclass DesktopActivity(delayMillis: Long = delayMillis) { val g = DesktopReadinessGate {}; init { handler.postDelayed({ launchSession() }, delayMillis) } }",
+            ),
+            (
+                f"{ANDROID_KOTLIN}/view/DesktopActivity.kt",
+                "private const val delayMillis = 250L\nclass DesktopActivity(val delayMillis: Long = delayMillis) { val g = DesktopReadinessGate {}; init { handler.postDelayed({ launchSession() }, delayMillis) } }",
+            ),
+            (
+                f"{ANDROID_KOTLIN}/view/DesktopActivity.kt",
+                "class DesktopActivity(val baseDelay: Long = 250L, delayMillis: Long = baseDelay) { val g = DesktopReadinessGate {}; companion object { private const val baseDelay = 1000L }; init { handler.postDelayed({ launchSession() }, delayMillis) } }",
+            ),
+            (
+                f"{ANDROID_KOTLIN}/view/DesktopActivity.kt",
+                "class DesktopActivity(baseDelay: Long = 250L, delayMillis: Long = baseDelay) { val g = DesktopReadinessGate {}; companion object { private const val baseDelay = 1000L }; init { handler.postDelayed({ launchSession() }, delayMillis) } }",
             ),
             (
                 f"{ANDROID_KOTLIN}/view/DesktopActivity.kt",
